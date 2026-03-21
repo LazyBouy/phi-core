@@ -1,78 +1,121 @@
 //! The core agent loop: prompt → LLM stream → tool execution → repeat.
 //!
-//! This is the heart of phi-core. Inspired by pi-agent-core's agent-loop.ts:
+//! This is the heart of phi-core. Two public entry points share the same inner logic:
 //!
-//! - `agent_loop()` starts with new prompt messages
-//! - `agent_loop_continue()` resumes from existing context
+//! - [`agent_loop`] — starts a fresh run with new prompt messages
+//! - [`agent_loop_continue`] — resumes from existing context (retries, branching)
 //!
-//! Both return a stream of `AgentEvent`s.
+//! Both return the *new* [`AgentMessage`]s produced by this call. Real-time progress is
+//! pushed to the caller-supplied `tx: mpsc::UnboundedSender<AgentEvent>` channel.
+//!
+//! # Hook / Event Ordering Invariant
+//!
+//! Every run enforces this strict ordering, regardless of how many turns or tool calls occur:
+//!
+//! ```text
+//! before_loop → AgentStart
+//!   before_turn → TurnStart
+//!     [MessageStart/End for initial prompts — first turn of agent_loop() only]
+//!     [MessageStart/End for injected steering messages]
+//!     [LLM: MessageStart → MessageUpdate* → MessageEnd]
+//!     [per tool call:]
+//!       before_tool_execution → ToolExecutionStart
+//!         (before_tool_execution_update → ToolExecutionUpdate → after_tool_execution_update)*
+//!       ToolExecutionEnd → after_tool_execution
+//!   TurnEnd → after_turn
+//!   (repeat inner block for each follow-up / steering-triggered turn)
+//! AgentEnd → after_loop
+//! ```
+//!
+//! Hooks returning `false` short-circuit: `before_loop` aborts before `AgentStart` is emitted;
+//! `before_turn` skips the turn without emitting `TurnStart`/`TurnEnd`;
+//! `before_tool_execution` skips the tool call without emitting `ToolExecutionStart`/`End`.
 
 use crate::context::{
-    /*
-    In Rust, self in a use statement means "also import the module itself, not just its contents".
-    ​
-
-    So this line does two things at once:
-
-    rust
-    use crate::context::{self, CompactionStrategy, ...};
-    // 1. `context` → you can call `context::some_function()` directly
-    // 2. `CompactionStrategy` etc → imported as bare names
-    */
-    self, CompactionStrategy, ContextConfig, DefaultCompaction, ExecutionLimits, ExecutionTracker,
+    CompactionStrategy, ContextConfig, DefaultCompaction, ExecutionLimits, ExecutionTracker,
 };
 
 use crate::provider::{ModelConfig, StreamConfig, StreamEvent, StreamProvider, ToolDefinition};
 use crate::types::*;
 use std::sync::Arc;
 
-/*
-Fn is literally a trait in Rust.
-Just like AgentTool was a trait for structs, Fn is a trait for callables.
-The difference from a struct trait is that Fn is anonymous — you don't need to name and implement a struct,
-you just pass a closure directly.
-In Python terms: it's the difference between subclassing an ABC vs just passing a lambda.
-
-Box<dyn Fn> = "I don't care what it is, only that it's callable with this signature" — pure behavioral polymorphism, no identity needed
-*/
-/// Type alias for convert_to_llm callback.
-pub type ConvertToLlmFn = Box<dyn Fn(&[AgentMessage]) -> Vec<Message> + Send + Sync>; // AgentMessage[] → Message[]
-/// Type alias for transform_context callback.
+// ── Context transformation callbacks ────────────────────────────────────────
+/// Converts `AgentMessage[]` → `Message[]` before each LLM call.
+/// All hook types use `Arc` (shared ownership) so they can be cloned into closures
+/// and stored without lifetime complications. `Box<dyn Fn>` would suffice for single-owner
+/// cases but `Arc` makes it trivially cheap to share across async tasks.
+pub type ConvertToLlmFn = Box<dyn Fn(&[AgentMessage]) -> Vec<Message> + Send + Sync>;
+/// Transforms the full context before `convert_to_llm` (for pruning, reordering, injection).
 pub type TransformContextFn = Box<dyn Fn(Vec<AgentMessage>) -> Vec<AgentMessage> + Send + Sync>;
-/// Type alias for steering/follow-up message callbacks.
+/// Returns pending messages (steering interrupts or follow-up work) when polled.
 pub type GetMessagesFn = Box<dyn Fn() -> Vec<AgentMessage> + Send + Sync>;
 
-// ****** Turn Hooks ******
-/// Called before each LLM turn. Return `false` to abort the turn.
-pub type BeforeTurnFn = Arc<dyn Fn(&[AgentMessage], usize) -> bool + Send + Sync>;
-/// Called after each LLM turn with the current messages and the turn's usage.
-pub type AfterTurnFn = Arc<dyn Fn(&[AgentMessage], &Usage) + Send + Sync>; // Usage is from types.rs
-
-// ****** Loop Hooks ******
-/// Called before each Agent loop. Return `false` to abort the loop.
+// ── Loop hooks ───────────────────────────────────────────────────────────────
+/// Called once before the entire agent loop begins (before `AgentStart` is emitted).
+///
+/// Arguments: `(messages, loop_index)` — `messages` is the full context at the time of the call;
+/// `loop_index` is always `0` (reserved for future multi-loop scenarios).
+/// Return `false` to abort: `AgentEnd` is emitted immediately with an empty message list.
 pub type BeforeLoopFn = Arc<dyn Fn(&[AgentMessage], usize) -> bool + Send + Sync>;
-/// Called after each Agent loop with the current messages and the loop's usage.
-pub type AfterLoopFn = Arc<dyn Fn(&[AgentMessage], &Usage) + Send + Sync>; // Usage is from types.rs
+/// Called once after the entire agent loop ends (after `AgentEnd` is emitted).
+///
+/// Arguments: `(new_messages, accumulated_usage)` — `new_messages` are the messages produced
+/// by this loop call; `accumulated_usage` sums input/output tokens across all turns.
+pub type AfterLoopFn = Arc<dyn Fn(&[AgentMessage], &Usage) + Send + Sync>;
 
-/// Called when the LLM returns a `StopReason::Error`.
+// ── Turn hooks ───────────────────────────────────────────────────────────────
+/// Called before each LLM turn (before `TurnStart` is emitted).
+///
+/// Arguments: `(messages, turn_index)` — `messages` is the full context (steering messages
+/// queued for *this* turn are not yet visible); `turn_index` is 0-based.
+/// Return `false` to abort the turn: no `TurnStart`/`TurnEnd` events are emitted,
+/// but `AgentEnd` still fires normally.
+pub type BeforeTurnFn = Arc<dyn Fn(&[AgentMessage], usize) -> bool + Send + Sync>;
+/// Called after each LLM turn (after `TurnEnd` is emitted).
+///
+/// Arguments: `(messages, turn_usage)` — `turn_usage` covers only this turn's tokens.
+/// Fires on both the normal path and the error/abort path.
+pub type AfterTurnFn = Arc<dyn Fn(&[AgentMessage], &Usage) + Send + Sync>;
+
+// ── Tool execution hooks ─────────────────────────────────────────────────────
+/// Called before each tool call (before `ToolExecutionStart` is emitted).
+///
+/// Arguments: `(tool_name, tool_call_id, args)`.
+/// Return `false` to skip the call: an error `ToolResult` is synthesised so the LLM still
+/// receives a response, but `ToolExecutionStart`/`End` are **not** emitted.
+pub type BeforeToolExecutionFn = Arc<dyn Fn(&str, &str, &serde_json::Value) -> bool + Send + Sync>;
+/// Called after each tool call (after `ToolExecutionEnd` is emitted).
+///
+/// Arguments: `(tool_name, tool_call_id, is_error)`.
+pub type AfterToolExecutionFn = Arc<dyn Fn(&str, &str, bool) + Send + Sync>;
+/// Called before each incremental tool update (before `ToolExecutionUpdate` is emitted).
+///
+/// Fires every time a tool calls `ctx.on_update(partial)` — potentially many times per call
+/// (e.g. each line of bash output). Arguments: `(tool_name, tool_call_id, text_content)`.
+/// Return `false` to suppress the streaming event; the tool keeps running and its final
+/// `ToolResult` (what the LLM sees) is **unaffected**.
+pub type BeforeToolExecutionUpdateFn = Arc<dyn Fn(&str, &str, &str) -> bool + Send + Sync>;
+/// Called after each incremental tool update (after `ToolExecutionUpdate` is emitted).
+///
+/// Only fires when the update was *not* suppressed by `BeforeToolExecutionUpdateFn`.
+/// Arguments: `(tool_name, tool_call_id, text_content)`.
+pub type AfterToolExecutionUpdateFn = Arc<dyn Fn(&str, &str, &str) + Send + Sync>;
+
+/// Called when the LLM returns `StopReason::Error`. Argument: the error message string.
 pub type OnErrorFn = Arc<dyn Fn(&str) + Send + Sync>;
 use tokio::sync::mpsc;
 use tracing::warn;
 
-/// Configuration for the agent loop
+/// All static settings for a single [`agent_loop`] / [`agent_loop_continue`] call.
+///
+/// Build with the public fields directly or via [`crate::agent::Agent`]'s builder methods.
+/// The config is borrowed (`&AgentLoopConfig`) throughout the loop — it is never mutated.
+///
+/// ## Lifecycle hooks
+///
+/// All hook fields are `Option<Arc<dyn Fn(...)>>`. `None` means "no hook" (zero overhead).
+/// See the module-level doc for the guaranteed ordering relative to [`AgentEvent`]s.
 pub struct AgentLoopConfig {
-    /*
-    'a is a lifetime annotation — Rust's way of saying "this struct borrows data,
-    and that borrowed data must live at least as long as this struct does".
-
-    Previous version had the below declaration for provider:
-
-    pub struct AgentLoopConfig<'a> {
-        pub provider: &'a dyn StreamProvider,
-        ...
-    //}
-
-    */
     pub provider: Arc<dyn StreamProvider>,
     pub model: String,
     pub api_key: String,
@@ -129,6 +172,16 @@ pub struct AgentLoopConfig {
     /// Called after each Agent loop with the current messages and the loop's usage.
     pub after_loop: Option<AfterLoopFn>,
 
+    //******* Callbacks Tool Execution *******
+    /// Called before each tool execution. Return `false` to skip the tool call.
+    pub before_tool_execution: Option<BeforeToolExecutionFn>,
+    /// Called after each tool execution.
+    pub after_tool_execution: Option<AfterToolExecutionFn>,
+    /// Called before each ToolExecutionUpdate event. Return `false` to suppress the event.
+    pub before_tool_execution_update: Option<BeforeToolExecutionUpdateFn>,
+    /// Called after each ToolExecutionUpdate event.
+    pub after_tool_execution_update: Option<AfterToolExecutionUpdateFn>,
+
     /// Called when the LLM returns a `StopReason::Error`.
     pub on_error: Option<OnErrorFn>,
 
@@ -151,13 +204,13 @@ fn default_convert_to_llm(messages: &[AgentMessage]) -> Vec<Message> {
 }
 
 /*
-DESIGN: Why agent_loop takes 5 separate parameters — each plays a different role:
+DESIGN: Why agent_loop takes these separate parameters — each plays a different role:
   `prompts`  = NEW INPUT    — the messages being added THIS call (taken by value; appended to
-                              context; also tracked separately so only new messages are returned)
+                              context; also emitted as MessageStart/End inside the first TurnStart)
   `context`  = ACCUMULATOR  — the full conversation history (system prompt + all past turns);
                               mutated in-place as the loop runs each turn
   `config`   = STATIC       — model, callbacks, limits; never changes within a single call
-  `tx`       = OBSERVER     — channel to push real-time events to external callers (UI, logger)
+  `tx`       = OBSERVER     — channel to push real-time AgentEvents to external callers (UI, logger)
   `cancel`   = ABORT SIGNAL — cooperative cancellation; any code holding this token can stop the loop
 
 Why return Vec<AgentMessage> (not the whole context)?
@@ -165,19 +218,29 @@ The caller already holds `context` via the `&mut` reference. Returning only the 
 from this call avoids duplicating the entire history — the caller can append to their own copy.
 */
 /// Start an agent loop with new prompt messages.
+///
+/// Appends `prompts` to `context`, runs the full hook/event lifecycle (see module doc),
+/// and returns only the messages produced by this call. Events are pushed to `tx` in real time.
 pub async fn agent_loop(
-    prompts: Vec<AgentMessage>, // NEW INPUT — messages being added this call (owned; added to context)
+    prompts: Vec<AgentMessage>, // NEW INPUT — added to context and emitted inside first TurnStart
     context: &mut AgentContext, // ACCUMULATOR — full history; grows in-place each turn
     config: &AgentLoopConfig, // STATIC SETTINGS — model, tools, callbacks; unchanged during the loop
-    // mpsc = multi-producer, single-consumer channel — a Rust async pipe.
-    // tx is the sending end, and usually UI/caller holds the receiving end.
-    tx: mpsc::UnboundedSender<AgentEvent>, // OBSERVER — taken by value; cloned internally for sub-tasks
-
-    // The Kill Switch — a CancellationToken allows cooperative cancellation across async tasks.
-    // CancellationToken is a shared flag that any part of the system can flip to cancelled .
-    // The loop checks it between steps and aborts if it's set, allowing external code (like a UI button) to gracefully stop the agent.
-    cancel: tokio_util::sync::CancellationToken, // ABORT — checked at every loop step; child tokens derived for tools
+    tx: mpsc::UnboundedSender<AgentEvent>, // OBSERVER — taken by value; all AgentEvents pushed here
+    cancel: tokio_util::sync::CancellationToken, // ABORT — checked between every major step; child tokens for tools
 ) -> Vec<AgentMessage> {
+    // before_loop hook — fires before AgentStart; false aborts the entire loop
+    if let Some(ref before_loop) = config.before_loop {
+        if !before_loop(&context.messages, 0) {
+            tx.send(AgentEvent::AgentEnd {
+                messages: vec![],
+                timestamp: chrono::Utc::now(),
+                rejection: None,
+            })
+            .ok();
+            return vec![];
+        }
+    }
+
     // only the NEW messages produced by this call (not the full context history)
     tx.send(AgentEvent::AgentStart {
         agent_id: context
@@ -262,20 +325,15 @@ pub async fn agent_loop(
                     })
                     .ok();
 
-                    /*
-                    Silent Rejection: The agent loop is aborted without an explicit error message to the user.
-                    tx.send(AgentEvent::AgentEnd { messages: vec![] }).ok();
-
-                    An improvement would be to send the rejection reason back to the consumer of gentEvent::AgentEnd as follows:
-                    AgentEnd { messages: Vec<AgentMessage>, rejection: Option<String> }
-                    */
+                    // Rejection: emit InputRejected (already sent above) then AgentEnd with
+                    // rejection reason so callers can distinguish a filter abort from a normal end.
                     tx.send(AgentEvent::AgentEnd {
                         messages: vec![],
                         timestamp: chrono::Utc::now(),
                         rejection: Some(reason.clone()),
                     })
                     .ok();
-                    return vec![]; //vec![] is a Rust macro that creates an empty Vec
+                    return vec![];
                 }
             }
         }
@@ -312,34 +370,16 @@ pub async fn agent_loop(
         context.messages.push(prompt.clone());
     }
 
-    tx.send(AgentEvent::TurnStart {
-        turn_index: 0,
-        timestamp: chrono::Utc::now(),
-        triggered_by: config.first_turn_trigger.clone(),
-    })
-    .ok();
-
-    // Emit events for each prompt message
-    for prompt in &prompts {
-        tx.send(AgentEvent::MessageStart {
-            message: prompt.clone(),
-        })
-        .ok();
-
-        tx.send(AgentEvent::MessageEnd {
-            /*
-            Carrying the full message in MessageEnd is a defensive design choice —
-            it gives subscribers a single source of truth without requiring them to maintain accumulator state.
-            Any subscriber that missed some deltas (late subscriber, dropped event) can still reconstruct
-            correctly from MessageEnd alone.
-            */
-            message: prompt.clone(),
-        })
-        .ok();
-    }
-
     // Run the main loop (streaming + tools + steering + limits + callbacks)
-    run_loop(context, &mut new_messages, config, &tx, &cancel).await;
+    let loop_usage = run_loop(
+        context,
+        &mut new_messages,
+        config,
+        &tx,
+        &cancel,
+        Some(&prompts),
+    )
+    .await;
 
     tx.send(AgentEvent::AgentEnd {
         messages: new_messages.clone(),
@@ -347,23 +387,34 @@ pub async fn agent_loop(
         rejection: None,
     })
     .ok();
+    // after_loop hook — fires after AgentEnd
+    if let Some(ref after_loop) = config.after_loop {
+        after_loop(&new_messages, &loop_usage);
+    }
     new_messages
 }
 
 /*
 DESIGN: agent_loop_continue vs agent_loop
 Unlike agent_loop, this takes NO `prompts` — the conversation already exists in `context`.
-Used for retries and "keep going" scenarios where the caller adds follow-up messages
-via the steering/follow-up queues in config, not by passing them directly.
+Used for retries and session-branching scenarios where the caller has already appended messages
+(or queued them via steering/follow-up callbacks) and simply wants to resume execution.
+No TurnStart/MessageStart events for prior context are re-emitted — the loop starts at turn 0
+from whatever state context.messages is in.
 */
-/// Continue an agent loop from existing context (for retries).
+/// Resume an agent loop from existing context without new prompts.
+///
+/// Use for retries, session branching, or re-runs from a specific point. The context must be
+/// non-empty and must not end with an assistant message. New follow-up/steering messages can
+/// be injected via `config.get_follow_up_messages` / `config.get_steering_messages`.
+///
+/// Returns only the messages produced by this continuation call.
 pub async fn agent_loop_continue(
-    context: &mut AgentContext, // ACCUMULATOR — existing history to resume from (must be non-empty)
+    context: &mut AgentContext, // ACCUMULATOR — existing history (must be non-empty, not end on assistant)
     config: &AgentLoopConfig,   // STATIC SETTINGS — same config as the original call
-    tx: mpsc::UnboundedSender<AgentEvent>, // OBSERVER — event channel for this continuation
+    tx: mpsc::UnboundedSender<AgentEvent>, // OBSERVER — all AgentEvents pushed here
     cancel: tokio_util::sync::CancellationToken, // ABORT — fresh or shared token for this continuation
 ) -> Vec<AgentMessage> {
-    // only messages produced by this continuation (not the full context)
     assert!(
         !context.messages.is_empty(),
         "Cannot continue: no messages in context"
@@ -378,6 +429,19 @@ pub async fn agent_loop_continue(
 
     let mut new_messages: Vec<AgentMessage> = Vec::new();
 
+    // before_loop hook — fires before AgentStart; false aborts the entire loop
+    if let Some(ref before_loop) = config.before_loop {
+        if !before_loop(&context.messages, 0) {
+            tx.send(AgentEvent::AgentEnd {
+                messages: vec![],
+                timestamp: chrono::Utc::now(),
+                rejection: None,
+            })
+            .ok();
+            return vec![];
+        }
+    }
+
     tx.send(AgentEvent::AgentStart {
         agent_id: context
             .agent_id
@@ -391,14 +455,8 @@ pub async fn agent_loop_continue(
         metadata: None,
     })
     .ok();
-    tx.send(AgentEvent::TurnStart {
-        turn_index: 0,
-        timestamp: chrono::Utc::now(),
-        triggered_by: config.first_turn_trigger.clone(),
-    })
-    .ok();
 
-    run_loop(context, &mut new_messages, config, &tx, &cancel).await;
+    let loop_usage = run_loop(context, &mut new_messages, config, &tx, &cancel, None).await;
 
     tx.send(AgentEvent::AgentEnd {
         messages: new_messages.clone(),
@@ -406,23 +464,33 @@ pub async fn agent_loop_continue(
         rejection: None,
     })
     .ok();
+    // after_loop hook — fires after AgentEnd
+    if let Some(ref after_loop) = config.after_loop {
+        after_loop(&new_messages, &loop_usage);
+    }
     new_messages
 }
 
-/// Main loop logic shared by agent_loop and agent_loop_continue.
+/// Core loop shared by [`agent_loop`] and [`agent_loop_continue`]. Never called directly.
 ///
-/// Outer loop: continues when follow-up messages arrive after agent would stop.
-/// Inner loop: process tool calls and steering messages.
+/// **Outer loop** — repeats when `get_follow_up_messages` returns work after the agent would stop.
+/// **Inner loop** — repeats when the LLM requests tool calls or steering messages arrive mid-turn.
+///
+/// Per-turn event ordering (enforced every iteration):
+/// `before_turn` → `TurnStart` → [prompt/steering messages] → [LLM stream] → [tools] → `TurnEnd` → `after_turn`
+///
+/// Returns accumulated [`Usage`] across all turns so the caller can pass it to `after_loop`.
 async fn run_loop(
     context: &mut AgentContext, // ACCUMULATOR — all messages (grows as turns complete)
-    new_messages: &mut Vec<AgentMessage>, // RESULT COLLECTOR — only messages added in this call (subset of context)
-    config: &AgentLoopConfig,             // STATIC SETTINGS — unchanged for lifetime of this call
-    tx: &mpsc::UnboundedSender<AgentEvent>, // OBSERVER — borrowed (not taken); cloned for sub-tasks
-    cancel: &tokio_util::sync::CancellationToken, // ABORT — borrowed; child tokens derived for each tool
-) {
+    new_messages: &mut Vec<AgentMessage>, // RESULT COLLECTOR — only messages added in this call
+    config: &AgentLoopConfig,   // STATIC SETTINGS — unchanged for lifetime of this call
+    tx: &mpsc::UnboundedSender<AgentEvent>, // OBSERVER — borrowed; cloned into tool closures as needed
+    cancel: &tokio_util::sync::CancellationToken, // ABORT — borrowed; child tokens derived per tool
+    first_turn_prompts: Option<&[AgentMessage]>, // Initial prompts (agent_loop only); None for agent_loop_continue
+) -> Usage {
     let mut first_turn = true;
-    let mut turn_number: usize = 0;
-    let mut turn_index: u32 = 1;
+    let mut turn: usize = 0; // single counter: passed to hooks (as usize) and TurnStart events (as u32)
+    let mut loop_usage = Usage::default(); // accumulated usage across all turns, returned for after_loop
     let mut tracker = config
         .execution_limits
         .as_ref()
@@ -446,7 +514,7 @@ async fn run_loop(
     loop {
         //loop {} is Rust's infinite loop construct, equivalent to Python's while True:
         if cancel.is_cancelled() {
-            return;
+            return loop_usage;
         }
 
         let mut steering_after_tools: Option<Vec<AgentMessage>> = None;
@@ -454,41 +522,18 @@ async fn run_loop(
         // Inner loop: runs at least once, then continues if tool calls or pending messages
         loop {
             if cancel.is_cancelled() {
-                return;
+                return loop_usage;
             }
 
-            if !first_turn {
-                tx.send(AgentEvent::TurnStart {
-                    turn_index,
-                    timestamp: chrono::Utc::now(),
-                    triggered_by: TurnTrigger::FollowUp,
-                })
-                .ok();
-                turn_index += 1;
+            // Determine the trigger type for this turn's TurnStart event
+            let turn_trigger = if first_turn {
+                config.first_turn_trigger.clone()
             } else {
-                first_turn = false;
-            }
+                TurnTrigger::FollowUp
+            };
 
-            // Inject pending messages
-            if !pending.is_empty() {
-                for msg in pending.drain(..) {
-                    // .drain(..) is a way to efficiently take all messages out of pending, leaving it empty for the next batch (python: m.pop(0) in a loop until empty)
-                    tx.send(AgentEvent::MessageStart {
-                        message: msg.clone(),
-                    })
-                    .ok();
-                    tx.send(AgentEvent::MessageEnd {
-                        message: msg.clone(),
-                    })
-                    .ok();
-                    context.messages.push(msg.clone());
-                    new_messages.push(msg);
-                }
-            }
-
-            // Check execution limits
+            // Check execution limits BEFORE before_turn so we don't fire hooks for an impossible turn
             if let Some(ref tracker) = tracker {
-                // same as if let Some(tracker) = &tracker {}
                 if let Some(reason) = tracker.check_limits() {
                     warn!("Execution limit reached: {}", reason);
                     let limit_msg = AgentMessage::Llm(Message::User {
@@ -507,17 +552,63 @@ async fn run_loop(
                     .ok();
                     context.messages.push(limit_msg.clone());
                     new_messages.push(limit_msg);
-                    return;
+                    return loop_usage;
                 }
             }
 
-            // before_turn callback — abort if it returns false
+            // before_turn hook — fires BEFORE TurnStart; false aborts this turn
             if let Some(ref before_turn) = config.before_turn {
-                if !before_turn(&context.messages, turn_number) {
-                    return;
+                if !before_turn(&context.messages, turn) {
+                    return loop_usage;
                 }
             }
-            turn_number += 1;
+
+            // TurnStart — fires AFTER before_turn hook
+            tx.send(AgentEvent::TurnStart {
+                turn_index: turn as u32,
+                timestamp: chrono::Utc::now(),
+                triggered_by: turn_trigger,
+            })
+            .ok();
+
+            let was_first_turn = first_turn;
+            if first_turn {
+                first_turn = false;
+            }
+            turn += 1;
+
+            // On the first turn of agent_loop(), emit events for the initial prompt messages
+            // (these are after TurnStart so they appear inside the turn in the event stream)
+            if was_first_turn {
+                if let Some(prompts) = first_turn_prompts {
+                    for prompt in prompts {
+                        tx.send(AgentEvent::MessageStart {
+                            message: prompt.clone(),
+                        })
+                        .ok();
+                        tx.send(AgentEvent::MessageEnd {
+                            message: prompt.clone(),
+                        })
+                        .ok();
+                    }
+                }
+            }
+
+            // Inject pending steering/follow-up messages (after TurnStart — they are part of this turn)
+            if !pending.is_empty() {
+                for msg in pending.drain(..) {
+                    tx.send(AgentEvent::MessageStart {
+                        message: msg.clone(),
+                    })
+                    .ok();
+                    tx.send(AgentEvent::MessageEnd {
+                        message: msg.clone(),
+                    })
+                    .ok();
+                    context.messages.push(msg.clone());
+                    new_messages.push(msg);
+                }
+            }
 
             // Compact context if configured (tiered: tool outputs → summarize → drop)
             if let Some(ref ctx_config) = config.context_config {
@@ -551,17 +642,24 @@ async fn run_loop(
                             on_error(err_str);
                         }
                     }
-                    // Call after_turn even on error/abort so callers tracking usage don't miss this turn
-                    if let Some(ref after_turn) = config.after_turn {
-                        after_turn(&context.messages, usage);
-                    }
+                    // Accumulate usage into loop total
+                    loop_usage.input += usage.input;
+                    loop_usage.output += usage.output;
+                    loop_usage.cache_read += usage.cache_read;
+                    loop_usage.cache_write += usage.cache_write;
+                    loop_usage.total_tokens += usage.total_tokens;
+                    // TurnEnd fires BEFORE after_turn
                     tx.send(AgentEvent::TurnEnd {
                         message: agent_msg,
                         timestamp: chrono::Utc::now(),
                         tool_results: vec![],
                     })
                     .ok();
-                    return;
+                    // after_turn hook fires AFTER TurnEnd
+                    if let Some(ref after_turn) = config.after_turn {
+                        after_turn(&context.messages, usage);
+                    }
+                    return loop_usage;
                 }
             }
 
@@ -592,6 +690,7 @@ async fn run_loop(
                     cancel,
                     config.get_steering_messages.as_ref(),
                     &config.tool_execution,
+                    config,
                 )
                 .await;
 
@@ -605,30 +704,37 @@ async fn run_loop(
                 }
             }
 
+            // Extract turn usage for accumulation and hooks
+            let turn_usage = match &message {
+                Message::Assistant { usage, .. } => usage.clone(),
+                _ => Usage::default(),
+            };
+
             // Track turn for execution limits
             if let Some(ref mut tracker) = tracker {
-                let turn_tokens = match &message {
-                    Message::Assistant { usage, .. } => (usage.input + usage.output) as usize,
-                    _ => context::message_tokens(&agent_msg),
-                };
+                let turn_tokens = (turn_usage.input + turn_usage.output) as usize;
                 tracker.record_turn(turn_tokens);
             }
 
-            // after_turn callback
-            if let Some(ref after_turn) = config.after_turn {
-                let usage = match &message {
-                    Message::Assistant { usage, .. } => usage.clone(),
-                    _ => Usage::default(),
-                };
-                after_turn(&context.messages, &usage);
-            }
+            // Accumulate usage into loop total
+            loop_usage.input += turn_usage.input;
+            loop_usage.output += turn_usage.output;
+            loop_usage.cache_read += turn_usage.cache_read;
+            loop_usage.cache_write += turn_usage.cache_write;
+            loop_usage.total_tokens += turn_usage.total_tokens;
 
+            // TurnEnd fires BEFORE after_turn
             tx.send(AgentEvent::TurnEnd {
                 message: agent_msg,
                 timestamp: chrono::Utc::now(),
                 tool_results,
             })
             .ok();
+
+            // after_turn hook fires AFTER TurnEnd
+            if let Some(ref after_turn) = config.after_turn {
+                after_turn(&context.messages, &turn_usage);
+            }
 
             // Check steering after turn
             if let Some(steering) = steering_after_tools.take() {
@@ -664,6 +770,7 @@ async fn run_loop(
 
         break;
     }
+    loop_usage
 }
 
 /*
@@ -687,10 +794,6 @@ Why both? Because SSE streaming and HTTP completion are sequential:
 The UI reads from stream_rx (the receiving end of the channel) while the provider
 pushes into stream_tx. This decouples the UI rendering from the HTTP layer.
 
-NOTE: `config: &AgentLoopConfig<'_>` — the `<'_>` is an anonymous lifetime annotation.
-It was left here from an earlier version of AgentLoopConfig that held a `&'a dyn StreamProvider`
-reference. Now that AgentLoopConfig uses `Arc<dyn StreamProvider>` (no lifetime needed),
-this `<'_>` is a vestige that may cause a compile error. If so, change to `&AgentLoopConfig`.
 */
 /// Stream an assistant response from the LLM.
 async fn stream_assistant_response(
@@ -980,13 +1083,14 @@ async fn execute_tool_calls(
     cancel: &tokio_util::sync::CancellationToken, // ABORT — checked; child tokens for each tool
     get_steering: Option<&GetMessagesFn>, // INTERRUPT CHECK — polled between tools; None = no steering
     strategy: &ToolExecutionStrategy,     // DISPATCH — Sequential | Parallel | Batched{size}
+    config: &AgentLoopConfig,
 ) -> ToolExecutionResult {
     match strategy {
         ToolExecutionStrategy::Sequential => {
-            execute_sequential(tools, tool_calls, tx, cancel, get_steering).await
+            execute_sequential(tools, tool_calls, tx, cancel, get_steering, config).await
         }
         ToolExecutionStrategy::Parallel => {
-            execute_batch(tools, tool_calls, tx, cancel, get_steering).await
+            execute_batch(tools, tool_calls, tx, cancel, get_steering, config).await
         }
         ToolExecutionStrategy::Batched { size } => {
             /*
@@ -1007,7 +1111,7 @@ async fn execute_tool_calls(
             let mut steering_messages: Option<Vec<AgentMessage>> = None;
 
             for (batch_idx, batch) in tool_calls.chunks(*size).enumerate() {
-                let batch_result = execute_batch(tools, batch, tx, cancel, None).await;
+                let batch_result = execute_batch(tools, batch, tx, cancel, None, config).await;
                 // .extend() appends all items from an iterator into the Vec
                 // Python analogy: results.extend(batch_result.tool_results)
                 results.extend(batch_result.tool_results);
@@ -1038,19 +1142,21 @@ async fn execute_tool_calls(
     }
 }
 
-/// Execute tool calls one at a time, checking steering between each.
+/// Execute tool calls one at a time, checking for steering interrupts between each call.
 async fn execute_sequential(
     tools: &[Box<dyn AgentTool>], // REGISTRY — look up implementations by name
     tool_calls: &[(String, String, serde_json::Value)], // INVOCATIONS — (id, name, args); processed in order
     tx: &mpsc::UnboundedSender<AgentEvent>, // OBSERVER — forwarded to execute_single_tool
     cancel: &tokio_util::sync::CancellationToken, // ABORT — forwarded to execute_single_tool
-    get_steering: Option<&GetMessagesFn>, // INTERRUPT CHECK — polled after each tool; if Some → check between calls
+    get_steering: Option<&GetMessagesFn>, // INTERRUPT CHECK — polled after each tool; non-empty → skip remaining
+    config: &AgentLoopConfig, // HOOKS — before/after_tool_execution* forwarded to execute_single_tool
 ) -> ToolExecutionResult {
     let mut results: Vec<Message> = Vec::new();
     let mut steering_messages: Option<Vec<AgentMessage>> = None;
 
     for (index, (id, name, args)) in tool_calls.iter().enumerate() {
-        let (result_msg, _is_error) = execute_single_tool(tools, id, name, args, tx, cancel).await;
+        let (result_msg, _is_error) =
+            execute_single_tool(tools, id, name, args, tx, cancel, config).await;
         results.push(result_msg);
 
         // Check for steering — skip remaining tools if user interrupted
@@ -1072,19 +1178,23 @@ async fn execute_sequential(
     }
 }
 
-/// Execute a batch of tool calls concurrently using futures::join_all.
+/// Execute a batch of tool calls concurrently via `futures::join_all`, then check for steering.
+///
+/// Steering is only checked *after the whole batch completes*, not between individual calls.
+/// Use [`execute_sequential`] if you need per-call interrupt checking.
 async fn execute_batch(
     tools: &[Box<dyn AgentTool>], // REGISTRY — shared across all concurrent executions
     tool_calls: &[(String, String, serde_json::Value)], // INVOCATIONS — all run concurrently (or as a sub-batch)
-    tx: &mpsc::UnboundedSender<AgentEvent>, // OBSERVER — shared across concurrent tasks (UnboundedSender is Clone)
+    tx: &mpsc::UnboundedSender<AgentEvent>, // OBSERVER — shared (UnboundedSender is Clone + cheap)
     cancel: &tokio_util::sync::CancellationToken, // ABORT — each task gets a child token
-    get_steering: Option<&GetMessagesFn>, // INTERRUPT CHECK — polled after the whole batch completes (not between)
+    get_steering: Option<&GetMessagesFn>, // INTERRUPT CHECK — polled once after the full batch finishes
+    config: &AgentLoopConfig, // HOOKS — before/after_tool_execution* forwarded to execute_single_tool
 ) -> ToolExecutionResult {
     use futures::future::join_all;
 
     let futures: Vec<_> = tool_calls
         .iter()
-        .map(|(id, name, args)| execute_single_tool(tools, id, name, args, tx, cancel))
+        .map(|(id, name, args)| execute_single_tool(tools, id, name, args, tx, cancel, config))
         .collect();
 
     let batch_results = join_all(futures).await;
@@ -1124,19 +1234,51 @@ Why `id` AND `name` as separate params?
            events with the ToolCall that triggered them (same tool called twice → different id)
   `name` = SELECTOR — which tool to look up in the registry (e.g. "bash")
 */
-/// Execute a single tool call and emit events.
+/// Execute a single tool call, emit lifecycle events, and return the `ToolResult` message.
+///
+/// Returns `(Message::ToolResult, is_error)`. The message is appended to the LLM context by
+/// the caller; `is_error` is forwarded to the `ToolExecutionEnd` event and `after_tool_execution` hook.
 async fn execute_single_tool(
     tools: &[Box<dyn AgentTool>], // REGISTRY — searched by `name` to find the implementation
     id: &str,   // INSTANCE ID — unique per call; correlates Start/Update/End events
-    name: &str, // SELECTOR — which registry entry to look up (may not exist → is_error)
-    args: &serde_json::Value, // INPUT — LLM-chosen arguments (dynamic JSON, varies per invocation)
-    tx: &mpsc::UnboundedSender<AgentEvent>, // OBSERVER — pushes Start/Update/End events; independent of return value
+    name: &str, // SELECTOR — which registry entry to invoke (unknown name → is_error)
+    args: &serde_json::Value, // INPUT — LLM-chosen arguments (dynamic JSON per invocation)
+    tx: &mpsc::UnboundedSender<AgentEvent>, // OBSERVER — pushes ToolExecution* events; independent of return
     cancel: &tokio_util::sync::CancellationToken, // ABORT — child_token() derived inside for per-tool cancellation
+    config: &AgentLoopConfig, // HOOKS — before/after_tool_execution and update variants
 ) -> (Message, bool) {
     // (Message::ToolResult for LLM context, is_error for ToolExecutionEnd event)
     // Find the tool by name. `find` returns Option<&&Box<dyn AgentTool>>.
     // We use it directly — if None, we return a "tool not found" error result below.
     let tool = tools.iter().find(|t| t.name() == name);
+
+    // before_tool_execution hook — false skips this tool call entirely
+    if let Some(ref hook) = config.before_tool_execution {
+        if !hook(name, id, args) {
+            let skipped_result = ToolResult {
+                content: vec![Content::Text {
+                    text: "Tool execution skipped by before_tool_execution hook.".to_string(),
+                }],
+                details: serde_json::Value::Null,
+            };
+            let tool_result_msg = Message::ToolResult {
+                tool_call_id: id.to_string(),
+                tool_name: name.to_string(),
+                content: skipped_result.content,
+                is_error: true,
+                timestamp: now_ms(),
+            };
+            tx.send(AgentEvent::MessageStart {
+                message: tool_result_msg.clone().into(),
+            })
+            .ok();
+            tx.send(AgentEvent::MessageEnd {
+                message: tool_result_msg.clone().into(),
+            })
+            .ok();
+            return (tool_result_msg, true);
+        }
+    }
 
     tx.send(AgentEvent::ToolExecutionStart {
         tool_call_id: id.to_string(),
@@ -1177,13 +1319,40 @@ async fn execute_single_tool(
         let tx = tx.clone();
         let id = id.to_string();
         let name = name.to_string();
+        let before_update = config.before_tool_execution_update.clone();
+        let after_update = config.after_tool_execution_update.clone();
         Some(Arc::new(move |partial: ToolResult| {
-            tx.send(AgentEvent::ToolExecutionUpdate {
-                tool_call_id: id.clone(),
-                tool_name: name.clone(),
-                partial_result: partial,
-            })
-            .ok();
+            // Extract text content for hooks
+            let content_str: String = partial
+                .content
+                .iter()
+                .filter_map(|c| {
+                    if let Content::Text { text } = c {
+                        Some(text.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            // before_tool_execution_update — false suppresses the event (tool keeps running)
+            let emit = before_update
+                .as_ref()
+                .map_or(true, |h| h(&name, &id, &content_str));
+
+            if emit {
+                tx.send(AgentEvent::ToolExecutionUpdate {
+                    tool_call_id: id.clone(),
+                    tool_name: name.clone(),
+                    partial_result: partial,
+                })
+                .ok();
+                // after_tool_execution_update — fires after ToolExecutionUpdate
+                if let Some(ref hook) = after_update {
+                    hook(&name, &id, &content_str);
+                }
+            }
         }))
     };
 
@@ -1261,6 +1430,10 @@ async fn execute_single_tool(
         is_error,
     })
     .ok();
+    // after_tool_execution hook — fires after ToolExecutionEnd
+    if let Some(ref hook) = config.after_tool_execution {
+        hook(name, id, is_error);
+    }
 
     let tool_result_msg = Message::ToolResult {
         tool_call_id: id.to_string(),
