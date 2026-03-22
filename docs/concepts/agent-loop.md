@@ -52,7 +52,7 @@ The prompts are added to context, then the loop runs. Returns all new messages g
 
 ### `agent_loop_continue()`
 
-Resumes from existing context (e.g., after an error or retry):
+Resumes from existing context (e.g., after an error, retry, or branch):
 
 ```rust
 pub async fn agent_loop_continue(
@@ -63,7 +63,9 @@ pub async fn agent_loop_continue(
 ) -> Vec<AgentMessage>
 ```
 
-Requires that the last message in context is **not** an assistant message.
+**Preconditions:** `context.agent_id` and `context.session_id` must be `Some` — the function panics with a descriptive message otherwise. In practice, any context that passed through `agent_loop()` at least once already has these set. When constructing a context manually (e.g., from a persisted snapshot), set them explicitly before calling this function.
+
+The last message in context must also **not** be an assistant message.
 
 ## AgentLoopConfig
 
@@ -72,6 +74,7 @@ pub struct AgentLoopConfig<'a> {
     pub provider: &'a dyn StreamProvider,
     pub model: String,
     pub api_key: String,
+    pub config_id: Option<String>,
     pub thinking_level: ThinkingLevel,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
@@ -85,9 +88,15 @@ pub struct AgentLoopConfig<'a> {
     pub cache_config: CacheConfig,
     pub tool_execution: ToolExecutionStrategy,
     pub retry_config: RetryConfig,
+    pub before_loop: Option<BeforeLoopFn>,
+    pub after_loop: Option<AfterLoopFn>,
     pub before_turn: Option<BeforeTurnFn>,
     pub after_turn: Option<AfterTurnFn>,
     pub on_error: Option<OnErrorFn>,
+    pub before_tool_execution: Option<BeforeToolExecutionFn>,
+    pub after_tool_execution: Option<AfterToolExecutionFn>,
+    pub before_tool_execution_update: Option<BeforeToolExecutionUpdateFn>,
+    pub after_tool_execution_update: Option<AfterToolExecutionUpdateFn>,
     pub input_filters: Vec<Arc<dyn InputFilter>>,
     pub compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
 }
@@ -98,6 +107,7 @@ pub struct AgentLoopConfig<'a> {
 | `provider` | The `StreamProvider` implementation to use |
 | `model` | Model identifier (e.g., `"claude-sonnet-4-20250514"`) |
 | `api_key` | API key for the provider |
+| `config_id` | Optional stable identity for this config; auto-derived as `"{provider_id}.{model_slug}[.thinking]"` when `None`. Used as the middle segment of `loop_id`. |
 | `thinking_level` | `Off`, `Minimal`, `Low`, `Medium`, `High` |
 | `model_config` | Optional `ModelConfig` for multi-provider support (base URL, headers, compat flags) |
 | `convert_to_llm` | Custom `AgentMessage[] → Message[]` conversion |
@@ -109,9 +119,15 @@ pub struct AgentLoopConfig<'a> {
 | `cache_config` | Prompt caching behavior (see [Prompt Caching](prompt-caching.md)) |
 | `tool_execution` | Parallel, Sequential, or Batched (see [Tools](tools.md#execution-strategies)) |
 | `retry_config` | Retry behavior for transient errors (see [Retry](retry.md)) |
+| `before_loop` | Called once before `AgentStart`; return `false` to abort the entire run (see [Callbacks](callbacks.md)) |
+| `after_loop` | Called once after `AgentEnd` with all new messages and accumulated usage (see [Callbacks](callbacks.md)) |
 | `before_turn` | Called before each LLM call; return `false` to abort (see [Callbacks](callbacks.md)) |
 | `after_turn` | Called after each turn with messages and usage (see [Callbacks](callbacks.md)) |
 | `on_error` | Called on `StopReason::Error` with the error string (see [Callbacks](callbacks.md)) |
+| `before_tool_execution` | Called before each tool call; return `false` to skip it (see [Callbacks](callbacks.md)) |
+| `after_tool_execution` | Called after each tool call completes (see [Callbacks](callbacks.md)) |
+| `before_tool_execution_update` | Called before each streaming tool update; return `false` to suppress the event (see [Callbacks](callbacks.md)) |
+| `after_tool_execution_update` | Called after each streaming tool update event (see [Callbacks](callbacks.md)) |
 | `input_filters` | Input filters applied to user messages before the LLM call (see [Tools](tools.md)) |
 | `compaction_strategy` | Custom compaction strategy (see [Custom Compaction](#custom-compaction) below) |
 

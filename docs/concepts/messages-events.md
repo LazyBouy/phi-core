@@ -27,6 +27,7 @@ pub enum Message {
         content: Vec<Content>,
         is_error: bool,
         timestamp: u64,
+        child_loop_id: Option<String>,  // set by sub-agent tools
     },
 }
 ```
@@ -112,7 +113,7 @@ Events emitted during the agent loop for real-time UI updates:
 
 | Event | When |
 |-------|------|
-| `AgentStart { agent_id, session_id, timestamp, metadata }` | Loop begins |
+| `AgentStart { agent_id, session_id, loop_id, parent_loop_id, continuation_kind, timestamp }` | Loop begins. `loop_id` is `"{session_id}.{config_id}.{N}"`. `parent_loop_id` is `Some` for continuations and sub-agents. `continuation_kind` is `Some` for `agent_loop_continue` calls. |
 | `AgentEnd { messages, timestamp, rejection }` | Loop finishes; `rejection` is `Some` when an InputFilter blocked input |
 | `TurnStart { turn_index, timestamp, triggered_by }` | New LLM call starting; `turn_index` is 0-based, `triggered_by` is `User \| SubAgent \| FollowUp \| Branch` |
 | `TurnEnd { message, timestamp, tool_results }` | LLM call + tool execution complete |
@@ -121,7 +122,7 @@ Events emitted during the agent loop for real-time UI updates:
 | `MessageEnd { message }` | Message finalized |
 | `ToolExecutionStart { tool_call_id, tool_name, args }` | Tool about to run |
 | `ToolExecutionUpdate { tool_call_id, tool_name, partial_result }` | Tool progress |
-| `ToolExecutionEnd { tool_call_id, tool_name, result, is_error }` | Tool finished |
+| `ToolExecutionEnd { tool_call_id, tool_name, result, is_error, child_loop_id }` | Tool finished. `child_loop_id` is `Some` when the tool was a sub-agent — it identifies the child loop that ran. |
 | `ProgressMessage { tool_call_id, tool_name, text }` | User-facing progress text from a tool |
 | `InputRejected { reason }` | Input filter rejected the user's message |
 

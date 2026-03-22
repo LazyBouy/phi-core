@@ -33,7 +33,7 @@ The central abstraction is a **stateless agent loop** (`agent_loop.rs`) driven b
 
 The loop: stream assistant response → extract tool calls → execute tools (parallel by default) → append results → repeat until `StopReason::Stop` with no follow-ups.
 
-`agent_loop` and `agent_loop_continue` are **free functions**, not methods. The `Agent` struct (`agent.rs`) is an optional stateful wrapper that manages message history, tool registry, steering/follow-up queues, and provider selection. The `_with_sender` methods (`prompt_with_sender`, `prompt_messages_with_sender`, `continue_loop_with_sender`) accept a caller-provided `mpsc::UnboundedSender<AgentEvent>` for real-time event consumption on a separate task.
+`agent_loop` and `agent_loop_continue` are **free functions**, not methods. The `Agent` trait (`agents/agent.rs`) defines the runtime interface — prompting, state access, control, and steering queues. `BasicAgent` (`agents/basic_agent.rs`) is the default in-memory implementation: an optional stateful wrapper that manages message history, tool registry, steering/follow-up queues, and provider selection. The `_with_sender` methods (`prompt_with_sender`, `prompt_messages_with_sender`, `continue_loop_with_sender`) accept a caller-provided `mpsc::UnboundedSender<AgentEvent>` for real-time event consumption on a separate task.
 
 ### Provider System
 
@@ -90,3 +90,4 @@ All unit tests use `MockProvider` (`provider/mock.rs`) to simulate LLM responses
 - Tools return stdout/stderr even on failure so the LLM can self-correct
 - Retry logic (`retry.rs`) uses exponential backoff with ±20% jitter; only retries `RateLimited` and `Network` errors
 - The `skills.rs` module loads `<name>/SKILL.md` files with YAML frontmatter per the AgentSkills standard
+- Lifecycle callbacks have three tiers: turn-level (`BeforeTurnFn`/`AfterTurnFn`/`OnErrorFn`), loop-level (`BeforeLoopFn`/`AfterLoopFn` — fire before `AgentStart` / after `AgentEnd`), and tool-level (`BeforeToolExecutionFn`/`AfterToolExecutionFn` — fire around each `ToolExecutionStart`/`ToolExecutionEnd`); `BeforeToolExecutionUpdateFn`/`AfterToolExecutionUpdateFn` additionally wrap each `ToolExecutionUpdate` event. Returning `false` from any `Before*` hook short-circuits the corresponding action. Hook ordering is strictly enforced — hooks fire before their paired event is emitted.

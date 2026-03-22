@@ -8,9 +8,9 @@
 //! Run:
 //!   ANTHROPIC_API_KEY=sk-... cargo run --example sub_agent
 
-use phi_core::agent::Agent;
+use phi_core::BasicAgent;
 use phi_core::provider::{AnthropicProvider, StreamProvider};
-use phi_core::sub_agent::SubAgentTool;
+use phi_core::agents::SubAgentTool;
 use phi_core::tools;
 use phi_core::*;
 use std::sync::Arc;
@@ -52,7 +52,7 @@ async fn main() {
         .with_max_turns(15);
 
     // Parent agent: coordinates between sub-agents
-    let mut agent = Agent::new(AnthropicProvider)
+    let mut agent = BasicAgent::new(AnthropicProvider)
         .with_system_prompt(
             "You are a coordinator agent. You have two sub-agents:\n\
              - 'researcher': for reading files and gathering information\n\

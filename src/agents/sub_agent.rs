@@ -14,7 +14,7 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use phi_core::sub_agent::SubAgentTool;
+//! use phi_core::agents::SubAgentTool;
 //! use phi_core::provider::AnthropicProvider;
 //! use std::sync::Arc;
 //!

@@ -1,6 +1,6 @@
 //! Tests for the Agent struct (stateful wrapper).
 
-use phi_core::agent::Agent;
+use phi_core::BasicAgent;
 use phi_core::provider::mock::*;
 use phi_core::provider::MockProvider;
 use phi_core::*;
@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 #[tokio::test]
 async fn test_agent_simple_prompt() {
     let provider = MockProvider::text("Hello!");
-    let mut agent = Agent::new(provider)
+    let mut agent = BasicAgent::new(provider)
         .with_system_prompt("You are helpful.")
         .with_model("mock")
         .with_api_key("test");
@@ -32,7 +32,7 @@ async fn test_agent_simple_prompt() {
 #[tokio::test]
 async fn test_agent_reset() {
     let provider = MockProvider::text("Hello!");
-    let mut agent = Agent::new(provider)
+    let mut agent = BasicAgent::new(provider)
         .with_system_prompt("test")
         .with_model("mock")
         .with_api_key("test");
@@ -85,7 +85,7 @@ async fn test_agent_with_tools() {
         MockResponse::Text("Echoed: hello".into()),
     ]);
 
-    let mut agent = Agent::new(provider)
+    let mut agent = BasicAgent::new(provider)
         .with_system_prompt("test")
         .with_model("mock")
         .with_api_key("test")
@@ -100,7 +100,7 @@ async fn test_agent_with_tools() {
 #[tokio::test]
 async fn test_agent_builder_pattern() {
     let provider = MockProvider::text("ok");
-    let agent = Agent::new(provider)
+    let agent = BasicAgent::new(provider)
         .with_system_prompt("sys")
         .with_model("test-model")
         .with_api_key("key123")
@@ -136,7 +136,7 @@ async fn test_with_messages_builder() {
     ];
 
     let provider = MockProvider::text("ok");
-    let agent = Agent::new(provider)
+    let agent = BasicAgent::new(provider)
         .with_model("mock")
         .with_api_key("test")
         .with_messages(saved.clone());
@@ -148,7 +148,7 @@ async fn test_with_messages_builder() {
 #[tokio::test]
 async fn test_save_and_restore_messages() {
     let provider = MockProvider::text("Hello!");
-    let mut agent = Agent::new(provider)
+    let mut agent = BasicAgent::new(provider)
         .with_system_prompt("test")
         .with_model("mock")
         .with_api_key("test");
@@ -158,7 +158,7 @@ async fn test_save_and_restore_messages() {
 
     // Create a fresh agent and restore
     let provider2 = MockProvider::text("ok");
-    let mut agent2 = Agent::new(provider2)
+    let mut agent2 = BasicAgent::new(provider2)
         .with_system_prompt("test")
         .with_model("mock")
         .with_api_key("test");
@@ -173,7 +173,7 @@ async fn test_save_and_restore_messages() {
 async fn test_agent_continues_after_restore() {
     // First agent: prompt → get response → save
     let provider1 = MockProvider::text("First response");
-    let mut agent1 = Agent::new(provider1)
+    let mut agent1 = BasicAgent::new(provider1)
         .with_system_prompt("test")
         .with_model("mock")
         .with_api_key("test");
@@ -184,7 +184,7 @@ async fn test_agent_continues_after_restore() {
     // Second agent: restore → prompt again
     // The MockProvider will receive the full restored history + new prompt
     let provider2 = MockProvider::text("Second response");
-    let mut agent2 = Agent::new(provider2)
+    let mut agent2 = BasicAgent::new(provider2)
         .with_system_prompt("test")
         .with_model("mock")
         .with_api_key("test");
@@ -207,7 +207,7 @@ async fn test_agent_continues_after_restore() {
 #[tokio::test]
 async fn test_prompt_with_sender_streams_events() {
     let provider = MockProvider::text("Hello!");
-    let mut agent = Agent::new(provider)
+    let mut agent = BasicAgent::new(provider)
         .with_system_prompt("test")
         .with_model("mock")
         .with_api_key("test");
@@ -235,7 +235,7 @@ async fn test_prompt_with_sender_streams_events() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_prompt_with_sender_real_time_streaming() {
     let provider = MockProvider::text("Hello!");
-    let mut agent = Agent::new(provider)
+    let mut agent = BasicAgent::new(provider)
         .with_system_prompt("test")
         .with_model("mock")
         .with_api_key("test");
@@ -262,7 +262,7 @@ async fn test_prompt_with_sender_real_time_streaming() {
 #[tokio::test]
 async fn test_prompt_messages_with_sender() {
     let provider = MockProvider::text("Response");
-    let mut agent = Agent::new(provider)
+    let mut agent = BasicAgent::new(provider)
         .with_system_prompt("test")
         .with_model("mock")
         .with_api_key("test");
@@ -288,7 +288,7 @@ async fn test_prompt_messages_with_sender() {
 #[tokio::test]
 async fn test_continue_loop_with_sender() {
     let provider = MockProvider::text("Continued response");
-    let mut agent = Agent::new(provider)
+    let mut agent = BasicAgent::new(provider)
         .with_system_prompt("test")
         .with_model("mock")
         .with_api_key("test");
@@ -357,7 +357,7 @@ async fn test_prompt_with_sender_tools_restored() {
     }
 
     let provider = MockProvider::text("Hello!");
-    let mut agent = Agent::new(provider)
+    let mut agent = BasicAgent::new(provider)
         .with_system_prompt("test")
         .with_model("mock")
         .with_api_key("test")

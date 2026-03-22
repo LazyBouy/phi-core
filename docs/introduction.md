@@ -17,7 +17,7 @@ phi-core is a library for building LLM-powered agents that can use tools. It pro
 - **Execution limits** — Max turns, tokens, and wall-clock time
 - **Steering & follow-ups** — Interrupt the agent mid-run or queue work for after it finishes
 - **Cancellation** — `CancellationToken`-based abort at any point
-- **Builder pattern** — Ergonomic `Agent` struct with chainable configuration
+- **Builder pattern** — Ergonomic `BasicAgent` struct with chainable configuration; `Agent` trait for polymorphism
 
 ## Ecosystem
 

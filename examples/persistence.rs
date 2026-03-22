@@ -6,7 +6,7 @@
 //! - Restoring into a fresh agent
 //! - Continuing the conversation from saved state
 
-use phi_core::agent::Agent;
+use phi_core::{Agent, BasicAgent};
 use phi_core::provider::MockProvider;
 use phi_core::types::*;
 
@@ -14,7 +14,7 @@ use phi_core::types::*;
 async fn main() {
     // --- Phase 1: Initial conversation ---
     let provider = MockProvider::text("The capital of France is Paris.");
-    let mut agent = Agent::new(provider)
+    let mut agent = BasicAgent::new(provider)
         .with_system_prompt("You are a helpful assistant.")
         .with_model("mock")
         .with_api_key("test");
@@ -42,7 +42,7 @@ async fn main() {
 
     // --- Phase 2: Restore and continue ---
     let provider2 = MockProvider::text("Paris is also known as the City of Light.");
-    let mut agent2 = Agent::new(provider2)
+    let mut agent2 = BasicAgent::new(provider2)
         .with_system_prompt("You are a helpful assistant.")
         .with_model("mock")
         .with_api_key("test");

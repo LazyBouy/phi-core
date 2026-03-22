@@ -280,111 +280,23 @@ pub async fn agent_loop(
     })
     .ok();
 
-    // !!!SECURITY!!!: Apply input filters before adding prompts to context
-    let prompts = if !config.input_filters.is_empty() {
-        let user_text: String = prompts
-            .iter()
-            .filter_map(|m| {
-                if let AgentMessage::Llm(Message::User { content, .. }) = m {
-                    Some(
-                        content
-                            .iter()
-                            .filter_map(|c| {
-                                /*
-                                The meaning of the below if let is:
-                                "If this content c is a Text variant, extract the text string; otherwise skip it".
-                                Python equivalent would be:
-                                if isinstance(c, Content) and c.variant == "Text":
-                                    text = c.text
-
-                                This is "if let Pattern = value → pattern match + destructure + bind" in one shot
-                                For image we could have done:
-
-                                if let Content::Image { data, .. } = c {
-                                    Some(data.as_str())  // data is already bound, no reassignment needed
-                                }
-
-                                or
-
-                                if let Content::Image { data, mime_type } = c {
-                                    Some(format!("data:{};base64,{}", mime_type, data))
-                                }
-
-                                it produces: data:image/png;base64,ABC123...
-
-                                Other return options:
-                                // Tuple — simplest
-                                Some((data.as_str(), mime_type.as_str()))
-
-                                // Struct — most expressive
-                                Some(ImageContent { data, mime_type })
-
-                                // String — if you just need serialized form
-                                Some(format!("{}:{}", mime_type, data))
-                                */
-                                if let Content::Text { text } = c {
-                                    Some(text.as_str())
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                    )
-                } else {
-                    None
-                }
+    // !!!SECURITY!!!: Apply input filters before adding prompts to context.
+    // Reject → emit InputRejected + AgentEnd and return immediately (no LLM call made).
+    // Warn  → warning text appended to the last user message so the LLM sees it.
+    // Pass  → prompts returned unchanged.
+    let prompts = match apply_input_filters(prompts, &config.input_filters, &tx) {
+        Ok(filtered) => filtered,
+        Err(reason) => {
+            // AgentEnd with rejection: pre-run rejection is the one case where
+            // AgentEnd.rejection is Some — the agent never actually started.
+            tx.send(AgentEvent::AgentEnd {
+                messages: vec![],
+                timestamp: chrono::Utc::now(),
+                rejection: Some(reason),
             })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        let mut warnings: Vec<String> = Vec::new();
-        for filter in &config.input_filters {
-            match filter.filter(&user_text) {
-                FilterResult::Pass => {}
-                FilterResult::Warn(w) => warnings.push(w),
-                FilterResult::Reject(reason) => {
-                    tx.send(AgentEvent::InputRejected {
-                        reason: reason.clone(),
-                    })
-                    .ok();
-
-                    // Rejection: emit InputRejected (already sent above) then AgentEnd with
-                    // rejection reason so callers can distinguish a filter abort from a normal end.
-                    tx.send(AgentEvent::AgentEnd {
-                        messages: vec![],
-                        timestamp: chrono::Utc::now(),
-                        rejection: Some(reason.clone()),
-                    })
-                    .ok();
-                    return vec![];
-                }
-            }
+            .ok();
+            return vec![];
         }
-
-        // Append warnings to the last user message's content (avoids consecutive user messages)
-        if !warnings.is_empty() {
-            let warning_text = warnings
-                .iter()
-                .map(|w| format!("[Warning: {}]", w))
-                .collect::<Vec<_>>()
-                .join("\n");
-
-            let mut modified = prompts;
-            // Find and extend the last user message
-            for msg in modified.iter_mut().rev() {
-                // .rev() : iterate in reverse to find the last user message
-                if let AgentMessage::Llm(Message::User { content, .. }) = msg {
-                    content.push(Content::Text { text: warning_text });
-                    break;
-                }
-            }
-            modified
-        } else {
-            prompts
-        }
-    } else {
-        prompts
     };
 
     let mut new_messages: Vec<AgentMessage> = prompts.clone();
@@ -556,11 +468,16 @@ async fn run_loop(
     if present, and .unwrap_or_default() substitutes an empty Vec
     if it was None.
      */
-    let mut pending: Vec<AgentMessage> = config
+    // !!!SECURITY!!!: Filter initial steering messages before any turn starts.
+    let raw = config
         .get_steering_messages
         .as_ref()
         .map(|f| f())
         .unwrap_or_default();
+    let mut pending = match apply_input_filters(raw, &config.input_filters, tx) {
+        Ok(filtered) => filtered,
+        Err(_) => return loop_usage,
+    };
 
     // Outer loop: follow-ups after agent would stop
     loop {
@@ -807,19 +724,28 @@ async fn run_loop(
                 after_turn(&context.messages, &turn_usage);
             }
 
-            // Check steering after turn
+            // Check steering after turn — filter before assigning to pending
             if let Some(steering) = steering_after_tools.take() {
                 if !steering.is_empty() {
-                    pending = steering;
-                    continue;
+                    match apply_input_filters(steering, &config.input_filters, tx) {
+                        Ok(filtered) => {
+                            pending = filtered;
+                            continue;
+                        }
+                        Err(_) => return loop_usage,
+                    }
                 }
             }
 
-            pending = config
+            let raw = config
                 .get_steering_messages
                 .as_ref()
                 .map(|f| f())
                 .unwrap_or_default();
+            pending = match apply_input_filters(raw, &config.input_filters, tx) {
+                Ok(filtered) => filtered,
+                Err(_) => return loop_usage,
+            };
 
             // Exit inner loop if no more tool calls and no pending messages
             if !has_tool_calls && pending.is_empty() {
@@ -835,8 +761,13 @@ async fn run_loop(
             .unwrap_or_default();
 
         if !follow_ups.is_empty() {
-            pending = follow_ups;
-            continue;
+            match apply_input_filters(follow_ups, &config.input_filters, tx) {
+                Ok(filtered) => {
+                    pending = filtered;
+                    continue;
+                }
+                Err(_) => return loop_usage,
+            }
         }
 
         break;
@@ -1533,6 +1464,86 @@ async fn execute_single_tool(
 /// Emit a "skipped" tool result when a user steering message interrupted execution.
 /// The LLM protocol requires EVERY ToolCall to have a corresponding ToolResult —
 /// even if we never actually ran the tool. This satisfies that contract.
+/// Apply input filters to a batch of messages before injecting them into context.
+///
+/// Mirrors the pre-run filter logic in `agent_loop()` but is usable at any point:
+///
+/// - `Ok(messages)` — all filters passed; any `Warn` text has been appended to the last
+///   `Message::User` in the batch.
+/// - `Err(reason)` — a filter rejected the input; `AgentEvent::InputRejected` has already
+///   been sent on `tx`. The caller is responsible for any further cleanup (e.g. returning
+///   early from the loop).
+///
+/// Text extraction: only `Content::Text` blocks inside `Message::User` messages are fed to
+/// filters. Non-user messages (assistant, tool results, extension) are passed through
+/// unchanged.
+fn apply_input_filters(
+    mut messages: Vec<AgentMessage>,
+    filters: &[std::sync::Arc<dyn InputFilter>],
+    tx: &mpsc::UnboundedSender<AgentEvent>,
+) -> Result<Vec<AgentMessage>, String> {
+    if filters.is_empty() || messages.is_empty() {
+        return Ok(messages);
+    }
+
+    // Extract text from all User messages in the batch
+    let user_text: String = messages
+        .iter()
+        .filter_map(|m| {
+            if let AgentMessage::Llm(Message::User { content, .. }) = m {
+                Some(
+                    content
+                        .iter()
+                        .filter_map(|c| {
+                            if let Content::Text { text } = c {
+                                Some(text.as_str())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                )
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let mut warnings: Vec<String> = Vec::new();
+    for filter in filters {
+        match filter.filter(&user_text) {
+            FilterResult::Pass => {}
+            FilterResult::Warn(w) => warnings.push(w),
+            FilterResult::Reject(reason) => {
+                tx.send(AgentEvent::InputRejected {
+                    reason: reason.clone(),
+                })
+                .ok();
+                return Err(reason);
+            }
+        }
+    }
+
+    // Append accumulated warnings to the last User message
+    if !warnings.is_empty() {
+        let warning_text = warnings
+            .iter()
+            .map(|w| format!("[Warning: {}]", w))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for msg in messages.iter_mut().rev() {
+            if let AgentMessage::Llm(Message::User { content, .. }) = msg {
+                content.push(Content::Text { text: warning_text });
+                break;
+            }
+        }
+    }
+
+    Ok(messages)
+}
+
 fn skip_tool_call(
     tool_call_id: &str, // INSTANCE ID — matches the ToolCall.id that was skipped
     tool_name: &str,    // NAME — included in events for caller visibility

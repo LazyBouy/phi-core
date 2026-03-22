@@ -1,8 +1,49 @@
 # Lifecycle Callbacks
 
-phi-core provides three lifecycle callbacks that let you observe and control the agent loop without modifying its internals.
+phi-core provides three tiers of lifecycle callbacks that let you observe and control the agent loop without modifying its internals. All callbacks are set on `AgentLoopConfig` (or via `Agent` builder methods).
 
-## Callbacks
+## Tiers Overview
+
+| Tier | Hooks | Scope |
+|------|-------|-------|
+| **Loop-level** | `before_loop`, `after_loop` | Once per `agent_loop()` / `agent_loop_continue()` call |
+| **Turn-level** | `before_turn`, `after_turn`, `on_error` | Once per LLM call (every turn) |
+| **Tool-level** | `before_tool_execution`, `after_tool_execution`, `before_tool_execution_update`, `after_tool_execution_update` | Once per tool call |
+
+---
+
+## Loop-Level Hooks
+
+### `before_loop`
+
+Called once before `AgentStart` is emitted. Receives the current message history and an initial usage counter of 0. Return `false` to abort the entire run — `AgentEnd` is emitted with an empty message list and the loop exits immediately.
+
+```rust
+let agent = Agent::new(provider)
+    .on_before_loop(|messages, _usage| {
+        println!("Starting run with {} existing messages", messages.len());
+        true // return false to abort
+    });
+```
+
+### `after_loop`
+
+Called once after `AgentEnd` is emitted. Receives the new messages produced during the run and the accumulated `Usage` across all turns.
+
+```rust
+let agent = Agent::new(provider)
+    .on_after_loop(|new_messages, total_usage| {
+        println!(
+            "Run complete: {} new messages, {} total tokens",
+            new_messages.len(),
+            total_usage.total_tokens
+        );
+    });
+```
+
+---
+
+## Turn-Level Hooks
 
 ### `before_turn`
 
@@ -46,18 +87,119 @@ let agent = Agent::new(provider)
     });
 ```
 
+---
+
+## Tool-Level Hooks
+
+### `before_tool_execution`
+
+Called before each tool starts, after the `ToolExecutionStart` event would normally emit. Receives the call ID, tool name, and arguments. Return `false` to skip the tool — a `ToolExecutionEnd` with an error result is emitted and the tool's `execute()` is never called.
+
+```rust
+let agent = Agent::new(provider)
+    .on_before_tool_execution(|call_id, name, _args| {
+        println!("About to run tool: {}", name);
+        // Return false to block specific tools:
+        name != "bash" // block bash, allow everything else
+    });
+```
+
+### `after_tool_execution`
+
+Called after each tool finishes (after `ToolExecutionEnd` is emitted). Receives the tool name, call ID, and whether the result was an error.
+
+```rust
+let agent = Agent::new(provider)
+    .on_after_tool_execution(|name, call_id, is_error| {
+        if is_error {
+            eprintln!("Tool {} ({}) failed", name, call_id);
+        }
+    });
+```
+
+### `before_tool_execution_update`
+
+Called before each `ToolExecutionUpdate` event (streaming progress from a running tool). Return `false` to suppress the event — the tool keeps running and the final `ToolResult` is unaffected; only the intermediate streaming update is dropped.
+
+```rust
+let agent = Agent::new(provider)
+    .on_before_tool_execution_update(|name, call_id, text| {
+        // Only forward updates for bash tool
+        name == "bash"
+    });
+```
+
+### `after_tool_execution_update`
+
+Called after each `ToolExecutionUpdate` event, only if it was not suppressed by `before_tool_execution_update`.
+
+```rust
+let agent = Agent::new(provider)
+    .on_after_tool_execution_update(|name, call_id, text| {
+        // e.g., log streaming updates to a file
+    });
+```
+
+---
+
+## Hook Ordering
+
+The hooks fire in strict order relative to their paired events. This ordering is an invariant — it is enforced at runtime:
+
+```
+before_loop
+  → AgentStart
+    before_turn
+      → TurnStart
+        [MessageStart / MessageUpdate* / MessageEnd]
+        [per tool call:]
+          before_tool_execution
+            → ToolExecutionStart
+              (before_tool_execution_update → ToolExecutionUpdate → after_tool_execution_update)*
+            ToolExecutionEnd →
+          after_tool_execution
+      TurnEnd →
+    after_turn
+  AgentEnd →
+after_loop
+```
+
+### Short-Circuit Rules
+
+| Hook returns `false` | Effect |
+|---|---|
+| `before_loop` | Aborts before `AgentStart`; emits `AgentEnd(messages=[])` |
+| `before_turn` | Skips turn; neither `TurnStart` nor `TurnEnd` is emitted |
+| `before_tool_execution` | Skips tool; emits error `ToolExecutionEnd` without calling `execute()` |
+| `before_tool_execution_update` | Suppresses `ToolExecutionUpdate`; tool keeps running; `ToolResult` unaffected |
+
+---
+
 ## Combining Callbacks
 
 All callbacks are optional and independent:
 
 ```rust
 let agent = Agent::new(provider)
+    .on_before_loop(|_msgs, _| true)
+    .on_after_loop(|msgs, usage| {
+        println!("Done: {} messages, {} tokens", msgs.len(), usage.total_tokens);
+    })
     .on_before_turn(|_msgs, turn| turn < 20)
     .on_after_turn(|msgs, usage| {
         println!("Messages: {}, Tokens: {}/{}", msgs.len(), usage.input, usage.output);
     })
-    .on_error(|err| eprintln!("Error: {}", err));
+    .on_error(|err| eprintln!("Error: {}", err))
+    .on_before_tool_execution(|_id, name, _args| {
+        println!("Running: {}", name);
+        true
+    })
+    .on_after_tool_execution(|name, _id, is_error| {
+        println!("Tool {} finished (error={})", name, is_error);
+    });
 ```
+
+---
 
 ## Using with `AgentLoopConfig`
 
@@ -65,29 +207,21 @@ For direct loop usage without the `Agent` wrapper:
 
 ```rust
 use std::sync::Arc;
-use phi-core::agent_loop::AgentLoopConfig;
+use phi_core::agent_loop::AgentLoopConfig;
 
 let config = AgentLoopConfig {
+    // Loop-level
+    before_loop: Some(Arc::new(|_msgs, _| true)),
+    after_loop: Some(Arc::new(|msgs, usage| { /* log */ })),
+    // Turn-level
     before_turn: Some(Arc::new(|_msgs, turn| turn < 5)),
     after_turn: Some(Arc::new(|_msgs, _usage| { /* log */ })),
     on_error: Some(Arc::new(|err| eprintln!("{}", err))),
+    // Tool-level
+    before_tool_execution: Some(Arc::new(|id, name, args| true)),
+    after_tool_execution: Some(Arc::new(|name, id, is_error| {})),
+    before_tool_execution_update: Some(Arc::new(|name, id, text| true)),
+    after_tool_execution_update: Some(Arc::new(|name, id, text| {})),
     // ... other fields
 };
-```
-
-## Callback Timing
-
-```
-Loop iteration:
-  1. Inject pending messages (steering/follow-up)
-  2. Check execution limits
-  3. before_turn(messages, turn_number)  <-- return false to abort
-  4. Compact context
-  5. Stream LLM response
-  6. Check for error/abort → on_error(message) if StopReason::Error
-     → after_turn(messages, usage) even on error/abort
-  7. Execute tool calls
-  8. Track turn
-  9. after_turn(messages, usage)
-  10. Emit TurnEnd event
 ```

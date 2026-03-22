@@ -1975,6 +1975,268 @@ async fn test_filter_non_text_content_only_text_extracted() {
 }
 
 // ---------------------------------------------------------------------------
+// InputFilter tests — steering and follow-up paths
+// ---------------------------------------------------------------------------
+
+// Content-based filter helpers for steering/follow-up tests.
+// Unlike the unconditional Pass/Warn/Reject filters above, these check the
+// actual message text so the initial prompt can pass while the injected
+// steering/follow-up message is caught.
+
+struct ContentRejectFilter {
+    keyword: String,
+}
+impl InputFilter for ContentRejectFilter {
+    fn filter(&self, text: &str) -> FilterResult {
+        if text.contains(&self.keyword) {
+            FilterResult::Reject(format!("blocked: {}", self.keyword))
+        } else {
+            FilterResult::Pass
+        }
+    }
+}
+
+struct ContentWarnFilter {
+    keyword: String,
+    warning: String,
+}
+impl InputFilter for ContentWarnFilter {
+    fn filter(&self, text: &str) -> FilterResult {
+        if text.contains(&self.keyword) {
+            FilterResult::Warn(self.warning.clone())
+        } else {
+            FilterResult::Pass
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_filter_rejects_steering_message() {
+    // The filter passes the initial prompt ("hello") but rejects the steering
+    // message ("SECRET"). The run should abort before any LLM turn starts.
+    let provider = MockProvider::text("Should not reach LLM.");
+    let mut config = make_config(Arc::new(provider));
+    config.input_filters = vec![Arc::new(ContentRejectFilter {
+        keyword: "SECRET".into(),
+    })];
+
+    // Steering returns "SECRET" on the first poll, empty thereafter.
+    let steered = Arc::new(std::sync::Mutex::new(false));
+    let steered_clone = steered.clone();
+    config.get_steering_messages = Some(Box::new(move || {
+        let mut done = steered_clone.lock().unwrap();
+        if !*done {
+            *done = true;
+            vec![AgentMessage::Llm(Message::user("SECRET content"))]
+        } else {
+            vec![]
+        }
+    }));
+
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+        agent_id: None,
+        session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
+    };
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    agent_loop(vec![AgentMessage::Llm(Message::user("hello"))], &mut context, &config, tx, cancel).await;
+    let events = collect_events(rx);
+
+    // InputRejected must have fired
+    assert!(
+        events.iter().any(|e| matches!(e, AgentEvent::InputRejected { reason } if reason.contains("SECRET"))),
+        "expected InputRejected; got: {:?}", events
+    );
+    // No LLM turn should have started
+    assert!(
+        !events.iter().any(|e| matches!(e, AgentEvent::TurnStart { .. })),
+        "unexpected TurnStart; steering was rejected before any turn"
+    );
+}
+
+#[tokio::test]
+async fn test_filter_warns_steering_message() {
+    // The filter passes the initial prompt but warns on the steering message.
+    // The warning text should be appended to the steering message before injection.
+    let provider = MockProvider::texts(vec!["First turn.", "Second turn."]);
+    let mut config = make_config(Arc::new(provider));
+    config.input_filters = vec![Arc::new(ContentWarnFilter {
+        keyword: "FLAGGED".into(),
+        warning: "steer-warn".into(),
+    })];
+
+    let steered = Arc::new(std::sync::Mutex::new(false));
+    let steered_clone = steered.clone();
+    config.get_steering_messages = Some(Box::new(move || {
+        let mut done = steered_clone.lock().unwrap();
+        if !*done {
+            *done = true;
+            vec![AgentMessage::Llm(Message::user("FLAGGED content"))]
+        } else {
+            vec![]
+        }
+    }));
+
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+        agent_id: None,
+        session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
+    };
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    agent_loop(vec![AgentMessage::Llm(Message::user("hello"))], &mut context, &config, tx, cancel).await;
+
+    // The steering message should be in context with the warning appended
+    let steering_msg = context.messages.iter().find(|m| {
+        if let AgentMessage::Llm(Message::User { content, .. }) = m {
+            content.iter().any(|c| {
+                matches!(c, Content::Text { text } if text.contains("FLAGGED"))
+            })
+        } else {
+            false
+        }
+    });
+    assert!(steering_msg.is_some(), "steering message not found in context");
+
+    if let Some(AgentMessage::Llm(Message::User { content, .. })) = steering_msg {
+        let has_warning = content.iter().any(|c| {
+            matches!(c, Content::Text { text } if text.contains("[Warning: steer-warn]"))
+        });
+        assert!(has_warning, "warning not appended to steering message; content: {:?}", content);
+    }
+}
+
+#[tokio::test]
+async fn test_filter_rejects_follow_up_message() {
+    // The filter passes the initial prompt but rejects the follow-up message.
+    // The first LLM turn completes normally; the run aborts before the follow-up turn.
+    let provider = MockProvider::text("Normal response.");
+    let mut config = make_config(Arc::new(provider));
+    config.input_filters = vec![Arc::new(ContentRejectFilter {
+        keyword: "BLOCKED_FOLLOWUP".into(),
+    })];
+
+    let followed = Arc::new(std::sync::Mutex::new(false));
+    let followed_clone = followed.clone();
+    config.get_follow_up_messages = Some(Box::new(move || {
+        let mut done = followed_clone.lock().unwrap();
+        if !*done {
+            *done = true;
+            vec![AgentMessage::Llm(Message::user("BLOCKED_FOLLOWUP content"))]
+        } else {
+            vec![]
+        }
+    }));
+
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+        agent_id: None,
+        session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
+    };
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    agent_loop(vec![AgentMessage::Llm(Message::user("hello"))], &mut context, &config, tx, cancel).await;
+    let events = collect_events(rx);
+
+    // First turn completed normally
+    assert!(
+        events.iter().any(|e| matches!(e, AgentEvent::TurnEnd { .. })),
+        "expected at least one TurnEnd"
+    );
+    // Follow-up was rejected
+    assert!(
+        events.iter().any(|e| matches!(e, AgentEvent::InputRejected { reason } if reason.contains("BLOCKED_FOLLOWUP"))),
+        "expected InputRejected for follow-up; got: {:?}", events
+    );
+    // AgentEnd still fires (run closes cleanly)
+    assert!(
+        events.iter().any(|e| matches!(e, AgentEvent::AgentEnd { .. })),
+        "expected AgentEnd"
+    );
+    // Only one TurnStart: the second turn (follow-up) never started
+    let turn_starts = events.iter().filter(|e| matches!(e, AgentEvent::TurnStart { .. })).count();
+    assert_eq!(turn_starts, 1, "expected exactly 1 TurnStart; follow-up turn was rejected");
+}
+
+#[tokio::test]
+async fn test_filter_warns_follow_up_message() {
+    // The filter warns on the follow-up message; warning text is appended before injection.
+    let provider = MockProvider::texts(vec!["First turn.", "Second turn."]);
+    let mut config = make_config(Arc::new(provider));
+    config.input_filters = vec![Arc::new(ContentWarnFilter {
+        keyword: "WARN_FOLLOWUP".into(),
+        warning: "follow-warn".into(),
+    })];
+
+    let followed = Arc::new(std::sync::Mutex::new(false));
+    let followed_clone = followed.clone();
+    config.get_follow_up_messages = Some(Box::new(move || {
+        let mut done = followed_clone.lock().unwrap();
+        if !*done {
+            *done = true;
+            vec![AgentMessage::Llm(Message::user("WARN_FOLLOWUP content"))]
+        } else {
+            vec![]
+        }
+    }));
+
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+        agent_id: None,
+        session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
+    };
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    agent_loop(vec![AgentMessage::Llm(Message::user("hello"))], &mut context, &config, tx, cancel).await;
+
+    // The follow-up message should be in context with the warning appended
+    let followup_msg = context.messages.iter().find(|m| {
+        if let AgentMessage::Llm(Message::User { content, .. }) = m {
+            content.iter().any(|c| {
+                matches!(c, Content::Text { text } if text.contains("WARN_FOLLOWUP"))
+            })
+        } else {
+            false
+        }
+    });
+    assert!(followup_msg.is_some(), "follow-up message not found in context");
+
+    if let Some(AgentMessage::Llm(Message::User { content, .. })) = followup_msg {
+        let has_warning = content.iter().any(|c| {
+            matches!(c, Content::Text { text } if text.contains("[Warning: follow-warn]"))
+        });
+        assert!(has_warning, "warning not appended to follow-up message; content: {:?}", content);
+    }
+    // Both turns ran
+    assert_eq!(context.messages.iter().filter(|m| matches!(m, AgentMessage::Llm(Message::Assistant { .. }))).count(), 2);
+}
+
+// ---------------------------------------------------------------------------
 // CompactionStrategy tests
 // ---------------------------------------------------------------------------
 
@@ -2301,10 +2563,10 @@ async fn test_continuation_kind_in_agent_start() {
 /// Two agent_loop() calls with different config_ids in the same session get independent .1 counters
 #[tokio::test]
 async fn test_agent_wrapper_independent_counters_per_config() {
-    use phi_core::agent::Agent;
+    use phi_core::BasicAgent;
     use phi_core::provider::MockProvider;
 
-    let mut agent = Agent::new(MockProvider::texts(vec!["first", "second"]));
+    let mut agent = BasicAgent::new(MockProvider::texts(vec!["first", "second"]));
 
     // First loop with model "mock-a"
     agent.model = "mock-a".into();

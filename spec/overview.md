@@ -14,7 +14,7 @@
 | Parallel, sequential, or batched tool execution | `src/agent_loop.rs:execute_tool_calls()` |
 | Automatic 3-tier context compaction when token budget is exceeded | `src/context.rs:compact_messages()` |
 | Built-in coding tools: bash execution, file read/write/edit, directory listing, grep search | `src/tools/` |
-| Sub-agent delegation: run an isolated child agent as a tool | `src/sub_agent.rs` |
+| Sub-agent delegation: run an isolated child agent as a tool | `src/agents/sub_agent.rs` |
 | Model Context Protocol (MCP) client for stdio and HTTP tool servers | `src/mcp/` |
 | AgentSkills system: load instruction sets from directory-based skill files | `src/skills.rs` |
 | OpenAPI tool auto-generation from spec files or URLs (optional feature) | `src/openapi/` |
@@ -23,9 +23,14 @@
 | Prompt caching hints for compatible providers (Anthropic) | `src/types.rs` (`CacheConfig`) |
 | Extended thinking / reasoning mode | `src/types.rs` (`ThinkingLevel`) |
 | Lifecycle callbacks: before/after each turn, on error | `src/agent_loop.rs` (`BeforeTurnFn`, `AfterTurnFn`, `OnErrorFn`) |
+| Loop-level hooks: setup/teardown around each complete agent run | `src/agent_loop.rs` (`BeforeLoopFn`, `AfterLoopFn`) |
+| Tool-level hooks: intercept each tool execution and streaming update | `src/agent_loop.rs` (`BeforeToolExecutionFn`, `AfterToolExecutionFn`, `BeforeToolExecutionUpdateFn`, `AfterToolExecutionUpdateFn`) |
+| Agent identity: stable `agent_id` / `session_id` / `loop_id` for cross-loop traceability | `src/agents/basic_agent.rs`, `src/types.rs` |
+| Evaluational parallelism: multiple independent loops grouped under one `session_id` | `src/agents/basic_agent.rs` (`BasicAgent::prompt` / `continue_loop_with_sender`) |
+| Continuation kinds: `Rerun` and `Branch` variants for retry vs. explore semantics | `src/types.rs` (`ContinuationKind`), `src/agent_loop.rs` |
 | Input filtering: moderation, PII redaction, injection detection | `src/types.rs` (`InputFilter`) |
-| User steering mid-run: inject messages between tool calls | `src/agent.rs` (steering queue), `src/agent_loop.rs` |
-| Follow-up work queuing: append more tasks after agent would stop | `src/agent.rs` (follow-up queue), `src/agent_loop.rs` |
+| User steering mid-run: inject messages between tool calls | `src/agents/basic_agent.rs` (steering queue), `src/agent_loop.rs` |
+| Follow-up work queuing: append more tasks after agent would stop | `src/agents/basic_agent.rs` (follow-up queue), `src/agent_loop.rs` |
 | Execution limits: max turns, max total tokens, max duration | `src/context.rs` (`ExecutionLimits`, `ExecutionTracker`) |
 
 ## 3. Inputs & Outputs
@@ -102,7 +107,7 @@ A child instance of the agent loop spawned internally when a `SubAgentTool` is c
 
 | Term | Definition |
 |---|---|
-| **Agent** | The stateful object (`src/agent.rs:Agent`) that owns the conversation history, tools, provider reference, and configuration. The application-facing entry point. |
+| **Agent** | The runtime interface trait (`src/agents/agent.rs`). Programs against this trait to remain independent of the specific implementation. `BasicAgent` (`src/agents/basic_agent.rs`) is the default in-memory implementation: owns conversation history, tools, provider reference, and configuration. The application-facing entry point. |
 | **Agent Loop** | The recursive execution cycle (`src/agent_loop.rs`) that calls the LLM, processes tool calls, checks steering, and repeats until the LLM stops or limits are hit. |
 | **Turn** | One complete LLM call plus the resulting tool executions. Bounded by `TurnStart`/`TurnEnd` events. |
 | **Steering** | A `Vec<AgentMessage>` injected into the running loop between tool executions. Used to redirect the agent mid-task without restarting it. |
@@ -137,3 +142,11 @@ A child instance of the agent loop spawned internally when a `SubAgentTool` is c
 | **McpContent** | A content item returned by an MCP tool call. Variants: `Text { text }` and `Image { data: base64, mimeType }`. |
 | **OpenApiAuth** | Authentication method for OpenAPI requests. Variants: `None`, `Bearer(token)`, `ApiKey { header, value }`. Token/value is redacted in debug output. |
 | **OperationFilter** | Controls which OpenAPI operations become tools. Variants: `All`, `ByOperationId`, `ByTag`, `ByPathPrefix`. Operations without an `operationId` are always skipped. |
+| **agent_id** | A UUID v4 string generated once when `Agent::new()` is called. Stable for the lifetime of the `Agent` instance. Included in every `AgentStart` event to identify which agent produced the run. |
+| **session_id** | A UUID v4 string generated once when `Agent::new()` is called. Groups all loops (origin + continuations) that belong to one logical session. Stable for the lifetime of the `Agent` instance. |
+| **loop_id** | A string of the form `"{session_id}.{config_id}.{N}"` that uniquely identifies one `agent_loop` / `agent_loop_continue` call. The `config_id` segment is either caller-supplied or auto-derived from provider + model + thinking level. `N` is a per-`config_id` monotonic counter. Included in every `AgentStart` event. |
+| **ContinuationKind** | Labels how an `agent_loop_continue` call relates to prior loops. Set on `AgentContext.continuation_kind` before calling. Variants: `Default` (unspecified continuation), `Rerun { tag }` (retry the same scenario from an equivalent context), `Branch { tag }` (explore a different execution path). Tags are RFC 3339 UTC timestamps. Surfaced in `AgentStart.continuation_kind`. |
+| **TurnTrigger** | Identifies what caused a turn to begin. Emitted in `TurnStart.triggered_by`. Variants: `User` (first turn of an origin `agent_loop` call), `SubAgent` (running as a sub-agent via `SubAgentTool`), `FollowUp` (subsequent turns, tool round-trips, Default/Rerun continuations, and steering-injected turns), `Branch` (first turn of a `ContinuationKind::Branch` continuation). |
+| **BeforeLoopFn** / **AfterLoopFn** | Loop-level lifecycle hooks on `AgentLoopConfig`. `BeforeLoopFn` fires before `AgentStart` — return `false` to abort the run before it begins. `AfterLoopFn` fires after `AgentEnd` with the new messages and accumulated usage. |
+| **BeforeToolExecutionFn** / **AfterToolExecutionFn** | Tool-level lifecycle hooks on `AgentLoopConfig`. `BeforeToolExecutionFn` fires before `ToolExecutionStart` — return `false` to skip the tool call. `AfterToolExecutionFn` fires after `ToolExecutionEnd` with the tool name, call ID, and error flag. |
+| **BeforeToolExecutionUpdateFn** / **AfterToolExecutionUpdateFn** | Streaming tool update hooks on `AgentLoopConfig`. Fire around each `ToolExecutionUpdate` event emitted when a tool calls `ctx.on_update(partial)`. `BeforeToolExecutionUpdateFn` returns `false` to suppress the event (tool keeps running; final `ToolResult` is unaffected). `AfterToolExecutionUpdateFn` fires after the event if not suppressed. |

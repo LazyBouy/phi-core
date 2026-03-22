@@ -3,7 +3,7 @@
 use phi_core::agent_loop::{agent_loop, AgentLoopConfig};
 use phi_core::provider::mock::*;
 use phi_core::provider::MockProvider;
-use phi_core::sub_agent::SubAgentTool;
+use phi_core::agents::SubAgentTool;
 use phi_core::*;
 use std::sync::Arc;
 use tokio::sync::mpsc;

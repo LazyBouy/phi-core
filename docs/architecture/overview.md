@@ -41,7 +41,7 @@ The pure agent loop. No opinions about LLMs, no built-in tools. Just the control
 
 Batteries-included single-agent layer. Most users interact with this.
 
-**Modules:** `agent.rs`, `context.rs`, `retry.rs`, `provider/*.rs`, `tools/*.rs`, `mcp/*.rs`
+**Modules:** `agents/`, `context.rs`, `retry.rs`, `provider/*.rs`, `tools/*.rs`, `mcp/*.rs`
 
 **Adds on top of Layer 1:**
 - Concrete providers — Anthropic, OpenAI-compat, Google, Azure, Bedrock, Vertex
@@ -51,7 +51,9 @@ Batteries-included single-agent layer. Most users interact with this.
 - Context management — token estimation, smart truncation, execution limits
 - Built-in tools — bash, read_file, write_file, edit_file, list_files, search
 - MCP client — stdio + HTTP transports, tool adapter
-- `Agent` struct — stateful builder wrapping it all together
+- `Agent` trait — the runtime interface (prompting, state, control)
+- `BasicAgent` struct — default in-memory implementation of `Agent`; stateful builder wrapping it all together
+- `SubAgentTool` — delegates tasks to a child `agent_loop()` as a tool
 
 ### Layer 3: Orchestration (planned)
 
@@ -84,7 +86,10 @@ phi-core/
 │   ├── agent_loop.rs           # Core loop: prompt → LLM → tools → repeat
 │   │
 │   │── Layer 2: Agent + Providers ─────────────
-│   ├── agent.rs                # Agent struct (stateful wrapper)
+│   ├── agents/
+│   │   ├── agent.rs            # Agent trait (runtime interface)
+│   │   ├── basic_agent.rs      # BasicAgent struct (default in-memory impl)
+│   │   └── sub_agent.rs        # SubAgentTool (child agent_loop as a tool)
 │   ├── context.rs              # Token estimation, compaction, limits
 │   ├── retry.rs                # Retry with exponential backoff
 │   ├── provider/
@@ -121,8 +126,8 @@ phi-core/
                     └──────┬──────┘
                            │ prompt / prompt_messages
                     ┌──────▼──────┐
-                    │    Agent    │  Layer 2: stateful wrapper
-                    │  (agent.rs) │  Manages queues, tools, state
+                    │ BasicAgent  │  Layer 2: stateful wrapper
+                    │ (agents/)   │  Manages queues, tools, state
                     └──────┬──────┘
                            │
                     ┌──────▼──────┐

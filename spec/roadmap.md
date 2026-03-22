@@ -776,6 +776,74 @@ boundaries. The system is configurable for production use.
   - Depends on: REQ-041
   - Definition of Done: Setting `max_tokens_field: "max_completion_tokens"` causes the OpenAI provider to use that key in the request body.
 
+---
+
+### Milestone 4.9 — Agent Identity and Event Hook Observability
+
+- [ ] **REQ-180:** Define `ContinuationKind` enum in `types.rs` with three variants: `Default` (unspecified continuation), `Rerun { tag: String }` (retry from equivalent context), `Branch { tag: String }` (different execution path). Tags are RFC 3339 UTC timestamps auto-generated at call time by the caller. *(Source: [AR])*
+  - Depends on: —
+  - Definition of Done: All three variants instantiate; `Rerun { tag }` and `Branch { tag }` round-trip through JSON serialization preserving the tag string.
+
+- [ ] **REQ-181:** Define `TurnTrigger` enum in `types.rs` with four variants: `User` (first turn of origin call), `SubAgent` (sub-agent invocation), `FollowUp` (subsequent turns, tool round-trips, steering, Default/Rerun continuations), `Branch` (first turn of a Branch continuation). Add `triggered_by: TurnTrigger` field to `AgentEvent::TurnStart`. *(Source: [AR])*
+  - Depends on: REQ-007
+  - Definition of Done: `TurnStart` events carry the correct `triggered_by` value: origin calls emit `User` on turn 0; Branch continuations emit `Branch` on turn 0; all other first turns and all subsequent turns emit `FollowUp`.
+
+- [ ] **REQ-182:** Add `before_loop: Option<BeforeLoopFn>` and `after_loop: Option<AfterLoopFn>` to `AgentLoopConfig`. `BeforeLoopFn` fires before `AgentStart` — return `false` to abort the loop (emit `AgentEnd { messages: [] }` instead). `AfterLoopFn` fires after `AgentEnd` with the new messages and accumulated usage. Both are wired in `agent_loop` and `agent_loop_continue`. *(Source: [AR])*
+  - Depends on: REQ-036, REQ-037
+  - Definition of Done: A `before_loop` returning `false` stops the run before `AgentStart`; `after_loop` is called exactly once per loop call, after `AgentEnd`, with correct message and usage values.
+
+- [ ] **REQ-183:** Add `before_tool_execution: Option<BeforeToolExecutionFn>` and `after_tool_execution: Option<AfterToolExecutionFn>` to `AgentLoopConfig`. `BeforeToolExecutionFn` fires before `ToolExecutionStart` — return `false` to skip the tool (emit skipped error result). `AfterToolExecutionFn` fires after `ToolExecutionEnd`. *(Source: [AR])*
+  - Depends on: REQ-046
+  - Definition of Done: A `before_tool_execution` returning `false` for one tool causes that tool to be skipped with an error result; other tools in the same batch are unaffected. `after_tool_execution` is called exactly once per tool call.
+
+- [ ] **REQ-184:** Add `before_tool_execution_update: Option<BeforeToolExecutionUpdateFn>` and `after_tool_execution_update: Option<AfterToolExecutionUpdateFn>` to `AgentLoopConfig`. `BeforeToolExecutionUpdateFn` fires before each `ToolExecutionUpdate` — return `false` to suppress the event (tool keeps running, final `ToolResult` unaffected). `AfterToolExecutionUpdateFn` fires after the event when not suppressed. *(Source: [AR])*
+  - Depends on: REQ-142
+  - Definition of Done: Suppressing an update via `before_tool_execution_update` causes no `ToolExecutionUpdate` event to be emitted; `after_tool_execution_update` is not called for suppressed updates.
+
+- [ ] **REQ-185:** Enforce and document the event hook ordering invariant: `before_loop → AgentStart … before_turn → TurnStart … before_tool_execution → ToolExecutionStart … (before_tool_execution_update → ToolExecutionUpdate → after_tool_execution_update)* … ToolExecutionEnd → after_tool_execution … TurnEnd → after_turn … AgentEnd → after_loop`. No hook may fire out of this sequence. *(Source: [AR])*
+  - Depends on: REQ-182, REQ-183, REQ-184
+  - Definition of Done: An integration test with all hooks registered verifies they fire in the documented order for a multi-turn, multi-tool run.
+
+- [ ] **REQ-186:** Add `fn provider_id(&self) -> &str` as a required method on the `StreamProvider` trait (`src/provider/traits.rs`). Implement in all 7 providers: `"anthropic"`, `"openai"`, `"openai_responses"`, `"azure_openai"`, `"google"`, `"google_vertex"`, `"bedrock"`. The `MockProvider` returns `"mock"`. *(Source: [AR])*
+  - Depends on: REQ-020
+  - Definition of Done: All 8 `StreamProvider` implementations compile with `provider_id()` returning the documented string; existing tests pass unchanged.
+
+- [ ] **REQ-187:** Add `config_id: Option<String>` field to `AgentLoopConfig`. When `None`, `Agent::next_loop_id()` auto-derives the effective config ID as `"{provider_id}.{model_slug}[.thinking]"`. When `Some`, the supplied value is used verbatim. Used as the middle segment of `loop_id`: `"{session_id}.{config_id}.{N}"`. *(Source: [AR])*
+  - Depends on: REQ-029, REQ-186
+  - Definition of Done: Setting `config_id: Some("my-config")` causes `loop_id` to include `"my-config"` as its middle segment; leaving `None` produces an auto-derived segment from provider + model.
+
+- [ ] **REQ-188:** Add `agent_id: String` and `session_id: String` fields to `Agent` struct, both initialized to UUID v4 in `Agent::new()`. These are stable for the lifetime of the `Agent` instance and injected into every `AgentContext` built by `Agent::prompt_*` and `continue_loop_*`. *(Source: [AR])*
+  - Depends on: REQ-024
+  - Definition of Done: All `AgentStart` events emitted by a single `Agent` instance share the same `agent_id` and `session_id` values across multiple `prompt()` calls.
+
+- [ ] **REQ-189:** Add `loop_counters: HashMap<String, usize>` and `last_loop_id: Option<String>` to `Agent`. Implement `Agent::next_loop_id(config) -> String`: compute `effective_config_id` from `config.config_id` or auto-derivation; increment the per-`"{session_id}.{effective_config_id}"` counter; return `"{session_id}.{effective_config_id}.{N}"`. Set `last_loop_id` after each `prompt_*` / `continue_loop_*` call. *(Source: [AR])*
+  - Depends on: REQ-187, REQ-188
+  - Definition of Done: Two `agent_loop` calls on the same agent with the same provider/model produce `loop_id` values ending in `.1` and `.2` respectively; different configs produce independent counters (both `.1`).
+
+- [ ] **REQ-190:** Add `agent_id`, `session_id`, `loop_id`, `parent_loop_id`, and `continuation_kind` fields to `AgentContext`. In `agent_loop`, generate and write back `agent_id`/`session_id`/`loop_id` if `None` at entry. `parent_loop_id` and `continuation_kind` remain whatever the caller set. *(Source: [AR])*
+  - Depends on: REQ-028, REQ-180, REQ-189
+  - Definition of Done: After `agent_loop` returns, `context.agent_id`, `context.session_id`, and `context.loop_id` are all `Some`; a subsequent `agent_loop_continue` on the same context can read them without regenerating.
+
+- [ ] **REQ-191:** In `agent_loop_continue`, assert `context.agent_id.is_some()` and `context.session_id.is_some()` with descriptive panic messages. Do not silently generate new UUIDs. *(Source: [AR])*
+  - Depends on: REQ-037, REQ-190
+  - Definition of Done: Calling `agent_loop_continue` with `agent_id: None` panics with a message referencing "agent_loop_continue requires context.agent_id to be set"; with both fields `Some`, the assertion passes.
+
+- [ ] **REQ-192:** Add `agent_id: String`, `session_id: String`, `loop_id: String`, `parent_loop_id: Option<String>`, and `continuation_kind: Option<ContinuationKind>` to `AgentEvent::AgentStart`. Emit these fields from both `agent_loop` and `agent_loop_continue`. `parent_loop_id` is `None` for origin calls; `continuation_kind` is `None` for origin calls and `Some(...)` for continuations. *(Source: [AR])*
+  - Depends on: REQ-007, REQ-180, REQ-190, REQ-191
+  - Definition of Done: `AgentStart` events from `agent_loop` have `parent_loop_id: None` and `continuation_kind: None`; events from `agent_loop_continue` carry the values set on `AgentContext`.
+
+- [ ] **REQ-193:** In `run_loop`, determine `TurnTrigger` for the first turn based on `context.continuation_kind`: `Branch(..)` → `TurnTrigger::Branch`; any other `Some(..)` → `TurnTrigger::FollowUp`; `None` → `config.first_turn_trigger` (default `User`; `SubAgent` for sub-agent callers). All subsequent turns use `TurnTrigger::FollowUp`. Emit `triggered_by` in `AgentEvent::TurnStart`. *(Source: [AR])*
+  - Depends on: REQ-038, REQ-181
+  - Definition of Done: A `Branch` continuation emits `TurnTrigger::Branch` on turn 0 and `TurnTrigger::FollowUp` on all subsequent turns; a `Default` continuation emits `TurnTrigger::FollowUp` on all turns.
+
+- [ ] **REQ-194:** Add `child_loop_id: Option<String>` to both `ToolResult` and `AgentEvent::ToolExecutionEnd`. Sub-agent tools set `ToolResult.child_loop_id` to the child loop's `loop_id` after `agent_loop` completes. `execute_single_tool` propagates `result.child_loop_id` into `ToolExecutionEnd`. Non-sub-agent tools leave both fields `None`. *(Source: [AR])*
+  - Depends on: REQ-010, REQ-046, REQ-148, REQ-190
+  - Definition of Done: A `ToolExecutionEnd` event from a `SubAgentTool` call carries a non-`None` `child_loop_id`; the same `loop_id` appears in the child's `AgentStart` event.
+
+- [ ] **REQ-195:** Add `SubAgentTool::with_parent_loop_id(loop_id: String)` builder method. When set, the child `AgentContext` built inside `execute()` has `parent_loop_id: Some(loop_id)`. The child's `AgentStart` event thus carries `parent_loop_id`, enabling ancestry tracing from child back to parent. *(Source: [AR])*
+  - Depends on: REQ-148, REQ-190
+  - Definition of Done: A sub-agent tool configured with `with_parent_loop_id("parent.loop.1")` emits a child `AgentStart` event with `parent_loop_id: Some("parent.loop.1")`.
+
 ***
 
 ## Level 5 — Creative
@@ -1145,6 +1213,22 @@ runbooks cover all known failure modes.
 | REQ-177 | Library packaging with feature flags | 6 | 6.4 | [AR] | REQ-158 |
 | REQ-178 | CI pipeline with gated live tests | 6 | 6.4 | [AR] | REQ-164–169 |
 | REQ-179 | Operational runbooks | 6 | 6.4 | [AR] | REQ-071–077 |
+| REQ-180 | `ContinuationKind` enum (`Default`, `Rerun { tag }`, `Branch { tag }`) | 4 | 4.9 | [AR] | — |
+| REQ-181 | `TurnTrigger` enum (`User`, `FollowUp`, `SubAgent`, `Branch`) | 4 | 4.9 | [AR] | — |
+| REQ-182 | `before_loop`/`after_loop` hooks on `AgentLoopConfig` | 4 | 4.9 | [AR] | REQ-029, REQ-036 |
+| REQ-183 | `before_tool_execution`/`after_tool_execution` hooks on `AgentLoopConfig` | 4 | 4.9 | [AR] | REQ-029, REQ-046 |
+| REQ-184 | `before_tool_execution_update`/`after_tool_execution_update` hooks | 4 | 4.9 | [AR] | REQ-142, REQ-183 |
+| REQ-185 | Guaranteed event hook ordering invariant | 4 | 4.9 | [AR] | REQ-182–184, REQ-091–092 |
+| REQ-186 | `provider_id() -> &str` required method on `StreamProvider`; implement in all 7 providers | 4 | 4.9 | [AR] | REQ-020, REQ-125 |
+| REQ-187 | `config_id: Option<String>` on `AgentLoopConfig`; auto-derived when `None` | 4 | 4.9 | [AR] | REQ-029, REQ-186 |
+| REQ-188 | `agent_id`/`session_id` UUID fields on `Agent`; stable for Agent lifetime | 4 | 4.9 | [AR] | REQ-024 |
+| REQ-189 | `loop_counters` and `last_loop_id` on `Agent`; `next_loop_id()` helper | 4 | 4.9 | [AR] | REQ-024, REQ-187, REQ-188 |
+| REQ-190 | `agent_id`, `session_id`, `loop_id`, `parent_loop_id`, `continuation_kind` on `AgentContext`; write-back in `agent_loop` | 4 | 4.9 | [AR] | REQ-028, REQ-180, REQ-188 |
+| REQ-191 | Assert `agent_id`/`session_id` are `Some` in `agent_loop_continue` | 4 | 4.9 | [AR] | REQ-037, REQ-190 |
+| REQ-192 | `AgentStart` event: `agent_id`, `session_id`, `loop_id`, `parent_loop_id`, `continuation_kind` fields | 4 | 4.9 | [AR] | REQ-007, REQ-180, REQ-190 |
+| REQ-193 | `TurnStart.triggered_by: TurnTrigger`; Branch continuation uses `Branch` on first turn | 4 | 4.9 | [AR] | REQ-007, REQ-181, REQ-190 |
+| REQ-194 | `child_loop_id: Option<String>` on `ToolResult` and `ToolExecutionEnd`; set by sub-agent tools | 4 | 4.9 | [AR] | REQ-010, REQ-007, REQ-148 |
+| REQ-195 | `SubAgentTool::with_parent_loop_id(loop_id)` builder; child `AgentContext` includes `parent_loop_id` | 4 | 4.9 | [AR] | REQ-151, REQ-190 |
 
 ***
 

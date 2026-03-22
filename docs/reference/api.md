@@ -37,19 +37,33 @@ pub fn default_tools() -> Vec<Box<dyn AgentTool>>
 
 Returns: `BashTool`, `ReadFileTool`, `WriteFileTool`, `EditFileTool`, `ListFilesTool`, `SearchTool`.
 
-## Agent Struct
+## Agent Trait
 
-High-level stateful wrapper around the agent loop.
+The runtime interface for all agent implementations. Programs against this trait to remain independent of the specific implementation.
+
+```rust
+use phi_core::Agent;  // trait must be in scope to call trait methods
+```
+
+Trait methods cover: prompting (`prompt`, `prompt_messages`, `prompt_with_sender`, `prompt_messages_with_sender`, `continue_loop`, `continue_loop_with_sender`), state access (`messages`, `is_streaming`, `agent_id`, `session_id`, `last_loop_id`), message mutation (`clear_messages`, `append_message`, `replace_messages`, `save_messages`, `restore_messages`, `set_tools`), control (`abort`, `reset`), and steering/follow-up queues (`steer`, `follow_up`, `clear_steering_queue`, `clear_follow_up_queue`, `clear_all_queues`, `set_steering_mode`, `set_follow_up_mode`).
+
+The trait is object-safe: `Box<dyn Agent>` and `&mut dyn Agent` work for runtime polymorphism.
+
+`phi_core::*` re-exports `Agent`, so `use phi_core::*` brings it into scope automatically.
+
+## BasicAgent Struct
+
+The default in-memory `Agent` implementation. Owns a single linear message history, tool registry, and provider reference.
 
 ### Construction
 
 ```rust
-let agent = Agent::new(provider);
+let agent = BasicAgent::new(provider);
 ```
 
 | Signature | Description |
 |-----------|-------------|
-| `Agent::new(provider: impl StreamProvider + 'static) -> Self` | Create a new agent with the given provider |
+| `BasicAgent::new(provider: impl StreamProvider + 'static) -> Self` | Create a new agent with the given provider |
 
 ### Builder Methods
 
@@ -102,9 +116,15 @@ All return `Self` for chaining (unless noted as `Result`).
 
 | Method | Description |
 |--------|-------------|
+| `on_before_loop(f: Fn(&[AgentMessage], u64) -> bool) -> Self` | Called once before `AgentStart`; return `false` to abort the entire run |
+| `on_after_loop(f: Fn(&[AgentMessage], &Usage)) -> Self` | Called once after `AgentEnd` with all new messages and accumulated usage |
 | `on_before_turn(f: Fn(&[AgentMessage], usize) -> bool) -> Self` | Called before each LLM call; return `false` to abort |
 | `on_after_turn(f: Fn(&[AgentMessage], &Usage)) -> Self` | Called after each LLM response and tool execution |
 | `on_error(f: Fn(&str)) -> Self` | Called when the LLM returns `StopReason::Error` |
+| `on_before_tool_execution(f: Fn(&str, &str, &Value) -> bool) -> Self` | Called before each tool call `(call_id, name, args)`; return `false` to skip |
+| `on_after_tool_execution(f: Fn(&str, &str, bool)) -> Self` | Called after each tool call `(name, call_id, is_error)` |
+| `on_before_tool_execution_update(f: Fn(&str, &str, &str) -> bool) -> Self` | Called before each streaming tool update `(name, call_id, text)`; return `false` to suppress the event |
+| `on_after_tool_execution_update(f: Fn(&str, &str, &str)) -> Self` | Called after each streaming tool update `(name, call_id, text)` |
 
 ### Prompting
 
@@ -114,8 +134,8 @@ All return `Self` for chaining (unless noted as `Result`).
 | `async prompt_messages(messages) -> UnboundedReceiver<AgentEvent>` | Send messages as prompt |
 | `async prompt_with_sender(text, tx: UnboundedSender<AgentEvent>)` | Send a text prompt, streaming events to a caller-provided sender for real-time consumption |
 | `async prompt_messages_with_sender(messages, tx)` | Send messages, streaming events to a caller-provided sender |
-| `async continue_loop() -> UnboundedReceiver<AgentEvent>` | Resume from current context (for retries) |
-| `async continue_loop_with_sender(tx: UnboundedSender<AgentEvent>)` | Resume from current context, streaming events to a caller-provided sender |
+| `async continue_loop() -> UnboundedReceiver<AgentEvent>` | Resume from current context with `ContinuationKind::Default` |
+| `async continue_loop_with_sender(tx: UnboundedSender<AgentEvent>, kind: ContinuationKind)` | Resume from current context with an explicit continuation kind, streaming events to a caller-provided sender |
 
 ### State Access
 
@@ -123,6 +143,9 @@ All return `Self` for chaining (unless noted as `Result`).
 |--------|-------------|
 | `messages() -> &[AgentMessage]` | Get the full message history |
 | `is_streaming() -> bool` | Whether the agent is currently running |
+| `agent_id() -> &str` | Stable UUID assigned at construction; included in every `AgentStart` event |
+| `session_id() -> &str` | Stable UUID assigned at construction; groups all loops from this `Agent` instance |
+| `last_loop_id() -> Option<&str>` | The `loop_id` of the most recently started loop; `None` before first run |
 
 ### State Mutation
 
@@ -159,7 +182,11 @@ All return `Self` for chaining (unless noted as `Result`).
 The crate re-exports key types from `lib.rs`:
 
 ```rust
-pub use agent::Agent;
+pub use agents::{Agent, BasicAgent, QueueMode};  // Agent trait + BasicAgent struct
+pub use agents::SubAgentTool;
 pub use agent_loop::{agent_loop, agent_loop_continue};
+pub use context::{CompactionStrategy, DefaultCompaction};
+pub use retry::RetryConfig;
+pub use skills::SkillSet;
 pub use types::*;  // Message, Content, AgentMessage, AgentEvent, etc.
 ```

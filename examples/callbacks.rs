@@ -8,7 +8,7 @@
 //! Uses MockProvider so no API key is needed.
 //!   cargo run --example callbacks
 
-use phi_core::agent::Agent;
+use phi_core::BasicAgent;
 use phi_core::provider::mock::*;
 use phi_core::provider::MockProvider;
 use phi_core::types::*;
@@ -70,7 +70,7 @@ async fn main() {
         }
     }
 
-    let mut agent = Agent::new(provider)
+    let mut agent = BasicAgent::new(provider)
         .with_system_prompt("You are helpful.")
         .with_model("mock")
         .with_api_key("test")

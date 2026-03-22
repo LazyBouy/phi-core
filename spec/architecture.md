@@ -2,12 +2,14 @@
 
 ## 1. Component Map
 
-### Agent (`src/agent.rs`)
-**Responsibility:** Stateful wrapper that owns the conversation and all configuration. The application-facing API.
+### Agent trait + BasicAgent (`src/agents/`)
+**Responsibility:** `Agent` (trait, `agents/agent.rs`) defines the runtime interface — prompting, state access, control, and steering queues. `BasicAgent` (struct, `agents/basic_agent.rs`) is the default in-memory implementation: owns the conversation, tools, and provider, and is the application-facing entry point. `SubAgentTool` (`agents/sub_agent.rs`) implements `AgentTool` to delegate tasks to a child `agent_loop()`.
 **Public interface:**
 - `prompt(text)` — Send a text prompt; returns an event stream receiver.
 - `prompt_messages(messages)` — Send one or more messages as a prompt; returns an event stream receiver.
 - `prompt_with_sender(text, tx)` — Send a text prompt, streaming events to a caller-provided sender.
+- `continue_loop()` — Resume from existing context with `ContinuationKind::Default`; returns an event stream receiver.
+- `continue_loop_with_sender(tx, kind)` — Resume with an explicit `ContinuationKind` (`Default`, `Rerun { tag }`, or `Branch { tag }`), streaming events to a caller-provided sender.
 - `steer(msg)` — Queue a message that will be injected mid-run between tool executions.
 - `follow_up(msg)` — Queue a message to be processed after the agent would otherwise stop.
 - `abort()` — Cancel the in-progress run by signalling the cancellation token.
@@ -47,7 +49,9 @@
 ### StreamProvider implementations (`src/provider/`)
 **Responsibility:** Translate the unified `StreamConfig` into provider-specific HTTP requests and parse streaming responses back into `StreamEvent`s.
 **Providers:** `AnthropicProvider`, `OpenAiCompatProvider` (15+ backends), `OpenAiResponsesProvider`, `AzureOpenAiProvider`, `GoogleProvider`, `GoogleVertexProvider`, `BedrockProvider`, `MockProvider`.
-**Public interface:** `StreamProvider::stream(config, tx, cancel) -> Result<Message, ProviderError>`.
+**Public interface:**
+- `StreamProvider::stream(config, tx, cancel) -> Result<Message, ProviderError>` — stream a single LLM response.
+- `StreamProvider::provider_id() -> &str` — stable lowercase identifier for this provider (e.g. `"anthropic"`, `"openai"`, `"google"`, `"bedrock"`). Used as the first segment of the auto-derived `config_id` in `loop_id` construction.
 
 ### ToolSystem (`src/tools/`)
 **Responsibility:** Built-in tool implementations. Each implements `AgentTool`.
@@ -60,10 +64,11 @@
 - `AgentTool::parameters_schema()` — JSON Schema object describing the tool's accepted parameters.
 - `AgentTool::execute(params, ctx)` — Run the tool with resolved parameters and a context carrying the cancellation token and progress callbacks.
 
-### SubAgentTool (`src/sub_agent.rs`)
-**Responsibility:** Implements `AgentTool` to delegate tasks to a child `agent_loop()` with isolated context, its own toolset, and a turn limit.
+### SubAgentTool (`src/agents/sub_agent.rs`)
+**Responsibility:** Implements `AgentTool` to delegate tasks to a child `agent_loop()` with isolated context, its own toolset, and a turn limit. The child gets its own `agent_id`, `session_id`, and `loop_id`; its `parent_loop_id` is linked back to the calling loop via `with_parent_loop_id`.
 **Public interface:**
 - `SubAgentTool::new(name, provider).with_*(...)` — Construct a sub-agent tool with its own system prompt, model, toolset, and turn limit, then register it as an `AgentTool`.
+- `SubAgentTool::with_parent_loop_id(loop_id)` — Supply the parent loop's `loop_id` so the child `AgentStart` event carries `parent_loop_id`, enabling ancestry tracing across the event stream.
 
 ### SkillSystem (`src/skills.rs`)
 **Responsibility:** Loads `SKILL.md` files from one or more directories, parses YAML frontmatter, and formats them as an XML index injected into the system prompt.
@@ -218,13 +223,15 @@ sequenceDiagram
     participant ChildProvider as Provider
 
     ParentLoop->>SubAgentTool: execute({task: "..."}, ToolContext)
-    SubAgentTool->>SubAgentTool: build fresh AgentContext (empty messages)
+    SubAgentTool->>SubAgentTool: build AgentContext with child identity<br/>(new agent_id, session_id, loop_id="{child_session}.sub.1",<br/>parent_loop_id = parent's loop_id)
     SubAgentTool->>ChildLoop: agent_loop([task_prompt], context, config, tx, cancel)
+    ChildLoop->>ChildLoop: emit AgentStart{loop_id, parent_loop_id}
     ChildLoop->>ChildProvider: stream(...)
     ChildProvider-->>ChildLoop: streaming events
     ChildLoop-->>SubAgentTool: Vec<AgentMessage> (final messages)
     SubAgentTool->>SubAgentTool: extract_final_text(messages)
-    SubAgentTool-->>ParentLoop: Ok(ToolResult{text: final_text})
+    SubAgentTool-->>ParentLoop: Ok(ToolResult{text, child_loop_id: Some(loop_id)})
+    Note over ParentLoop: ToolExecutionEnd{child_loop_id} emitted<br/>→ parent stream records child ancestry
 ```
 
 ---
@@ -321,18 +328,36 @@ Derived: cache_hit_rate() = cache_read / (input + cache_read + cache_write)
 ### AgentEvent
 ```
 Entity: AgentEvent (enum)
-  AgentStart                          [loop began]
+  AgentStart {
+    agent_id:          String                    [stable agent instance identifier]
+    session_id:        String                    [groups all loops in one session]
+    loop_id:           String                    ["{session_id}.{config_id}.{N}" — unique per call]
+    parent_loop_id:    Option<String>            [None for origin calls; Some for continuations/sub-agents]
+    continuation_kind: Option<ContinuationKind>  [None=origin; Some(Default/Rerun/Branch)=continuation]
+    timestamp:         DateTime<Utc>
+    metadata:          Option<JSON>
+  }
   AgentEnd { messages: Vec<AgentMessage> }  [loop finished; all new messages]
-  TurnStart                           [LLM call about to begin]
-  TurnEnd { message, tool_results }   [LLM call + tools complete]
-  MessageStart { message }            [message streaming began]
-  MessageUpdate { message, delta }    [content delta arrived]
-  MessageEnd { message }              [message complete]
+  TurnStart {
+    turn_index:   u32
+    timestamp:    DateTime<Utc>
+    triggered_by: TurnTrigger               [what caused this turn to begin]
+  }
+  TurnEnd { message, tool_results }         [LLM call + tools complete]
+  MessageStart { message }                  [message streaming began]
+  MessageUpdate { message, delta }          [content delta arrived]
+  MessageEnd { message }                    [message complete]
   ToolExecutionStart { tool_call_id, tool_name, args }
-  ToolExecutionUpdate { tool_call_id, tool_name, partial_result }  [progress]
-  ToolExecutionEnd { tool_call_id, tool_name, result, is_error }
+  ToolExecutionUpdate { tool_call_id, tool_name, partial_result }  [streaming partial result]
+  ToolExecutionEnd {
+    tool_call_id:  String
+    tool_name:     String
+    result:        ToolResult
+    is_error:      bool
+    child_loop_id: Option<String>           [Some only when tool spawned a sub-agent loop]
+  }
   ProgressMessage { tool_call_id, tool_name, text }  [user-facing status text]
-  InputRejected { reason }            [input filter blocked the prompt]
+  InputRejected { reason }                  [input filter blocked the prompt]
 ```
 
 ### StreamDelta
@@ -353,11 +378,42 @@ Entity: ToolContext
   on_progress: Option<ProgressFn>    [callback for user-facing status text]
 ```
 
+### ContinuationKind
+```
+Entity: ContinuationKind (enum)
+  Default                 [unspecified continuation — preserves legacy semantics]
+  Rerun { tag: String }   [retry from an equivalent context; tag is RFC 3339 UTC timestamp]
+  Branch { tag: String }  [explore a different path from a branching point; tag is RFC 3339 UTC timestamp]
+
+Set on AgentContext.continuation_kind before calling agent_loop_continue().
+Surfaced in AgentStart.continuation_kind (None = origin call).
+TurnTrigger semantics:
+  Default / Rerun → first turn uses TurnTrigger::FollowUp
+  Branch          → first turn uses TurnTrigger::Branch
+```
+
+### TurnTrigger
+```
+Entity: TurnTrigger (enum)
+  User      [first turn of an agent_loop() origin call with new user prompts]
+  SubAgent  [first turn when running as a sub-agent via SubAgentTool]
+  FollowUp  [subsequent turns; tool round-trip, steering, or Default/Rerun continuation]
+  Branch    [first turn of an agent_loop_continue(Branch) call]
+
+Emitted in TurnStart.triggered_by.
+Priority on first turn (run_loop):
+  1. Branch continuation     → TurnTrigger::Branch
+  2. Any other continuation  → TurnTrigger::FollowUp
+  3. Origin call             → config.first_turn_trigger (User or SubAgent)
+Subsequent turns always use TurnTrigger::FollowUp.
+```
+
 ### ToolResult / ToolError
 ```
 Entity: ToolResult
-  content: Vec<Content>   [tool output content blocks]
-  details: JSON           [structured metadata, not sent to LLM, e.g. exit_code]
+  content:       Vec<Content>    [tool output content blocks]
+  details:       JSON            [structured metadata, not sent to LLM, e.g. exit_code]
+  child_loop_id: Option<String>  [set by sub-agent tools; None for all other tools]
 
 Entity: ToolError (enum)
   Failed(String)          [general execution failure]
@@ -670,18 +726,34 @@ All fields on `Agent`:
 | `compaction_strategy` | `Option<Arc<dyn CompactionStrategy>>` | Overrides default 3-tier compaction |
 | `cancel` | `Option<CancellationToken>` | Created when `prompt()` starts, consumed by `abort()` |
 | `is_streaming` | `bool` | Set true on `prompt()` entry, false on exit |
+| `agent_id` | `String` | UUID v4 generated once at `Agent::new()`; stable for the Agent's lifetime. Injected into every `AgentContext` built by this agent. |
+| `session_id` | `String` | UUID v4 generated once at `Agent::new()`; groups all loops under one session. Stable for the Agent's lifetime. |
+| `loop_counters` | `HashMap<String, usize>` | Per-`"{session_id}.{config_id}"` monotonic counter; incremented by `next_loop_id()` to produce the `N` component of `loop_id`. |
+| `last_loop_id` | `Option<String>` | `loop_id` of the most recently started loop; set after each `prompt_*` or `continue_loop_*` call. Becomes `parent_loop_id` on the next continuation. |
+| `before_loop` | `Option<BeforeLoopFn>` | Hook called once before `AgentStart`. Signature: `fn(&[AgentMessage], loop_index: usize) -> bool`; return `false` to abort before `AgentStart`. |
+| `after_loop` | `Option<AfterLoopFn>` | Hook called once after `AgentEnd`. Signature: `fn(&[AgentMessage], &Usage)`. |
+| `before_tool_execution` | `Option<BeforeToolExecutionFn>` | Hook called before each `ToolExecutionStart`. Signature: `fn(&str, &str, &JSON) -> bool` (tool_name, call_id, args); return `false` to skip. |
+| `after_tool_execution` | `Option<AfterToolExecutionFn>` | Hook called after each `ToolExecutionEnd`. Signature: `fn(&str, &str, bool)` (tool_name, call_id, is_error). |
+| `before_tool_execution_update` | `Option<BeforeToolExecutionUpdateFn>` | Hook called before each `ToolExecutionUpdate`. Signature: `fn(&str, &str, &str) -> bool` (tool_name, call_id, text); return `false` to suppress the event. |
+| `after_tool_execution_update` | `Option<AfterToolExecutionUpdateFn>` | Hook called after each `ToolExecutionUpdate` (only when not suppressed). Signature: `fn(&str, &str, &str)`. |
 
 **Invariants:**
 - `assert!(!self.is_streaming)` fires if `prompt()` is called while already running — callers must use `steer()` or `follow_up()` during active runs
 - `cancel` is always `Some` while `is_streaming` is true
 - `messages` must not end in an `Assistant` message before `agent_loop_continue()` is called
+- `agent_id` and `session_id` are always `Some` in any `AgentContext` built by `Agent`; direct callers of `agent_loop_continue` must also set them
 
 ### AgentContext (per-run, passed into agent loop)
-| State Element | Description |
-|---|---|
-| `system_prompt` | Immutable for the duration of the run |
-| `messages` | Mutated in-place: prompts appended, assistant messages appended, tool results appended; may be replaced by compaction |
-| `tools` | Immutable for the duration of the run |
+| State Element | Type | Description |
+|---|---|---|
+| `system_prompt` | `String` | Immutable for the duration of the run |
+| `messages` | `Vec<AgentMessage>` | Mutated in-place: prompts appended, assistant messages appended, tool results appended; may be replaced by compaction |
+| `tools` | `&[Box<dyn AgentTool>]` | Immutable for the duration of the run |
+| `agent_id` | `Option<String>` | Stable agent instance ID. Set by `Agent::prompt_*`; also written back by `agent_loop` when `None`. Required (non-`None`) for `agent_loop_continue`. |
+| `session_id` | `Option<String>` | Stable session ID. Same lifecycle as `agent_id`. |
+| `loop_id` | `Option<String>` | Per-call identifier of the form `"{session_id}.{config_id}.{N}"`. Set by `Agent` before calling `agent_loop`/`agent_loop_continue`; falls back to UUID if `None` at loop entry. |
+| `parent_loop_id` | `Option<String>` | `loop_id` of the loop this call continues from. `None` for origin calls. Set by `Agent::continue_loop_with_sender` to `Agent.last_loop_id`. |
+| `continuation_kind` | `Option<ContinuationKind>` | How this call relates to prior loops. `None` for origin; `Some(Default\|Rerun\|Branch)` for continuations. |
 
 ### ExecutionTracker (per-run)
 | State | Initial | Transitions |
@@ -695,6 +767,34 @@ All fields on `Agent`:
 - **`QueueMode::All`**: on each read, lock mutex, drain *all* queued messages, return the full vec
 
 Both queues are passed to `AgentLoopConfig` as closures (`get_steering_messages`, `get_follow_up_messages`) that capture the `Arc<Mutex<>>` pointer, enabling external callers to enqueue messages while the agent loop is running on another task.
+
+### Event Hook Ordering
+
+All hooks fire in a **guaranteed strict order** relative to their paired events. This ordering is enforced at runtime and is an invariant of the system:
+
+```
+before_loop → AgentStart
+  before_turn → TurnStart
+    [MessageStart/End for initial prompts — first turn of agent_loop() only]
+    [MessageStart/End for injected steering messages]
+    [LLM: MessageStart → MessageUpdate* → MessageEnd]
+    [per tool call:]
+      before_tool_execution → ToolExecutionStart
+        (before_tool_execution_update → ToolExecutionUpdate → after_tool_execution_update)*
+      ToolExecutionEnd → after_tool_execution
+  TurnEnd → after_turn
+  (repeat inner block for each follow-up / steering-triggered turn)
+AgentEnd → after_loop
+```
+
+**Short-circuit rules — hook returns `false`:**
+
+| Hook | When `false` is returned | Behaviour |
+|---|---|---|
+| `before_loop` | Before `AgentStart` | Loop is aborted; `AgentEnd { messages: [] }` is emitted; function returns immediately |
+| `before_turn` | Before `TurnStart` | Turn is skipped; `TurnStart`/`TurnEnd` are not emitted; `AgentEnd` is **not** guaranteed |
+| `before_tool_execution` | Before `ToolExecutionStart` | Tool call is skipped; `ToolExecutionStart`/`End` are not emitted; a skipped error `ToolResult` is returned to the LLM |
+| `before_tool_execution_update` | Before `ToolExecutionUpdate` | Event is suppressed; `after_tool_execution_update` is not called; tool keeps running and final `ToolResult` is unaffected |
 
 ---
 

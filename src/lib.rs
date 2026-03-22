@@ -37,14 +37,13 @@ Architecture summary: the `pub use` lines below define the "public API surface" 
 Everything a library user needs should be reachable without knowing internal module paths.
 */
 
-pub mod agent;
+pub mod agents;
 pub mod agent_loop;
 pub mod context;
 pub mod mcp;
 pub mod provider;
 pub mod retry;
 pub mod skills;
-pub mod sub_agent;
 pub mod tools;
 pub mod types;
 
@@ -53,11 +52,12 @@ pub mod types;
 pub mod openapi;
 
 // Re-export the most-used types at the crate root for ergonomic imports.
-// Users write `use yo_core::Agent` instead of `use yo_core::agent::Agent`.
-pub use agent::Agent;
+// Users write `use phi_core::Agent` / `use phi_core::BasicAgent` instead of
+// navigating internal module paths.
+pub use agents::{Agent, BasicAgent, QueueMode};
 pub use agent_loop::{agent_loop, agent_loop_continue};
 pub use context::{CompactionStrategy, DefaultCompaction};
 pub use retry::RetryConfig;
 pub use skills::SkillSet;
-pub use sub_agent::SubAgentTool;
+pub use agents::SubAgentTool;
 pub use types::*; // glob re-export: ALL public items from types become top-level exports

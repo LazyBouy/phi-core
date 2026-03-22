@@ -1,6 +1,10 @@
-//! Stateful Agent struct — wraps the agent loop with state management,
-//! steering/follow-up queues, and abort support.
+//! The default in-memory `Agent` implementation.
+//!
+//! [`BasicAgent`] owns a single linear message history and runs the `agent_loop` directly.
+//! It is the concrete type most callers will use. Configuration is done via the builder
+//! pattern; the runtime interface is provided by the [`Agent`](super::Agent) trait.
 
+use super::agent::{Agent, QueueMode};
 use crate::agent_loop::{
     agent_loop, agent_loop_continue, AfterTurnFn, AgentLoopConfig, BeforeTurnFn, OnErrorFn,
 };
@@ -14,12 +18,12 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 /*
-ARCHITECTURE: Agent vs agent_loop — stateful wrapper vs stateless functions
+ARCHITECTURE: BasicAgent vs agent_loop — stateful wrapper vs stateless functions
 
 The agent loop (agent_loop.rs) is a set of FREE FUNCTIONS — they take all their
 inputs as parameters and return outputs. They have no hidden state.
 
-The Agent struct is an OPTIONAL stateful wrapper that owns:
+The BasicAgent struct is an OPTIONAL stateful wrapper that owns:
   - Message history (Vec<AgentMessage>) — the conversation so far
   - Tools (Vec<Box<dyn AgentTool>>) — registered capabilities
   - Provider (Box<dyn StreamProvider>) — the LLM backend
@@ -27,11 +31,11 @@ The Agent struct is an OPTIONAL stateful wrapper that owns:
 
 Why this separation?
   - Free functions: easier to test, compose, and reason about
-  - Agent struct: easier to use in applications (less boilerplate)
+  - BasicAgent struct: easier to use in applications (less boilerplate)
   - You can use agent_loop() directly if you need more control
 
-The Agent uses the BUILDER PATTERN for construction:
-  Agent::new(provider)
+The BasicAgent uses the BUILDER PATTERN for construction:
+  BasicAgent::new(provider)
       .with_system_prompt("...")
       .with_model("claude-3")
       .with_tools(vec![...])
@@ -41,17 +45,11 @@ returning the same value. This chains naturally and avoids separate calls.
 Python analogy: it's like a fluent API but ownership-safe.
 */
 
-/// Controls how messages are drained from the steering/follow-up queues per turn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QueueMode {
-    /// Deliver one message per turn — allows the LLM to react to each steering message individually.
-    OneAtATime,
-    /// Deliver all queued messages at once — batches all pending steers into one turn.
-    All,
-}
-
-/// The main Agent. Owns conversation state, tools, and provider.
-pub struct Agent {
+/// The default in-memory agent. Owns conversation state, tools, and provider.
+///
+/// Configuration is done via the builder pattern before any prompting. The runtime
+/// interface (prompting, state access, control) is provided via the [`Agent`] trait.
+pub struct BasicAgent {
     // -- Public configuration (readable/overridable externally) --
     pub system_prompt: String,
     pub model: String,
@@ -88,7 +86,7 @@ pub struct Agent {
 
     `AgentLoopConfig.provider` requires `Arc<dyn StreamProvider>` (shared ownership)
     because the config is passed into async closures that may outlive the current stack frame.
-    Agent therefore stores the provider as `Arc` so it can cheaply clone the pointer
+    BasicAgent therefore stores the provider as `Arc` so it can cheaply clone the pointer
     into `build_config()` without moving or copying the underlying provider.
 
     `Arc::clone()` just bumps an atomic reference count — cheap, no data duplication.
@@ -104,7 +102,7 @@ pub struct Agent {
     Arc  = Atomically Reference Counted — shared ownership (multiple holders, thread-safe)
     Mutex = Mutual Exclusion — only one thread can access the inner value at a time
 
-    The Agent OWNS the queues (Arc keeps them alive as long as Agent is alive).
+    The BasicAgent OWNS the queues (Arc keeps them alive as long as BasicAgent is alive).
     The agent loop USES the queues via the closures in build_config() — those closures
     clone the Arc (incrementing the reference count) and lock the Mutex to read/drain.
 
@@ -147,9 +145,9 @@ pub struct Agent {
     is_streaming: bool, // guard against concurrent prompt() calls
 
     // ── Session identity ─────────────────────────────────────────────────────
-    // These fields give every loop call within this Agent a consistent, traceable identity.
-    // agent_id and session_id are generated once at Agent::new() and threaded into every
-    // AgentContext built by this Agent.
+    // These fields give every loop call within this BasicAgent a consistent, traceable identity.
+    // agent_id and session_id are generated once at BasicAgent::new() and threaded into every
+    // AgentContext built by this BasicAgent.
     //
     // loop_counters: HashMap keyed by "{session_id}.{effective_config_id}" — each unique
     // (session, config) combination has its own monotonic counter, so loop IDs self-document
@@ -167,7 +165,7 @@ pub struct Agent {
        - Parallel exploration: multiple branches from same checkpoint, concurrent →
              multiple concurrent continue_loop_with_sender(Branch) calls in the same session
        - Auto origin/continue selection: inspect last message role → if ToolResult, auto-continue
-       - Sub-agent parent linking (automatic): Agent::with_sub_agent() could auto-pass
+       - Sub-agent parent linking (automatic): BasicAgent::with_sub_agent() could auto-pass
              self.last_loop_id as parent_loop_id to SubAgentTool; currently requires
              manual wiring via SubAgentTool::with_parent_loop_id()
     */
@@ -177,7 +175,7 @@ pub struct Agent {
     last_loop_id: Option<String>,
 }
 
-impl Agent {
+impl BasicAgent {
     /*
     RUST QUIRK: `impl StreamProvider + 'static` — accepting any concrete type
 
@@ -235,9 +233,9 @@ impl Agent {
     /*
     RUST QUIRK: Builder pattern — `mut self` + return `Self`
 
-    Builder methods take OWNERSHIP of `self` (consume the Agent), modify it, then
+    Builder methods take OWNERSHIP of `self` (consume the BasicAgent), modify it, then
     return it. This allows chaining:
-      Agent::new(p).with_model("x").with_tools(vec![...])
+      BasicAgent::new(p).with_model("x").with_tools(vec![...])
 
     `mut self` — self is moved in (consumed), marked mutable for modification.
     `self` in the return — move the (now mutated) value back to the caller.
@@ -383,7 +381,7 @@ impl Agent {
     }
 
     /// Add a sub-agent tool. The sub-agent runs its own `agent_loop()` when invoked.
-    pub fn with_sub_agent(mut self, sub: crate::sub_agent::SubAgentTool) -> Self {
+    pub fn with_sub_agent(mut self, sub: crate::agents::SubAgentTool) -> Self {
         self.tools.push(Box::new(sub));
         self
     }
@@ -471,300 +469,36 @@ impl Agent {
         Ok(self)
     }
 
-    // -- State access --
+    // -- Ergonomic prompting wrappers --
+    // These inherent methods accept `impl Into<String>` so callers can pass `&str` directly.
+    // All other runtime methods (state, mutation, control, queues) are provided solely by
+    // the `Agent` trait impl below — import `use phi_core::Agent` (or `use phi_core::*`)
+    // to call them on a concrete `BasicAgent`.
 
-    pub fn messages(&self) -> &[AgentMessage] {
-        &self.messages
-    }
-
-    pub fn is_streaming(&self) -> bool {
-        self.is_streaming
-    }
-
-    pub fn set_tools(&mut self, tools: Vec<Box<dyn AgentTool>>) {
-        self.tools = tools;
-    }
-
-    pub fn clear_messages(&mut self) {
-        self.messages.clear();
-    }
-
-    pub fn append_message(&mut self, msg: AgentMessage) {
-        self.messages.push(msg);
-    }
-
-    pub fn replace_messages(&mut self, msgs: Vec<AgentMessage>) {
-        self.messages = msgs;
-    }
-
-    pub fn save_messages(&self) -> Result<String, serde_json::Error> {
-        serde_json::to_string(&self.messages)
-    }
-
-    pub fn restore_messages(&mut self, json: &str) -> Result<(), serde_json::Error> {
-        let msgs: Vec<AgentMessage> = serde_json::from_str(json)?;
-        self.messages = msgs;
-        Ok(())
-    }
-
-    // -- Queue management --
-
-    /// Queue a steering message — interrupts the agent mid-tool-execution.
+    /// Send a text prompt. Returns a stream of `AgentEvent`s.
     ///
-    /// The agent loop checks the steering queue after each tool completes.
-    /// When it finds messages, it stops executing remaining tools and injects
-    /// these messages before the next LLM call. This allows human-in-the-loop
-    /// corrections without aborting the entire session.
-    /*
-    RUST QUIRK: `&self` vs `&mut self` — `steer()` takes shared reference
-
-    Usually, methods that modify the struct take `&mut self` (exclusive borrow).
-    But `steer()` takes `&self` (shared borrow). How can it modify the queue?
-
-    Answer: Interior mutability via `Arc<Mutex<...>>`.
-    The Mutex provides runtime-checked exclusive access inside a shared reference.
-    You call `.lock()` to acquire the lock (blocks until available), then mutate.
-
-    This design allows `steer()` to be called from OTHER threads or closures
-    that only have &-access to the Agent (e.g., a button click handler).
-
-    `.lock().unwrap()` — unwrap because Mutex poisoning (from a panicking thread)
-    is a programming bug, not a runtime error we should handle gracefully.
-    */
-    pub fn steer(&self, msg: AgentMessage) {
-        self.steering_queue.lock().unwrap().push(msg); // acquire lock, push, auto-release
-    }
-
-    /// Queue a follow-up message — processed after the current agent turn completes.
-    ///
-    /// Unlike steering (which interrupts mid-execution), follow-ups are injected
-    /// after the agent reaches a natural stopping point (StopReason::Stop).
-    /// Use for chaining tasks: "after you finish X, also do Y."
-    pub fn follow_up(&self, msg: AgentMessage) {
-        self.follow_up_queue.lock().unwrap().push(msg);
-    }
-
-    pub fn clear_steering_queue(&self) {
-        self.steering_queue.lock().unwrap().clear();
-    }
-
-    pub fn clear_follow_up_queue(&self) {
-        self.follow_up_queue.lock().unwrap().clear();
-    }
-
-    pub fn clear_all_queues(&self) {
-        self.clear_steering_queue();
-        self.clear_follow_up_queue();
-    }
-
-    pub fn set_steering_mode(&mut self, mode: QueueMode) {
-        self.steering_mode = mode;
-    }
-
-    pub fn set_follow_up_mode(&mut self, mode: QueueMode) {
-        self.follow_up_mode = mode;
-    }
-
-    // -- Control --
-
-    pub fn abort(&self) {
-        if let Some(ref cancel) = self.cancel {
-            cancel.cancel();
-        }
-    }
-
-    pub fn reset(&mut self) {
-        self.messages.clear();
-        self.clear_all_queues();
-        self.is_streaming = false;
-        self.cancel = None;
-    }
-
-    // -- Prompting --
-
-    /// Send a text prompt. Returns a stream of AgentEvents.
-    pub async fn prompt(&mut self, text: impl Into<String>) -> mpsc::UnboundedReceiver<AgentEvent> {
-        let msg = AgentMessage::Llm(Message::user(text));
-        self.prompt_messages(vec![msg]).await
-    }
-
-    /// Send messages as a prompt. Convenience wrapper around
-    /// [`prompt_messages_with_sender()`](Self::prompt_messages_with_sender)
-    /// that creates a channel internally and returns the receiver.
-    pub async fn prompt_messages(
+    /// Accepts `impl Into<String>` (e.g. `&str`). The trait's [`Agent::prompt`] default
+    /// requires an owned `String`; use this inherent method to pass `&str` without `.to_string()`.
+    pub async fn prompt(
         &mut self,
-        messages: Vec<AgentMessage>,
+        text: impl Into<String>,
     ) -> mpsc::UnboundedReceiver<AgentEvent> {
         let (tx, rx) = mpsc::unbounded_channel();
-        self.prompt_messages_with_sender(messages, tx).await;
+        let msg = AgentMessage::Llm(Message::user(text));
+        self.prompt_messages_with_sender(vec![msg], tx).await;
         rx
     }
 
     /// Send a text prompt, streaming events to a caller-provided sender.
     ///
-    /// Unlike [`prompt()`](Self::prompt), this accepts an external sender so
-    /// the caller can consume events in real-time on another task:
-    ///
-    /// ```rust,no_run
-    /// # use phi_core::Agent;
-    /// # use phi_core::provider::MockProvider;
-    /// # async fn example() {
-    /// let mut agent = Agent::new(MockProvider::text("hi"))
-    ///     .with_model("mock").with_api_key("test");
-    /// let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    /// tokio::spawn(async move {
-    ///     while let Some(event) = rx.recv().await { /* real-time */ }
-    /// });
-    /// agent.prompt_with_sender("hello", tx).await;
-    /// # }
-    /// ```
-    /*
-    DESIGN: prompt() vs prompt_with_sender() — channel ownership models
-      `prompt()`             = INTERNAL CHANNEL — creates (tx, rx) internally; returns rx to caller
-                               Caller pulls events from rx in a loop: `while let Some(e) = rx.recv().await`
-      `prompt_with_sender()` = EXTERNAL CHANNEL — caller provides their own tx
-                               Useful when the caller already has a task consuming from rx,
-                               and wants to merge this agent's events into that same stream
-    */
+    /// Accepts `impl Into<String>` (e.g. `&str`).
     pub async fn prompt_with_sender(
         &mut self,
-        text: impl Into<String>, // TEXT INPUT — converted to AgentMessage::Llm(Message::user(...))
-        tx: mpsc::UnboundedSender<AgentEvent>, // OBSERVER — caller-owned sender; events pushed here during the loop
+        text: impl Into<String>,
+        tx: mpsc::UnboundedSender<AgentEvent>,
     ) {
         let msg = AgentMessage::Llm(Message::user(text));
         self.prompt_messages_with_sender(vec![msg], tx).await;
-    }
-
-    /// Send messages as a prompt, streaming events to a caller-provided sender.
-    pub async fn prompt_messages_with_sender(
-        &mut self,
-        messages: Vec<AgentMessage>, // NEW INPUT — owned; appended to context before the loop starts
-        tx: mpsc::UnboundedSender<AgentEvent>, // OBSERVER — caller-provided; events pushed here during the loop
-    ) {
-        /*
-        RUST QUIRK: `assert!()` — panic with a message if condition is false
-
-        `assert!(condition, "message")` panics if condition is false.
-        This is a "programmer error" guard (not a runtime error) — you should
-        never call prompt() on an already-streaming Agent. If you do, it's a bug.
-
-        Python analogy: `assert not self.is_streaming, "..."` (but assert can be
-        disabled with -O in Python; Rust's assert! is ALWAYS enabled in production.
-        For debug-only assertions, use `debug_assert!()` in Rust.)
-        */
-        assert!(
-            !self.is_streaming,
-            "Agent is already streaming. Use steer() or follow_up()."
-        );
-
-        let cancel = CancellationToken::new();
-        self.cancel = Some(cancel.clone()); // store a clone so abort() can cancel it
-        self.is_streaming = true;
-
-        /*
-        RUST QUIRK: `std::mem::take(&mut self.tools)` — efficient ownership transfer
-
-        `std::mem::take(dest)` replaces `*dest` with its Default value and returns
-        the original. For Vec, Default is an empty Vec (no allocation).
-
-        Why not `self.tools.clone()`?
-        Clone would copy every Box<dyn AgentTool> — expensive and unnecessary.
-        We want to MOVE the tools into the context, not copy them.
-
-        Why not just `self.tools` (move out)?
-        You can't partially move out of a struct that you still have a &mut reference to.
-        `mem::take` is the safe way to move a field out, leaving a valid default behind.
-
-        After the loop, we move the tools BACK: `self.tools = context.tools;`
-        So the Agent relinquishes ownership for the duration of the loop,
-        then reclaims it afterward. Zero allocation.
-
-        Python analogy: temporarily `tools = self.tools; self.tools = []` — then restore.
-        */
-        // Build config first (only borrows self), then derive loop_id (mutates loop_counters).
-        let config = self.build_config();
-        let loop_id = self.next_loop_id(&config);
-        self.last_loop_id = Some(loop_id.clone());
-
-        let mut context = AgentContext {
-            system_prompt: self.system_prompt.clone(),
-            messages: self.messages.clone(),
-            tools: std::mem::take(&mut self.tools), // MOVE tools out, leaving self.tools = []
-            agent_id: Some(self.agent_id.clone()),
-            session_id: Some(self.session_id.clone()),
-            loop_id: Some(loop_id),
-            parent_loop_id: None, // origin — no parent
-            continuation_kind: None,
-        };
-
-        let _new_messages = agent_loop(messages, &mut context, &config, tx, cancel).await;
-
-        self.tools = context.tools;
-        self.messages = context.messages;
-        self.is_streaming = false;
-        self.cancel = None;
-    }
-
-    /// Continue from current context (for retries after errors). Convenience
-    /// wrapper around [`continue_loop_with_sender()`](Self::continue_loop_with_sender).
-    pub async fn continue_loop(&mut self) -> mpsc::UnboundedReceiver<AgentEvent> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        self.continue_loop_with_sender(tx, ContinuationKind::Default)
-            .await;
-        rx
-    }
-
-    /// Continue from current context, streaming events to a caller-provided sender.
-    ///
-    /// `kind` describes how this continuation relates to prior loops:
-    /// - `Default` — unspecified continuation (preserves current semantics; use when the
-    ///   Rerun/Branch distinction is not relevant to the caller)
-    /// - `Rerun { tag }` — retry from the same context state (auto-generates a UTC timestamp tag)
-    /// - `Branch { tag }` — explore a different path from the same starting point (same tag)
-    pub async fn continue_loop_with_sender(
-        &mut self,
-        tx: mpsc::UnboundedSender<AgentEvent>, // OBSERVER — events from this continuation pushed here
-        kind: ContinuationKind,                // CONTINUATION KIND — Default | Rerun | Branch
-    ) {
-        assert!(!self.is_streaming, "Agent is already streaming.");
-        assert!(!self.messages.is_empty(), "No messages to continue from.");
-
-        let cancel = CancellationToken::new();
-        self.cancel = Some(cancel.clone());
-        self.is_streaming = true;
-
-        // Build config first (only borrows self), then derive loop_id (mutates loop_counters).
-        let config = self.build_config();
-        let loop_id = self.next_loop_id(&config);
-        let parent_loop_id = self.last_loop_id.clone(); // points to the loop this continues from
-        self.last_loop_id = Some(loop_id.clone());
-
-        // Auto-generate the timestamp tag for Rerun/Branch (RFC 3339 UTC).
-        let tag = chrono::Utc::now().to_rfc3339();
-        let kind_with_tag = match kind {
-            ContinuationKind::Default => ContinuationKind::Default,
-            ContinuationKind::Rerun { .. } => ContinuationKind::Rerun { tag },
-            ContinuationKind::Branch { .. } => ContinuationKind::Branch { tag },
-        };
-
-        // Move tools temporarily into context for the loop; restored after
-        let mut context = AgentContext {
-            system_prompt: self.system_prompt.clone(),
-            messages: self.messages.clone(),
-            tools: std::mem::take(&mut self.tools),
-            agent_id: Some(self.agent_id.clone()),
-            session_id: Some(self.session_id.clone()),
-            loop_id: Some(loop_id),
-            parent_loop_id,
-            continuation_kind: Some(kind_with_tag),
-        };
-
-        let _new_messages = agent_loop_continue(&mut context, &config, tx, cancel).await;
-
-        self.tools = context.tools;
-        self.messages = context.messages;
-        self.is_streaming = false;
-        self.cancel = None;
     }
 
     // -- Internal --
@@ -819,13 +553,13 @@ impl Agent {
     }
 
     /*
-    build_config — assemble AgentLoopConfig from Agent's current state.
+    build_config — assemble AgentLoopConfig from BasicAgent's current state.
 
     ARCHITECTURE: Why a separate build_config() method?
 
     AgentLoopConfig is the "parameter bundle" for the stateless agent_loop() function.
-    build_config() constructs it fresh each call — it's not stored on Agent.
-    This means: AgentLoopConfig borrows from Agent (hence the lifetime `'_`),
+    build_config() constructs it fresh each call — it's not stored on BasicAgent.
+    This means: AgentLoopConfig borrows from BasicAgent (hence the lifetime `'_`),
     and both share the same Arc<Mutex<>> queues via clone (cheap, no allocation).
 
     RUST QUIRK: `move` closures for the queue callbacks
@@ -837,12 +571,12 @@ impl Agent {
     We clone the Arc before the move:
       let steering_queue = self.steering_queue.clone();
     This gives the closure its own Arc reference to the same underlying Mutex.
-    The Agent still holds its own Arc reference. Both are valid simultaneously.
+    The BasicAgent still holds its own Arc reference. Both are valid simultaneously.
 
     `self.provider.clone()` — clone the Arc:
       self.provider is Arc<dyn StreamProvider>
       .clone() bumps the reference count — cheap, no data duplication
-    Both Agent and AgentLoopConfig now share ownership of the same underlying provider.
+    Both BasicAgent and AgentLoopConfig now share ownership of the same underlying provider.
     */
     fn build_config(&self) -> AgentLoopConfig {
         // Clone Arc handles before the move closures capture them
@@ -909,5 +643,242 @@ impl Agent {
             first_turn_trigger: TurnTrigger::User,
             config_id: None, // auto-derived in next_loop_id() from provider + model + thinking_level
         }
+    }
+}
+
+// ── Agent trait implementation ────────────────────────────────────────────────
+
+#[async_trait::async_trait]
+impl Agent for BasicAgent {
+    // ── Core async implementations ────────────────────────────────────────────
+
+    /// Send messages as a prompt, streaming events to a caller-provided sender.
+    async fn prompt_messages_with_sender(
+        &mut self,
+        messages: Vec<AgentMessage>,
+        tx: mpsc::UnboundedSender<AgentEvent>,
+    ) {
+        /*
+        RUST QUIRK: `assert!()` — panic with a message if condition is false
+
+        `assert!(condition, "message")` panics if condition is false.
+        This is a "programmer error" guard (not a runtime error) — you should
+        never call prompt() on an already-streaming BasicAgent. If you do, it's a bug.
+
+        Python analogy: `assert not self.is_streaming, "..."` (but assert can be
+        disabled with -O in Python; Rust's assert! is ALWAYS enabled in production.
+        For debug-only assertions, use `debug_assert!()` in Rust.)
+        */
+        assert!(
+            !self.is_streaming,
+            "Agent is already streaming. Use steer() or follow_up()."
+        );
+
+        let cancel = CancellationToken::new();
+        self.cancel = Some(cancel.clone()); // store a clone so abort() can cancel it
+        self.is_streaming = true;
+
+        /*
+        RUST QUIRK: `std::mem::take(&mut self.tools)` — efficient ownership transfer
+
+        `std::mem::take(dest)` replaces `*dest` with its Default value and returns
+        the original. For Vec, Default is an empty Vec (no allocation).
+
+        Why not `self.tools.clone()`?
+        Clone would copy every Box<dyn AgentTool> — expensive and unnecessary.
+        We want to MOVE the tools into the context, not copy them.
+
+        Why not just `self.tools` (move out)?
+        You can't partially move out of a struct that you still have a &mut reference to.
+        `mem::take` is the safe way to move a field out, leaving a valid default behind.
+
+        After the loop, we move the tools BACK: `self.tools = context.tools;`
+        So the BasicAgent relinquishes ownership for the duration of the loop,
+        then reclaims it afterward. Zero allocation.
+
+        Python analogy: temporarily `tools = self.tools; self.tools = []` — then restore.
+        */
+        // Build config first (only borrows self), then derive loop_id (mutates loop_counters).
+        let config = self.build_config();
+        let loop_id = self.next_loop_id(&config);
+        self.last_loop_id = Some(loop_id.clone());
+
+        let mut context = AgentContext {
+            system_prompt: self.system_prompt.clone(),
+            messages: self.messages.clone(),
+            tools: std::mem::take(&mut self.tools), // MOVE tools out, leaving self.tools = []
+            agent_id: Some(self.agent_id.clone()),
+            session_id: Some(self.session_id.clone()),
+            loop_id: Some(loop_id),
+            parent_loop_id: None, // origin — no parent
+            continuation_kind: None,
+        };
+
+        let _new_messages = agent_loop(messages, &mut context, &config, tx, cancel).await;
+
+        self.tools = context.tools;
+        self.messages = context.messages;
+        self.is_streaming = false;
+        self.cancel = None;
+    }
+
+    /// Continue from current context, streaming events to a caller-provided sender.
+    ///
+    /// `kind` describes how this continuation relates to prior loops:
+    /// - `Default` — unspecified continuation (preserves current semantics; use when the
+    ///   Rerun/Branch distinction is not relevant to the caller)
+    /// - `Rerun { tag }` — retry from the same context state (auto-generates a UTC timestamp tag)
+    /// - `Branch { tag }` — explore a different path from the same starting point (same tag)
+    async fn continue_loop_with_sender(
+        &mut self,
+        tx: mpsc::UnboundedSender<AgentEvent>, // OBSERVER — events from this continuation pushed here
+        kind: ContinuationKind,                // CONTINUATION KIND — Default | Rerun | Branch
+    ) {
+        assert!(!self.is_streaming, "Agent is already streaming.");
+        assert!(!self.messages.is_empty(), "No messages to continue from.");
+
+        let cancel = CancellationToken::new();
+        self.cancel = Some(cancel.clone());
+        self.is_streaming = true;
+
+        // Build config first (only borrows self), then derive loop_id (mutates loop_counters).
+        let config = self.build_config();
+        let loop_id = self.next_loop_id(&config);
+        let parent_loop_id = self.last_loop_id.clone(); // points to the loop this continues from
+        self.last_loop_id = Some(loop_id.clone());
+
+        // Auto-generate the timestamp tag for Rerun/Branch (RFC 3339 UTC).
+        let tag = chrono::Utc::now().to_rfc3339();
+        let kind_with_tag = match kind {
+            ContinuationKind::Default => ContinuationKind::Default,
+            ContinuationKind::Rerun { .. } => ContinuationKind::Rerun { tag },
+            ContinuationKind::Branch { .. } => ContinuationKind::Branch { tag },
+        };
+
+        // Move tools temporarily into context for the loop; restored after
+        let mut context = AgentContext {
+            system_prompt: self.system_prompt.clone(),
+            messages: self.messages.clone(),
+            tools: std::mem::take(&mut self.tools),
+            agent_id: Some(self.agent_id.clone()),
+            session_id: Some(self.session_id.clone()),
+            loop_id: Some(loop_id),
+            parent_loop_id,
+            continuation_kind: Some(kind_with_tag),
+        };
+
+        let _new_messages = agent_loop_continue(&mut context, &config, tx, cancel).await;
+
+        self.tools = context.tools;
+        self.messages = context.messages;
+        self.is_streaming = false;
+        self.cancel = None;
+    }
+
+    // ── State ─────────────────────────────────────────────────────────────────
+
+    fn messages(&self) -> &[AgentMessage] {
+        &self.messages
+    }
+
+    fn is_streaming(&self) -> bool {
+        self.is_streaming
+    }
+
+    fn agent_id(&self) -> &str {
+        &self.agent_id
+    }
+
+    fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    fn last_loop_id(&self) -> Option<&str> {
+        self.last_loop_id.as_deref()
+    }
+
+    // ── Message mutation ──────────────────────────────────────────────────────
+
+    fn clear_messages(&mut self) {
+        self.messages.clear();
+    }
+
+    fn append_message(&mut self, msg: AgentMessage) {
+        self.messages.push(msg);
+    }
+
+    fn replace_messages(&mut self, msgs: Vec<AgentMessage>) {
+        self.messages = msgs;
+    }
+
+    fn save_messages(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(&self.messages)
+    }
+
+    fn restore_messages(&mut self, json: &str) -> Result<(), serde_json::Error> {
+        let msgs: Vec<AgentMessage> = serde_json::from_str(json)?;
+        self.messages = msgs;
+        Ok(())
+    }
+
+    fn set_tools(&mut self, tools: Vec<Box<dyn AgentTool>>) {
+        self.tools = tools;
+    }
+
+    // ── Control ───────────────────────────────────────────────────────────────
+
+    fn abort(&self) {
+        if let Some(ref cancel) = self.cancel {
+            cancel.cancel();
+        }
+    }
+
+    fn reset(&mut self) {
+        self.messages.clear();
+        self.clear_all_queues();
+        self.is_streaming = false;
+        self.cancel = None;
+    }
+
+    // ── Steering/follow-up queues ─────────────────────────────────────────────
+
+    /*
+    RUST QUIRK: `&self` vs `&mut self` — `steer()` takes shared reference
+
+    Usually, methods that modify the struct take `&mut self` (exclusive borrow).
+    But `steer()` takes `&self` (shared borrow). How can it modify the queue?
+
+    Answer: Interior mutability via `Arc<Mutex<...>>`.
+    The Mutex provides runtime-checked exclusive access inside a shared reference.
+    You call `.lock()` to acquire the lock (blocks until available), then mutate.
+
+    This design allows `steer()` to be called from OTHER threads or closures
+    that only have &-access to the BasicAgent (e.g., a button click handler).
+
+    `.lock().unwrap()` — unwrap because Mutex poisoning (from a panicking thread)
+    is a programming bug, not a runtime error we should handle gracefully.
+    */
+    fn steer(&self, msg: AgentMessage) {
+        self.steering_queue.lock().unwrap().push(msg);
+    }
+
+    fn follow_up(&self, msg: AgentMessage) {
+        self.follow_up_queue.lock().unwrap().push(msg);
+    }
+
+    fn clear_steering_queue(&self) {
+        self.steering_queue.lock().unwrap().clear();
+    }
+
+    fn clear_follow_up_queue(&self) {
+        self.follow_up_queue.lock().unwrap().clear();
+    }
+
+    fn set_steering_mode(&mut self, mode: QueueMode) {
+        self.steering_mode = mode;
+    }
+
+    fn set_follow_up_mode(&mut self, mode: QueueMode) {
+        self.follow_up_mode = mode;
     }
 }

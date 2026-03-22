@@ -19,7 +19,7 @@
 //!   /clear          Clear conversation history
 //!   /model <name>   Switch model mid-session
 
-use phi_core::agent::Agent;
+use phi_core::BasicAgent;
 use phi_core::provider::{AnthropicProvider, ModelConfig, OpenAiCompatProvider};
 use phi_core::skills::SkillSet;
 use phi_core::tools::default_tools;
@@ -97,9 +97,9 @@ async fn main() {
     };
 
     let mut agent = if let Some(ref url) = api_url {
-        Agent::new(OpenAiCompatProvider).with_model_config(ModelConfig::local(url, &model))
+        BasicAgent::new(OpenAiCompatProvider).with_model_config(ModelConfig::local(url, &model))
     } else {
-        Agent::new(AnthropicProvider)
+        BasicAgent::new(AnthropicProvider)
     };
     agent = agent
         .with_system_prompt(SYSTEM_PROMPT)
@@ -154,10 +154,10 @@ async fn main() {
             s if s.starts_with("/model ") => {
                 let new_model = s.trim_start_matches("/model ").trim();
                 agent = if let Some(ref url) = api_url {
-                    Agent::new(OpenAiCompatProvider)
+                    BasicAgent::new(OpenAiCompatProvider)
                         .with_model_config(ModelConfig::local(url, new_model))
                 } else {
-                    Agent::new(AnthropicProvider)
+                    BasicAgent::new(AnthropicProvider)
                 };
                 agent = agent
                     .with_system_prompt(SYSTEM_PROMPT)

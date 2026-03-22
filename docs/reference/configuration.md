@@ -9,6 +9,7 @@ pub struct AgentLoopConfig<'a> {
     pub provider: &'a dyn StreamProvider,
     pub model: String,
     pub api_key: String,
+    pub config_id: Option<String>,
     pub thinking_level: ThinkingLevel,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
@@ -23,11 +24,16 @@ pub struct AgentLoopConfig<'a> {
     pub cache_config: CacheConfig,
     pub tool_execution: ToolExecutionStrategy,
     pub retry_config: RetryConfig,
+    pub before_loop: Option<BeforeLoopFn>,
+    pub after_loop: Option<AfterLoopFn>,
     pub before_turn: Option<BeforeTurnFn>,
     pub after_turn: Option<AfterTurnFn>,
     pub on_error: Option<OnErrorFn>,
+    pub before_tool_execution: Option<BeforeToolExecutionFn>,
+    pub after_tool_execution: Option<AfterToolExecutionFn>,
+    pub before_tool_execution_update: Option<BeforeToolExecutionUpdateFn>,
+    pub after_tool_execution_update: Option<AfterToolExecutionUpdateFn>,
     pub input_filters: Vec<Arc<dyn InputFilter>>,
-    pub compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
 }
 ```
 

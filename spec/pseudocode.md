@@ -44,7 +44,29 @@ FUNCTION agent_loop(
   cancel: CancellationToken
 ) -> Vec<AgentMessage>
 
-  EMIT AgentStart
+  // ── before_loop hook ────────────────────────────────────────────────────
+  // Fires before AgentStart. Return false to abort before the loop begins.
+  IF config.before_loop defined AND NOT before_loop(context.messages, 0) THEN
+    EMIT AgentEnd(messages=[])
+    RETURN []
+  END IF
+
+  // ── Identity write-back ──────────────────────────────────────────────────
+  // agent_id / session_id are set by Agent::prompt_*. Direct callers may leave
+  // them None; agent_loop generates and writes them back so that a subsequent
+  // agent_loop_continue on the same context can inherit them without extra setup.
+  IF context.agent_id is None THEN context.agent_id ← new_uuid() END IF
+  IF context.session_id is None THEN context.session_id ← new_uuid() END IF
+  IF context.loop_id is None THEN context.loop_id ← new_uuid() END IF
+
+  EMIT AgentStart {
+    agent_id:          context.agent_id,
+    session_id:        context.session_id,
+    loop_id:           context.loop_id,
+    parent_loop_id:    None,    // None = origin call
+    continuation_kind: None,    // None = origin call
+    timestamp:         now()
+  }
 
   // ── Input filtering ─────────────────────────────────────────────────────
   IF config.input_filters is non-empty THEN
@@ -85,9 +107,14 @@ FUNCTION agent_loop(
   END FOR
 
   // Run the main loop
-  run_loop(context, new_messages, config, tx, cancel)
+  loop_usage ← run_loop(context, new_messages, config, tx, cancel)
 
   EMIT AgentEnd(new_messages)
+
+  // ── after_loop hook ──────────────────────────────────────────────────────
+  // Fires after AgentEnd with the messages produced and accumulated usage.
+  IF config.after_loop defined THEN after_loop(new_messages, loop_usage) END IF
+
   RETURN new_messages
 
 END FUNCTION
@@ -98,7 +125,7 @@ END FUNCTION
 ### `agent_loop_continue` *(src/agent_loop.rs)*
 
 **Purpose:** Resume an agent run from existing context (no new prompts, continue from last user/tool-result message).
-**Preconditions:** `context.messages` is non-empty; last message is NOT an assistant message.
+**Preconditions:** `context.messages` is non-empty; last message is NOT an assistant message; `context.agent_id` and `context.session_id` are `Some`.
 **Postconditions:** Same as `agent_loop`.
 
 ```
@@ -111,14 +138,36 @@ FUNCTION agent_loop_continue(
 
   [invariant: context.messages is non-empty]
   [invariant: context.messages.last().role != "assistant"]
+  // Identity must carry over from the originating loop.
+  // These are set by Agent::continue_loop_with_sender (or the direct caller who
+  // bootstrapped the session). Silent UUID generation here would break traceability.
+  [invariant: context.agent_id is Some]
+  [invariant: context.session_id is Some]
 
   new_messages ← []
-  EMIT AgentStart
-  EMIT TurnStart
 
-  run_loop(context, new_messages, config, tx, cancel)
+  // ── before_loop hook ────────────────────────────────────────────────────
+  IF config.before_loop defined AND NOT before_loop(context.messages, 0) THEN
+    EMIT AgentEnd(messages=[])
+    RETURN []
+  END IF
+
+  EMIT AgentStart {
+    agent_id:          context.agent_id.unwrap(),
+    session_id:        context.session_id.unwrap(),
+    loop_id:           context.loop_id OR new_uuid(),
+    parent_loop_id:    context.parent_loop_id,    // None for Default, Some for Rerun/Branch
+    continuation_kind: context.continuation_kind,  // Some(Default|Rerun|Branch)
+    timestamp:         now()
+  }
+
+  loop_usage ← run_loop(context, new_messages, config, tx, cancel)
 
   EMIT AgentEnd(new_messages)
+
+  // ── after_loop hook ──────────────────────────────────────────────────────
+  IF config.after_loop defined THEN after_loop(new_messages, loop_usage) END IF
+
   RETURN new_messages
 
 END FUNCTION
@@ -139,10 +188,11 @@ FUNCTION run_loop(
   config: AgentLoopConfig,
   tx: EventChannel<AgentEvent>,
   cancel: CancellationToken
-) -> void
+) -> Usage  // accumulated usage across all turns
 
   first_turn ← true
   turn_number ← 0
+  loop_usage ← Usage.default()
   tracker ← ExecutionTracker.new(config.execution_limits)  // optional
 
   // Drain any pending steering messages before starting
@@ -150,19 +200,33 @@ FUNCTION run_loop(
 
   // ── Outer loop: re-enters if follow-up messages arrive ──────────────────
   WHILE true
-    IF cancel.is_cancelled THEN RETURN END IF
+    IF cancel.is_cancelled THEN RETURN loop_usage END IF
 
     steering_after_tools ← null
 
     // ── Inner loop: runs once per turn (LLM call + tools) ─────────────────
     WHILE true
-      IF cancel.is_cancelled THEN RETURN END IF
+      IF cancel.is_cancelled THEN RETURN loop_usage END IF
 
-      IF NOT first_turn THEN
-        EMIT TurnStart
-      ELSE
+      // Determine TurnTrigger for TurnStart event.
+      // Priority on the first turn:
+      //   1. Branch continuation   → TurnTrigger::Branch   (explicit branch signal)
+      //   2. Any other continuation (Default/Rerun) → TurnTrigger::FollowUp
+      //      (the continuation itself is the follow-up, not a fresh user turn)
+      //   3. Origin call (continuation_kind == None) → config.first_turn_trigger
+      //      (User for Agent::prompt, SubAgent for sub-agent callers)
+      // Subsequent turns always use TurnTrigger::FollowUp.
+      IF first_turn THEN
+        turn_trigger ←
+          IF context.continuation_kind == Branch(..) THEN TurnTrigger::Branch
+          ELSE IF context.continuation_kind is Some  THEN TurnTrigger::FollowUp
+          ELSE config.first_turn_trigger
         first_turn ← false
+      ELSE
+        turn_trigger ← TurnTrigger::FollowUp
       END IF
+
+      EMIT TurnStart { turn_index: turn_number, triggered_by: turn_trigger }
 
       // Inject any pending (steering/follow-up) messages
       FOR EACH msg IN pending
@@ -180,13 +244,13 @@ FUNCTION run_loop(
         EMIT MessageEnd(limit_msg)
         context.messages.append(limit_msg)
         new_messages.append(limit_msg)
-        RETURN
+        RETURN loop_usage
       END IF
 
       // Before-turn callback — abort if returns false
       IF config.before_turn is defined THEN
         IF NOT config.before_turn(context.messages, turn_number) THEN
-          RETURN
+          RETURN loop_usage
         END IF
       END IF
       turn_number ← turn_number + 1
@@ -204,6 +268,9 @@ FUNCTION run_loop(
       context.messages.append(agent_msg)
       new_messages.append(agent_msg)
 
+      // Accumulate usage for after_loop hook
+      loop_usage ← loop_usage + message.usage
+
       // Handle error/abort stop reasons
       IF message.stop_reason == Error OR message.stop_reason == Aborted THEN
         IF message.stop_reason == Error AND config.on_error is defined THEN
@@ -213,7 +280,7 @@ FUNCTION run_loop(
           config.after_turn(context.messages, message.usage)
         END IF
         EMIT TurnEnd(agent_msg, tool_results=[])
-        RETURN
+        RETURN loop_usage
       END IF
 
       // Extract tool calls from assistant content
@@ -275,6 +342,8 @@ FUNCTION run_loop(
     BREAK outer loop
 
   END WHILE  // outer loop
+
+  RETURN loop_usage
 
 END FUNCTION
 ```
@@ -534,15 +603,43 @@ FUNCTION execute_single_tool(
   tools: Vec<AgentTool>,
   id: String, name: String, args: JSON,
   tx: EventChannel<AgentEvent>,
-  cancel: CancellationToken
+  cancel: CancellationToken,
+  config: AgentLoopConfig   // for before/after_tool_execution* hooks
 ) -> (Message::ToolResult, is_error: bool)
 
   tool ← find tool WHERE tool.name() == name  // may be None
 
+  // ── before_tool_execution hook ───────────────────────────────────────────
+  // Return false to skip this tool call entirely.
+  IF config.before_tool_execution defined THEN
+    IF NOT before_tool_execution(name, id, args) THEN
+      // Emit a skipped error result so the LLM knows the call did not run
+      skip_result ← ToolResult{ content: [Text("Tool call skipped by before_tool_execution hook")], is_error: true }
+      EMIT ToolExecutionEnd(id, name, skip_result, is_error=true, child_loop_id=None)
+      msg ← Message::ToolResult{ ..., is_error: true }
+      EMIT MessageStart(msg); EMIT MessageEnd(msg)
+      RETURN (msg, true)
+    END IF
+  END IF
+
   EMIT ToolExecutionStart(tool_call_id=id, tool_name=name, args)
 
-  // Build callbacks for streaming partial results
-  on_update ← callback that EMITS ToolExecutionUpdate(id, name, partial_result)
+  // Build callbacks for streaming partial results.
+  // Each on_update call runs through the before/after_tool_execution_update hooks.
+  on_update ← callback(partial: ToolResult):
+    // Extract text content for hooks
+    text_content ← JOIN text blocks from partial.content
+    // before_tool_execution_update — false suppresses the event
+    emit ← IF config.before_tool_execution_update defined
+               THEN before_tool_execution_update(name, id, text_content)
+               ELSE true
+    IF emit THEN
+      EMIT ToolExecutionUpdate(id, name, partial_result=partial)
+      // after_tool_execution_update — fires only when event was not suppressed
+      IF config.after_tool_execution_update defined THEN
+        after_tool_execution_update(name, id, text_content)
+      END IF
+    END IF
   on_progress ← callback that EMITS ProgressMessage(id, name, text)
 
   ctx ← ToolContext {
@@ -563,7 +660,13 @@ FUNCTION execute_single_tool(
       (ToolResult{ content: [Text("Tool {name} not found")] }, true)
     END IF
 
-  EMIT ToolExecutionEnd(id, name, result, is_error)
+  // child_loop_id is set by SubAgentTool; None for all other tools
+  EMIT ToolExecutionEnd(id, name, result, is_error, child_loop_id: result.child_loop_id)
+
+  // ── after_tool_execution hook ────────────────────────────────────────────
+  IF config.after_tool_execution defined THEN
+    after_tool_execution(name, id, is_error)
+  END IF
 
   msg ← Message::ToolResult {
     tool_call_id: id, tool_name: name,
@@ -853,7 +956,7 @@ END FUNCTION
 
 ---
 
-### `SubAgentTool::execute` *(src/sub_agent.rs)*
+### `SubAgentTool::execute` *(src/agents/sub_agent.rs)*
 
 **Purpose:** Delegate a task to an isolated child agent loop, return its final text as a `ToolResult`.
 **Preconditions:** `params.task` is a non-empty string.
@@ -1624,9 +1727,9 @@ PATTERN SteeringQueueSafety
 
 ---
 
-### `Agent::new` and `Agent::prompt` *(src/agent.rs)*
+### `BasicAgent::new` and `BasicAgent::prompt` *(src/agents/basic_agent.rs)*
 
-**Purpose:** Construct an Agent and start a run. These are the primary application-facing entry points.
+**Purpose:** Construct a BasicAgent and start a run. These are the primary application-facing entry points.
 
 ```
 FUNCTION Agent::new(provider: StreamProvider) -> Agent

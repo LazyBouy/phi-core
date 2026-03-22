@@ -20,9 +20,9 @@ Each sub-agent invocation starts a fresh conversation — no state leaks between
 
 ```rust
 use std::sync::Arc;
-use phi-core::sub_agent::SubAgentTool;
-use phi-core::provider::AnthropicProvider;
-use phi-core::tools;
+use phi_core::agents::SubAgentTool;
+use phi_core::provider::AnthropicProvider;
+use phi_core::tools;
 
 let researcher = SubAgentTool::new("researcher", Arc::new(AnthropicProvider))
     .with_description("Searches and reads files to gather information.")
@@ -39,9 +39,9 @@ let researcher = SubAgentTool::new("researcher", Arc::new(AnthropicProvider))
 ## Registering on a Parent Agent
 
 ```rust
-use phi-core::agent::Agent;
+use phi_core::BasicAgent;
 
-let mut agent = Agent::new(AnthropicProvider)
+let mut agent = BasicAgent::new(AnthropicProvider)
     .with_system_prompt("You coordinate between sub-agents.")
     .with_model("claude-sonnet-4-20250514")
     .with_api_key(api_key)
@@ -66,6 +66,7 @@ When the parent LLM calls multiple sub-agents in a single response, they run con
 | `with_max_turns(N)` | Turn limit (default: 10). Primary guard against runaway execution. |
 | `with_thinking()` | Enable extended thinking for the sub-agent |
 | `with_cache_config()` | Prompt caching settings |
+| `with_parent_loop_id(id: String)` | Sets `parent_loop_id` on the child's `AgentContext`. The child's `AgentStart` event will carry this value, enabling parent→child ancestry tracing across the event stream. |
 
 ## Event Forwarding
 
@@ -73,6 +74,8 @@ When the parent provides an `on_update` callback (standard for all tools), sub-a
 
 - Text deltas from the sub-agent's LLM responses
 - Tool call notifications from the sub-agent's tool usage
+
+When the child loop completes, the parent emits `ToolExecutionEnd` with `child_loop_id: Some(loop_id)` set to the child's `loop_id`. This lets you correlate `ToolExecutionEnd` on the parent side with `AgentStart`/`AgentEnd` on the child side when both event streams are consumed.
 
 ## Design Decisions
 
