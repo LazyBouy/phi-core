@@ -66,6 +66,10 @@ impl GoogleVertexProvider {
 
 #[async_trait]
 impl StreamProvider for GoogleVertexProvider {
+    fn provider_id(&self) -> &str {
+        "vertex"
+    }
+
     async fn stream(
         &self,
         config: StreamConfig, // REQUEST — api_key is OAuth2 Bearer token (not API key); base_url is Vertex endpoint

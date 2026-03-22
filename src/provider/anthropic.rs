@@ -63,6 +63,10 @@ pub struct AnthropicProvider;
 
 #[async_trait]
 impl StreamProvider for AnthropicProvider {
+    fn provider_id(&self) -> &str {
+        "anthropic"
+    }
+
     async fn stream(
         &self,
         config: StreamConfig, // REQUEST — includes api_key (sk-ant-* or sk-ant-oat* for OAuth)

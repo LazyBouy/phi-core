@@ -745,6 +745,12 @@ pub struct ToolResult {
     pub content: Vec<Content>,
     #[serde(default)]
     pub details: serde_json::Value,
+    /// Set by sub-agent tools to the child loop's `loop_id` after `agent_loop()` returns.
+    /// `None` for all regular (non-sub-agent) tools.
+    /// Propagated to `AgentEvent::ToolExecutionEnd.child_loop_id` so the parent event stream
+    /// can reference the child loop without parsing tool result content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_loop_id: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -932,6 +938,35 @@ pub trait AgentTool: Send + Sync {
 // Agent events (for streaming UI updates)
 // ---------------------------------------------------------------------------
 
+/// How an `agent_loop_continue` call relates to the session's prior loops.
+///
+/// Set on [`AgentContext::continuation_kind`] before calling `agent_loop_continue`,
+/// and surfaced in [`AgentEvent::AgentStart`] so that observability consumers
+/// (logs, UIs, analysis tools) can understand the session execution tree without
+/// inspecting message content.
+///
+/// The runtime does **not** enforce context constraints — e.g. it does not verify
+/// that a `Rerun` uses an identical context to the original loop. That is the caller's
+/// responsibility. The distinction is purely semantic / for traceability.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ContinuationKind {
+    /// Unspecified continuation — preserves the original `agent_loop_continue` semantics.
+    /// Use when the Rerun/Branch distinction is not relevant to the caller.
+    Default,
+    /// Retry of the same scenario from an equivalent context state.
+    ///
+    /// The `tag` is an RFC 3339 UTC timestamp auto-generated at call time.
+    /// Use for error recovery, rate-limit retries, or explicit re-runs.
+    Rerun { tag: String },
+    /// Exploration of a different execution path from a specific branching point.
+    ///
+    /// The `tag` is an RFC 3339 UTC timestamp auto-generated at call time.
+    /// Caller should modify `context.messages` to set up the alternative path
+    /// before calling `agent_loop_continue`. The first turn emits
+    /// [`TurnTrigger::Branch`] instead of `FollowUp`.
+    Branch { tag: String },
+}
+
 /// Identifies what caused a new turn to begin.
 #[derive(Debug, Clone)]
 pub enum TurnTrigger {
@@ -939,9 +974,10 @@ pub enum TurnTrigger {
     User,
     /// This agent was invoked as a sub-agent by a parent agent.
     SubAgent,
-    /// Continuation turn: tool round-trip, steering message, or retry (`agent_loop_continue`).
+    /// Continuation turn: tool round-trip, steering message, or `Default` / `Rerun` continuation.
     FollowUp,
-    /// Reserved for branched execution paths.
+    /// First turn of a `Branch` continuation (`agent_loop_continue` with `ContinuationKind::Branch`).
+    /// Subsequent turns within the same branched loop use `FollowUp`.
     Branch,
 }
 
@@ -974,9 +1010,19 @@ pub enum AgentEvent {
     AgentStart {
         /// Stable identifier for this agent instance. Caller-supplied or auto-generated UUID v4.
         agent_id: String,
-        /// Identifier for the current session. Caller-supplied or auto-generated UUID v4.
-        /// Persists across multiple agent_loop() calls within the same logical session.
+        /// Identifier for the current session. Groups related loops under one logical umbrella.
+        /// Persists across multiple `agent_loop()` / `agent_loop_continue()` calls.
         session_id: String,
+        /// Unique identifier for this specific loop call within the session.
+        /// Format: `"{session_id}.{config_id}.{N}"` — encodes which config produced this loop.
+        /// Auto-derived from provider + model + thinking_level when not explicitly set.
+        loop_id: String,
+        /// The `loop_id` of the loop this continues from. `None` for origin calls
+        /// (`agent_loop()` with no prior session). Set for all `agent_loop_continue()` calls.
+        parent_loop_id: Option<String>,
+        /// How this continuation relates to prior loops. `None` for origin calls.
+        /// `Some(Default|Rerun|Branch)` for `agent_loop_continue()` calls.
+        continuation_kind: Option<ContinuationKind>,
         /// Wall-clock time when the agent loop was entered.
         timestamp: chrono::DateTime<chrono::Utc>,
         /// Extensible bag for caller-supplied context (e.g., user info, request tags, trace IDs).
@@ -1070,6 +1116,10 @@ pub enum AgentEvent {
         tool_name: String,
         result: ToolResult,
         is_error: bool,
+        /// Set to the child agent's `loop_id` when this tool spawned a sub-agent loop.
+        /// `None` for all regular (non-sub-agent) tools.
+        /// Enables parent→child traceability in the event stream without parsing tool result text.
+        child_loop_id: Option<String>,
     },
 
     /// Fires when a tool emits a user-facing status string (via ctx.on_progress).
@@ -1144,9 +1194,31 @@ pub struct AgentContext {
     // so you box them to a fixed-size pointer.
     pub tools: Vec<Box<dyn AgentTool>>, // REGISTRY — available tool implementations; converted to ToolDefinition for LLM
 
-    // Identity — set by callers; auto-generated (UUID v4) at loop entry if None
+    // ── Identity ─────────────────────────────────────────────────────────────
+    // Set by callers (e.g. Agent wrapper) before each loop call.
+    // agent_loop() auto-generates UUIDs if None and writes them back to context.
+    // agent_loop_continue() asserts both are Some — continuations require stable identity.
+    /// Stable identifier for the agent instance. Auto-generated UUID v4 if None on first call;
+    /// written back to context so continuations inherit it.
     pub agent_id: Option<String>,
+
+    /// Groups related loop calls under one logical session (evaluational parallelism, reruns,
+    /// branches). Auto-generated UUID v4 if None on first call; written back to context.
+    /// Required (Some) for all `agent_loop_continue()` calls.
     pub session_id: Option<String>,
+
+    /// Unique identifier for this specific loop call: `"{session_id}.{config_id}.{N}"`.
+    /// Set by Agent wrapper via `next_loop_id()`; direct callers may supply their own.
+    /// Falls back to a UUID at loop entry if still None.
+    pub loop_id: Option<String>,
+
+    /// The `loop_id` of the loop this was continued from. None for origin calls.
+    /// Set by Agent wrapper for `agent_loop_continue()` calls to enable ancestry tracking.
+    pub parent_loop_id: Option<String>,
+
+    /// How this loop relates to prior loops. None for origin calls.
+    /// Some(Default|Rerun|Branch) for agent_loop_continue() calls.
+    pub continuation_kind: Option<ContinuationKind>,
 }
 
 // ---------------------------------------------------------------------------

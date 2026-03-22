@@ -45,6 +45,10 @@ pub struct AzureOpenAiProvider;
 
 #[async_trait]
 impl StreamProvider for AzureOpenAiProvider {
+    fn provider_id(&self) -> &str {
+        "azure"
+    }
+
     async fn stream(
         &self,
         config: StreamConfig, // REQUEST — api_key sent as `api-key` header (NOT Bearer); base_url includes api-version

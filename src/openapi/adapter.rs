@@ -176,6 +176,7 @@ impl AgentTool for OpenApiToolAdapter {
                         text: format!("Error: Expected object parameters, got {}", type_name),
                     }],
                     details: serde_json::json!({ "error": "invalid_args" }),
+                    child_loop_id: None,
                 });
             }
         };
@@ -194,6 +195,7 @@ impl AgentTool for OpenApiToolAdapter {
                             ),
                         }],
                         details: serde_json::json!({ "error": "missing_path_param" }),
+                        child_loop_id: None,
                     });
                 }
             };
@@ -216,6 +218,7 @@ impl AgentTool for OpenApiToolAdapter {
                         text: format!("Error: Invalid HTTP method: {}", e),
                     }],
                     details: serde_json::json!({ "error": "invalid_method" }),
+                    child_loop_id: None,
                 });
             }
         };
@@ -281,6 +284,7 @@ impl AgentTool for OpenApiToolAdapter {
                         "method": method.to_string(),
                         "url": url,
                     }),
+                    child_loop_id: None,
                 });
             }
         };
@@ -302,6 +306,7 @@ impl AgentTool for OpenApiToolAdapter {
                         "method": method.to_string(),
                         "url": url,
                     }),
+                    child_loop_id: None,
                 });
             }
         };
@@ -325,6 +330,7 @@ impl AgentTool for OpenApiToolAdapter {
                 "method": method.to_string(),
                 "url": url,
             }),
+            child_loop_id: None,
         })
     }
 }

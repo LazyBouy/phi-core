@@ -165,6 +165,7 @@ impl AgentTool for McpToolAdapter {
         Ok(ToolResult {
             content,
             details: serde_json::Value::Null,
+            child_loop_id: None,
         })
     }
 }

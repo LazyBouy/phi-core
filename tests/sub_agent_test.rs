@@ -39,6 +39,7 @@ fn make_config(provider: Arc<dyn phi_core::provider::StreamProvider>) -> AgentLo
         after_tool_execution_update: None,
         input_filters: vec![],
         first_turn_trigger: TurnTrigger::User,
+        config_id: None,
     }
 }
 
@@ -129,6 +130,7 @@ impl AgentTool for EchoTool {
                 text: format!("echoed: {}", text),
             }],
             details: serde_json::Value::Null,
+            child_loop_id: None,
         })
     }
 }
@@ -288,6 +290,9 @@ async fn test_sub_agent_parallel() {
 
     #[async_trait::async_trait]
     impl phi_core::provider::StreamProvider for SlowProvider {
+        fn provider_id(&self) -> &str {
+            "mock"
+        }
         async fn stream(
             &self,
             _config: phi_core::provider::StreamConfig,
@@ -365,6 +370,9 @@ async fn test_sub_agent_parallel() {
         tools: vec![Box::new(sub_a), Box::new(sub_b)],
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user("Run both agents"));
@@ -514,6 +522,9 @@ async fn test_sub_agent_in_parent_loop() {
         tools: vec![Box::new(sub_agent)],
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user("What is 6*7?"));

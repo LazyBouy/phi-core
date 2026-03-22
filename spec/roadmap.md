@@ -1169,3 +1169,86 @@ before implementation:
 - [ ] **Level 4 — Professional:** All 7 provider protocols implemented; prompt caching and extended thinking integrated; cancellation propagates to all I/O; structured logging in place; `ContextTracker` accurate.
 - [ ] **Level 5 — Creative:** Sub-agent delegation works end-to-end; OpenAPI adapter generates callable tools; Anthropic OAuth and `InputJsonDelta` streaming are correct; all three ambiguities have documented resolutions and implementations.
 - [ ] **Level 6 — Boss:** All test suites pass (unit, property-based, integration, end-to-end, load); public API docs and examples are complete; CI runs automatically; operational runbooks are written.
+
+***
+
+## Session & Loop Identity — Future Scenarios
+
+> Added: 2026-03-22
+> Status: Foundation implemented (loop_id, ContinuationKind, parent_loop_id, child_loop_id).
+> The scenarios below build on this foundation but are out of scope for the initial change.
+
+The current implementation covers:
+- `loop_id` derived from `session_id + config_id + counter` (config owns its identity)
+- `ContinuationKind` enum: `Default`, `Rerun { tag }`, `Branch { tag }`
+- `parent_loop_id` for ancestry tracking across reruns/branches
+- `child_loop_id` on `ToolExecutionEnd` for parent→sub-agent traceability
+- Asserts in `agent_loop_continue` requiring `agent_id`/`session_id` to be set
+- `TurnTrigger::Branch` fires on first turn of a `Branch` continuation
+
+### Future: HITL Resume
+
+**Scenario:** User cancels a loop mid-execution (via `Agent::abort()`), reviews the partial
+output, then resumes. The loop was aborted at some known message boundary.
+
+**Mechanism:** Caller restores `context.messages` to the desired resume point, then calls
+`agent_loop_continue(Rerun | Branch)`. The kind communicates intent:
+- `Rerun` — resume from the same point (same logical path, treat as a retry)
+- `Branch` — resume but with modifications (e.g., injected steering message, different system
+  prompt, tweaked tool result) — a diverging path from the original
+
+**What needs to be built:** A `context.messages` checkpoint API. The current `Agent::messages()`
+getter returns a slice; the caller needs to be able to snapshot and restore it. The `save_messages`
+/ `restore_messages` methods on `Agent` already support this (JSON round-trip). The missing piece
+is a higher-level `Agent::checkpoint() -> Checkpoint` and `Agent::restore(checkpoint)` that
+bundle the full state (messages + loop_id + session_id) for clean HITL resume without manual
+field management.
+
+### Future: Checkpoint Restore
+
+**Scenario:** Context is serialized to persistent storage (database, file) and later loaded for
+a new run — either by the same process after restart or by a different process instance.
+
+**Mechanism:** Same as HITL resume at the loop level. The caller deserializes `context.messages`
+and sets the identity fields (`agent_id`, `session_id`, `loop_id`) to their original values, then
+calls `agent_loop_continue(Branch)`. The `parent_loop_id` points to the last loop ID from the
+original session, maintaining the ancestry chain across process boundaries.
+
+**What needs to be built:** A serializable `AgentSnapshot` type that captures everything needed
+to resume: `messages`, `agent_id`, `session_id`, `last_loop_id`, and any relevant config fields.
+`AgentSnapshot::save(path)` / `AgentSnapshot::load(path)` convenience methods. The snapshot does
+NOT include the provider config (API keys, base URLs) — those remain in the caller's environment.
+
+### Future: Parallel Exploration
+
+**Scenario:** Multiple branches from the same checkpoint are run concurrently — e.g., A/B testing
+two different tool result injections, or evaluating three different system prompt variants on the
+same conversation prefix.
+
+**Mechanism:** The caller snapshots the context at a branching point, then calls multiple
+`agent_loop_continue(Branch)` concurrently, each with a different modification to `context.messages`
+before the call. Each concurrent call produces an independent event stream with its own `loop_id`
+and `parent_loop_id` pointing to the same branch-point loop.
+
+**What needs to be built:** No new primitives are needed — `agent_loop_continue` and `AgentContext`
+already support this. The caller is responsible for cloning the context and making independent calls.
+A higher-level `Agent::explore_branches(Vec<BranchSpec>) -> Vec<Receiver<AgentEvent>>` convenience
+method could simplify the pattern but is not required for correctness.
+
+**Concurrency note:** Each branch needs its own `AgentContext` (owned), its own `CancellationToken`,
+and its own `mpsc::UnboundedSender`. `tokio::spawn` each `agent_loop_continue` call independently.
+The parent task collects results from all branch receivers.
+
+### Future: Auto Origin/Continue Selection
+
+**Scenario:** The caller wants to send a new message to the agent without knowing whether the
+current context requires an origin call (`agent_loop`) or a continuation (`agent_loop_continue`).
+
+**Mechanism:** Inspect `context.messages.last()`:
+- No messages → `agent_loop` (fresh start)
+- Last message is `User` or `ToolResult` → `agent_loop_continue` (already awaiting model response)
+- Last message is `Assistant` → `agent_loop` with new prompt (start new turn)
+
+**What needs to be built:** An `Agent::send(message)` method (or similar) that encapsulates
+this logic. It would inspect the context state, build the appropriate call type, and dispatch.
+This trades explicit caller control for convenience and is opt-in.

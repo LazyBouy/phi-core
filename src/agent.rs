@@ -145,6 +145,36 @@ pub struct Agent {
     // Control — cancel token is Some during a streaming call, None otherwise
     cancel: Option<CancellationToken>,
     is_streaming: bool, // guard against concurrent prompt() calls
+
+    // ── Session identity ─────────────────────────────────────────────────────
+    // These fields give every loop call within this Agent a consistent, traceable identity.
+    // agent_id and session_id are generated once at Agent::new() and threaded into every
+    // AgentContext built by this Agent.
+    //
+    // loop_counters: HashMap keyed by "{session_id}.{effective_config_id}" — each unique
+    // (session, config) combination has its own monotonic counter, so loop IDs self-document
+    // which config produced them:
+    //   ses_xyz.anthropic.claude-opus-4.1   ← first claude loop
+    //   ses_xyz.openai.gpt-4o.1             ← first openai loop (independent counter)
+    //   ses_xyz.anthropic.claude-opus-4.2   ← second claude loop
+    //
+    // last_loop_id: tracks the most recently started loop so agent_loop_continue() can
+    // set parent_loop_id automatically, enabling ancestry tracking across reruns/branches.
+    //
+    /* ROADMAP — future session/identity capabilities:
+       - HITL resume: user cancels mid-run, reviews, resumes → use continue_loop_with_sender(Rerun|Branch)
+       - Checkpoint restore: context serialised to disk, later restored → continue_loop_with_sender(Branch)
+       - Parallel exploration: multiple branches from same checkpoint, concurrent →
+             multiple concurrent continue_loop_with_sender(Branch) calls in the same session
+       - Auto origin/continue selection: inspect last message role → if ToolResult, auto-continue
+       - Sub-agent parent linking (automatic): Agent::with_sub_agent() could auto-pass
+             self.last_loop_id as parent_loop_id to SubAgentTool; currently requires
+             manual wiring via SubAgentTool::with_parent_loop_id()
+    */
+    agent_id: String,
+    session_id: String,
+    loop_counters: HashMap<String, usize>,
+    last_loop_id: Option<String>,
 }
 
 impl Agent {
@@ -195,6 +225,10 @@ impl Agent {
             compaction_strategy: None,
             cancel: None,
             is_streaming: false,
+            agent_id: uuid::Uuid::new_v4().to_string(),
+            session_id: uuid::Uuid::new_v4().to_string(),
+            loop_counters: HashMap::new(),
+            last_loop_id: None,
         }
     }
 
@@ -647,15 +681,21 @@ impl Agent {
 
         Python analogy: temporarily `tools = self.tools; self.tools = []` — then restore.
         */
+        // Build config first (only borrows self), then derive loop_id (mutates loop_counters).
+        let config = self.build_config();
+        let loop_id = self.next_loop_id(&config);
+        self.last_loop_id = Some(loop_id.clone());
+
         let mut context = AgentContext {
             system_prompt: self.system_prompt.clone(),
             messages: self.messages.clone(),
             tools: std::mem::take(&mut self.tools), // MOVE tools out, leaving self.tools = []
-            agent_id: None,
-            session_id: None,
+            agent_id: Some(self.agent_id.clone()),
+            session_id: Some(self.session_id.clone()),
+            loop_id: Some(loop_id),
+            parent_loop_id: None, // origin — no parent
+            continuation_kind: None,
         };
-
-        let config = self.build_config();
 
         let _new_messages = agent_loop(messages, &mut context, &config, tx, cancel).await;
 
@@ -669,14 +709,22 @@ impl Agent {
     /// wrapper around [`continue_loop_with_sender()`](Self::continue_loop_with_sender).
     pub async fn continue_loop(&mut self) -> mpsc::UnboundedReceiver<AgentEvent> {
         let (tx, rx) = mpsc::unbounded_channel();
-        self.continue_loop_with_sender(tx).await;
+        self.continue_loop_with_sender(tx, ContinuationKind::Default)
+            .await;
         rx
     }
 
     /// Continue from current context, streaming events to a caller-provided sender.
+    ///
+    /// `kind` describes how this continuation relates to prior loops:
+    /// - `Default` — unspecified continuation (preserves current semantics; use when the
+    ///   Rerun/Branch distinction is not relevant to the caller)
+    /// - `Rerun { tag }` — retry from the same context state (auto-generates a UTC timestamp tag)
+    /// - `Branch { tag }` — explore a different path from the same starting point (same tag)
     pub async fn continue_loop_with_sender(
         &mut self,
         tx: mpsc::UnboundedSender<AgentEvent>, // OBSERVER — events from this continuation pushed here
+        kind: ContinuationKind,                // CONTINUATION KIND — Default | Rerun | Branch
     ) {
         assert!(!self.is_streaming, "Agent is already streaming.");
         assert!(!self.messages.is_empty(), "No messages to continue from.");
@@ -685,16 +733,31 @@ impl Agent {
         self.cancel = Some(cancel.clone());
         self.is_streaming = true;
 
+        // Build config first (only borrows self), then derive loop_id (mutates loop_counters).
+        let config = self.build_config();
+        let loop_id = self.next_loop_id(&config);
+        let parent_loop_id = self.last_loop_id.clone(); // points to the loop this continues from
+        self.last_loop_id = Some(loop_id.clone());
+
+        // Auto-generate the timestamp tag for Rerun/Branch (RFC 3339 UTC).
+        let tag = chrono::Utc::now().to_rfc3339();
+        let kind_with_tag = match kind {
+            ContinuationKind::Default => ContinuationKind::Default,
+            ContinuationKind::Rerun { .. } => ContinuationKind::Rerun { tag },
+            ContinuationKind::Branch { .. } => ContinuationKind::Branch { tag },
+        };
+
         // Move tools temporarily into context for the loop; restored after
         let mut context = AgentContext {
             system_prompt: self.system_prompt.clone(),
             messages: self.messages.clone(),
             tools: std::mem::take(&mut self.tools),
-            agent_id: None,
-            session_id: None,
+            agent_id: Some(self.agent_id.clone()),
+            session_id: Some(self.session_id.clone()),
+            loop_id: Some(loop_id),
+            parent_loop_id,
+            continuation_kind: Some(kind_with_tag),
         };
-
-        let config = self.build_config();
 
         let _new_messages = agent_loop_continue(&mut context, &config, tx, cancel).await;
 
@@ -705,6 +768,55 @@ impl Agent {
     }
 
     // -- Internal --
+
+    /*
+    next_loop_id — derive the next loop_id for this config within this session.
+
+    DESIGN: loop_id encodes which config produced the loop, making identity self-documenting.
+      Format: "{session_id}.{effective_config_id}.{N}"
+      effective_config_id = config.config_id if set, else "{provider_id}.{model_slug}[.thinking]"
+
+    COUNTER: HashMap keyed by "{session_id}.{effective_config_id}".
+    Each unique (session, config) pair has its own counter — so two different configs
+    in the same session get independent counters (both start at .1), while two calls
+    with the same config get sequential numbers (.1, .2, .3).
+
+    SLUG: Non-alphanumeric chars in the model name are replaced with '-' so the loop_id
+    is a clean, URL-safe identifier. E.g. "claude-opus-4.5" → "claude-opus-4-5".
+    Hyphens are kept as-is (they're valid slug separators).
+    */
+    fn next_loop_id(&mut self, config: &AgentLoopConfig) -> String {
+        let effective_config_id = if let Some(ref id) = config.config_id {
+            id.clone()
+        } else {
+            let slugify = |s: &str| -> String {
+                s.chars()
+                    .map(|c| {
+                        if c.is_alphanumeric() || c == '-' {
+                            c
+                        } else {
+                            '-'
+                        }
+                    })
+                    .collect()
+            };
+            let thinking_part = if config.thinking_level != ThinkingLevel::Off {
+                ".thinking"
+            } else {
+                ""
+            };
+            format!(
+                "{}.{}{}",
+                config.provider.provider_id(),
+                slugify(&config.model),
+                thinking_part
+            )
+        };
+        let thread_key = format!("{}.{}", self.session_id, effective_config_id);
+        let n = self.loop_counters.entry(thread_key.clone()).or_insert(0);
+        *n += 1;
+        format!("{}.{}", thread_key, n)
+    }
 
     /*
     build_config — assemble AgentLoopConfig from Agent's current state.
@@ -795,6 +907,7 @@ impl Agent {
             on_error: self.on_error.clone(),
             input_filters: self.input_filters.clone(),
             first_turn_trigger: TurnTrigger::User,
+            config_id: None, // auto-derived in next_loop_id() from provider + model + thinking_level
         }
     }
 }

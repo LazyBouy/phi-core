@@ -58,6 +58,10 @@ pub struct BedrockProvider;
 
 #[async_trait]
 impl StreamProvider for BedrockProvider {
+    fn provider_id(&self) -> &str {
+        "bedrock"
+    }
+
     async fn stream(
         &self,
         config: StreamConfig, // REQUEST — api_key is "access_key:secret[:token]"; uses AWS SigV4 signing

@@ -38,6 +38,7 @@ fn make_config(provider: Arc<dyn phi_core::provider::StreamProvider>) -> AgentLo
         after_tool_execution_update: None,
         input_filters: vec![],
         first_turn_trigger: TurnTrigger::User,
+        config_id: None,
     }
 }
 
@@ -60,6 +61,9 @@ async fn test_simple_text_response() {
         tools: Vec::new(),
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user("Hi"));
@@ -147,6 +151,7 @@ async fn test_tool_call_and_response() {
                     text: "hello".into(),
                 }],
                 details: serde_json::Value::Null,
+                child_loop_id: None,
             })
         }
     }
@@ -159,6 +164,9 @@ async fn test_tool_call_and_response() {
         tools: vec![Box::new(ReadFileTool)],
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user("Read test.txt"));
@@ -211,6 +219,9 @@ async fn test_abort_cancels_loop() {
         tools: Vec::new(),
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user("Hi"));
@@ -247,8 +258,12 @@ async fn test_continue_from_tool_result() {
             }),
         ],
         tools: Vec::new(),
-        agent_id: None,
-        session_id: None,
+        // agent_loop_continue requires agent_id and session_id to be set
+        agent_id: Some("test-agent".into()),
+        session_id: Some("test-session".into()),
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -302,6 +317,9 @@ async fn test_tool_error_is_reported() {
         tools: vec![Box::new(FailingTool)],
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user("Use the tool"));
@@ -340,6 +358,9 @@ async fn test_unknown_tool_reports_error() {
         tools: Vec::new(), // No tools registered
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user("Use nonexistent tool"));
@@ -391,6 +412,7 @@ impl AgentTool for TimedTool {
                 text: format!("done:{}", self.name),
             }],
             details: serde_json::Value::Null,
+            child_loop_id: None,
         })
     }
 }
@@ -438,6 +460,9 @@ async fn test_parallel_tool_execution_faster_than_sequential() {
         ],
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user("Run all tools"));
@@ -511,6 +536,9 @@ async fn test_sequential_tool_execution_is_slower() {
         ],
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user("Run tools"));
@@ -580,6 +608,9 @@ async fn test_batched_tool_execution() {
         ],
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user("Run all tools"));
@@ -641,6 +672,7 @@ impl AgentTool for ProgressTool {
                         text: format!("step {}/3", i),
                     }],
                     details: serde_json::Value::Null,
+                    child_loop_id: None,
                 });
             }
         }
@@ -649,6 +681,7 @@ impl AgentTool for ProgressTool {
                 text: "done".into(),
             }],
             details: serde_json::Value::Null,
+            child_loop_id: None,
         })
     }
 }
@@ -671,6 +704,9 @@ async fn test_tool_execution_update_events_emitted() {
         tools: vec![Box::new(ProgressTool)],
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user("go"));
@@ -714,6 +750,9 @@ use phi_core::provider::{ProviderError, StreamConfig, StreamEvent, StreamProvide
 
 #[async_trait::async_trait]
 impl StreamProvider for FailThenSucceedProvider {
+    fn provider_id(&self) -> &str {
+        "mock"
+    }
     async fn stream(
         &self,
         config: StreamConfig,
@@ -782,6 +821,7 @@ async fn test_retry_on_rate_limit_succeeds() {
         after_tool_execution_update: None,
         input_filters: vec![],
         first_turn_trigger: TurnTrigger::User,
+        config_id: None,
     };
 
     let mut context = AgentContext {
@@ -790,6 +830,9 @@ async fn test_retry_on_rate_limit_succeeds() {
         tools: Vec::new(),
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user("hi"));
@@ -857,6 +900,7 @@ async fn test_retry_exhausted_returns_error() {
         after_tool_execution_update: None,
         input_filters: vec![],
         first_turn_trigger: TurnTrigger::User,
+        config_id: None,
     };
 
     let mut context = AgentContext {
@@ -865,6 +909,9 @@ async fn test_retry_exhausted_returns_error() {
         tools: Vec::new(),
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user("hi"));
@@ -934,6 +981,7 @@ async fn test_no_retry_on_auth_error() {
         after_tool_execution_update: None,
         input_filters: vec![],
         first_turn_trigger: TurnTrigger::User,
+        config_id: None,
     };
 
     let mut context = AgentContext {
@@ -942,6 +990,9 @@ async fn test_no_retry_on_auth_error() {
         tools: Vec::new(),
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user("hi"));
@@ -999,6 +1050,7 @@ async fn test_retry_none_disables_retries() {
         after_tool_execution_update: None,
         input_filters: vec![],
         first_turn_trigger: TurnTrigger::User,
+        config_id: None,
     };
 
     let mut context = AgentContext {
@@ -1007,6 +1059,9 @@ async fn test_retry_none_disables_retries() {
         tools: Vec::new(),
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user("hi"));
@@ -1042,6 +1097,9 @@ async fn test_message_update_events_emitted_during_streaming() {
         tools: Vec::new(),
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user("hi"));
@@ -1142,6 +1200,9 @@ async fn test_before_turn_can_abort() {
         tools: vec![Box::new(ProgressTool)],
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user("go"));
@@ -1186,6 +1247,9 @@ async fn test_after_turn_receives_messages() {
         tools: vec![Box::new(ProgressTool)],
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user("go"));
@@ -1245,6 +1309,7 @@ async fn test_on_error_fires_on_provider_error() {
         after_tool_execution_update: None,
         input_filters: vec![],
         first_turn_trigger: TurnTrigger::User,
+        config_id: None,
     };
 
     let mut context = AgentContext {
@@ -1253,6 +1318,9 @@ async fn test_on_error_fires_on_provider_error() {
         tools: Vec::new(),
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user("hi"));
@@ -1279,6 +1347,9 @@ async fn test_callbacks_are_optional() {
         tools: Vec::new(),
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user("Hi"));
@@ -1328,6 +1399,7 @@ impl AgentTool for ProgressMessageTool {
                 text: "done".into(),
             }],
             details: serde_json::Value::Null,
+            child_loop_id: None,
         })
     }
 }
@@ -1349,6 +1421,9 @@ async fn test_progress_message_event_emitted() {
         tools: vec![Box::new(ProgressMessageTool)],
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user("go"));
@@ -1403,6 +1478,7 @@ impl AgentTool for SilentTool {
                 text: "quiet".into(),
             }],
             details: serde_json::Value::Null,
+            child_loop_id: None,
         })
     }
 }
@@ -1424,6 +1500,9 @@ async fn test_tool_ignoring_progress_no_panic() {
         tools: vec![Box::new(SilentTool)],
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user("go"));
@@ -1473,6 +1552,7 @@ impl AgentTool for NamedProgressTool {
                 text: format!("done:{}", self.tool_name),
             }],
             details: serde_json::Value::Null,
+            child_loop_id: None,
         })
     }
 }
@@ -1507,6 +1587,9 @@ async fn test_parallel_tools_progress_distinguishable() {
         ],
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user("go"));
@@ -1550,6 +1633,9 @@ async fn test_on_update_still_works_after_refactor() {
         tools: vec![Box::new(ProgressTool)],
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user("go"));
@@ -1617,6 +1703,9 @@ async fn test_filter_pass_message_goes_through() {
         tools: Vec::new(),
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user("Hi"));
@@ -1647,6 +1736,9 @@ async fn test_filter_warn_injects_warning_message() {
         tools: Vec::new(),
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user("Hi"));
@@ -1684,6 +1776,9 @@ async fn test_filter_reject_returns_empty() {
         tools: Vec::new(),
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user("Bad input"));
@@ -1759,6 +1854,9 @@ async fn test_filter_chain_first_reject_wins() {
         tools: Vec::new(),
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user("Bad"));
@@ -1793,6 +1891,9 @@ async fn test_filter_multiple_warns_accumulate() {
         tools: Vec::new(),
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user("Hi"));
@@ -1846,6 +1947,9 @@ async fn test_filter_non_text_content_only_text_extracted() {
         tools: Vec::new(),
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let prompt = AgentMessage::Llm(Message::User {
@@ -1974,6 +2078,7 @@ async fn test_custom_compaction_strategy_is_called() {
         after_tool_execution_update: None,
         input_filters: vec![],
         first_turn_trigger: TurnTrigger::User,
+        config_id: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user("Hello"));
@@ -1983,6 +2088,9 @@ async fn test_custom_compaction_strategy_is_called() {
         tools: vec![],
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -2058,6 +2166,7 @@ async fn test_none_compaction_strategy_uses_default() {
         after_tool_execution_update: None,
         input_filters: vec![],
         first_turn_trigger: TurnTrigger::User,
+        config_id: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user("Hello"));
@@ -2067,6 +2176,9 @@ async fn test_none_compaction_strategy_uses_default() {
         tools: vec![],
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -2080,4 +2192,197 @@ async fn test_none_compaction_strategy_uses_default() {
         !new_messages.is_empty(),
         "Agent should have produced messages"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Session & Loop Identity tests
+// ---------------------------------------------------------------------------
+
+/// loop_id with explicit config_id uses the format "{session_id}.{config_id}.1"
+#[tokio::test]
+async fn test_loop_id_explicit_config_id() {
+    let provider = MockProvider::text("hello");
+    let mut config = make_config(Arc::new(provider));
+    config.config_id = Some("anthropic-opus".into());
+
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+        agent_id: Some("agt-test".into()),
+        session_id: Some("ses-test".into()),
+        loop_id: Some("ses-test.anthropic-opus.1".into()),
+        parent_loop_id: None,
+        continuation_kind: None,
+    };
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    agent_loop(vec![], &mut context, &config, tx, cancel).await;
+
+    // Collect events and find AgentStart
+    let mut events = Vec::new();
+    while let Ok(e) = rx.try_recv() {
+        events.push(e);
+    }
+    let agent_start = events.iter().find_map(|e| {
+        if let AgentEvent::AgentStart { loop_id, .. } = e {
+            Some(loop_id.clone())
+        } else {
+            None
+        }
+    });
+    assert_eq!(
+        agent_start.as_deref(),
+        Some("ses-test.anthropic-opus.1"),
+        "loop_id in AgentStart should match the one set in context"
+    );
+}
+
+/// agent_loop_continue emits AgentStart with parent_loop_id and continuation_kind
+#[tokio::test]
+async fn test_continuation_kind_in_agent_start() {
+    let provider = MockProvider::text("Done processing.");
+    let config = make_config(Arc::new(provider));
+
+    let tag = chrono::Utc::now().to_rfc3339();
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: vec![
+            AgentMessage::Llm(Message::user("do something")),
+            AgentMessage::Llm(Message::ToolResult {
+                tool_call_id: "tc-1".into(),
+                tool_name: "test_tool".into(),
+                content: vec![Content::Text {
+                    text: "result".into(),
+                }],
+                is_error: false,
+                timestamp: 0,
+            }),
+        ],
+        tools: Vec::new(),
+        agent_id: Some("agt-test".into()),
+        session_id: Some("ses-test".into()),
+        loop_id: Some("ses-test.mock.mock.2".into()),
+        parent_loop_id: Some("ses-test.mock.mock.1".into()),
+        continuation_kind: Some(ContinuationKind::Rerun { tag: tag.clone() }),
+    };
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    agent_loop_continue(&mut context, &config, tx, cancel).await;
+
+    let mut events = Vec::new();
+    while let Ok(e) = rx.try_recv() {
+        events.push(e);
+    }
+
+    let start_event = events
+        .iter()
+        .find(|e| matches!(e, AgentEvent::AgentStart { .. }));
+    assert!(start_event.is_some(), "AgentStart must be emitted");
+
+    if let Some(AgentEvent::AgentStart {
+        loop_id,
+        parent_loop_id,
+        continuation_kind,
+        ..
+    }) = start_event
+    {
+        assert_eq!(loop_id, "ses-test.mock.mock.2");
+        assert_eq!(parent_loop_id.as_deref(), Some("ses-test.mock.mock.1"));
+        assert!(
+            matches!(continuation_kind, Some(ContinuationKind::Rerun { .. })),
+            "continuation_kind should be Rerun"
+        );
+    }
+}
+
+/// Two agent_loop() calls with different config_ids in the same session get independent .1 counters
+#[tokio::test]
+async fn test_agent_wrapper_independent_counters_per_config() {
+    use phi_core::agent::Agent;
+    use phi_core::provider::MockProvider;
+
+    let mut agent = Agent::new(MockProvider::texts(vec!["first", "second"]));
+
+    // First loop with model "mock-a"
+    agent.model = "mock-a".into();
+    let rx1 = agent.prompt("hello").await;
+    let events1: Vec<_> = {
+        let mut v = Vec::new();
+        let mut rx = rx1;
+        while let Ok(e) = rx.try_recv() {
+            v.push(e);
+        }
+        v
+    };
+
+    let loop_id_1 = events1.iter().find_map(|e| {
+        if let AgentEvent::AgentStart { loop_id, .. } = e {
+            Some(loop_id.clone())
+        } else {
+            None
+        }
+    });
+
+    // Second loop with a different model "mock-b" — gets its own counter starting at .1
+    agent.model = "mock-b".into();
+    let rx2 = agent.prompt("world").await;
+    let events2: Vec<_> = {
+        let mut v = Vec::new();
+        let mut rx = rx2;
+        while let Ok(e) = rx.try_recv() {
+            v.push(e);
+        }
+        v
+    };
+
+    let loop_id_2 = events2.iter().find_map(|e| {
+        if let AgentEvent::AgentStart { loop_id, .. } = e {
+            Some(loop_id.clone())
+        } else {
+            None
+        }
+    });
+
+    let id1 = loop_id_1.expect("loop_id_1 missing");
+    let id2 = loop_id_2.expect("loop_id_2 missing");
+
+    // Both end in .1 (independent per-config counters)
+    assert!(
+        id1.ends_with(".1"),
+        "first loop should end in .1, got: {}",
+        id1
+    );
+    assert!(
+        id2.ends_with(".1"),
+        "second loop (different model) should also end in .1, got: {}",
+        id2
+    );
+    // They differ in the config_id segment
+    assert_ne!(id1, id2, "loop_ids for different models must differ");
+}
+
+/// agent_loop_continue panics when agent_id is None
+#[tokio::test]
+#[should_panic(expected = "agent_loop_continue requires context.agent_id to be set")]
+async fn test_continue_panics_without_agent_id() {
+    let provider = MockProvider::text("unreachable");
+    let config = make_config(Arc::new(provider));
+
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: vec![AgentMessage::Llm(Message::user("hi"))],
+        tools: Vec::new(),
+        agent_id: None, // ← intentionally None — should panic
+        session_id: Some("ses-test".into()),
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
+    };
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    agent_loop_continue(&mut context, &config, tx, cancel).await;
 }

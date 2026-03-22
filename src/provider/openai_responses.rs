@@ -41,6 +41,10 @@ pub struct OpenAiResponsesProvider;
 
 #[async_trait]
 impl StreamProvider for OpenAiResponsesProvider {
+    fn provider_id(&self) -> &str {
+        "openai-responses"
+    }
+
     async fn stream(
         &self,
         config: StreamConfig, // REQUEST — uses Responses API shape (input[] not messages[])

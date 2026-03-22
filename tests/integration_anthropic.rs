@@ -45,6 +45,7 @@ fn make_config(provider: Arc<dyn phi_core::provider::StreamProvider>) -> AgentLo
         after_tool_execution_update: None,
         input_filters: vec![],
         first_turn_trigger: TurnTrigger::User,
+        config_id: None,
     }
 }
 
@@ -95,6 +96,9 @@ async fn test_anthropic_simple_text() {
         tools: Vec::new(),
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user("What color is the sky?"));
@@ -150,6 +154,9 @@ async fn test_anthropic_tool_use() {
         tools: tools::default_tools(),
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user(
@@ -212,6 +219,9 @@ async fn test_anthropic_multi_turn() {
         tools: Vec::new(),
         agent_id: None,
         session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
     };
 
     // Turn 1

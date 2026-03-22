@@ -49,6 +49,10 @@ pub struct GoogleProvider;
 
 #[async_trait]
 impl StreamProvider for GoogleProvider {
+    fn provider_id(&self) -> &str {
+        "google"
+    }
+
     async fn stream(
         &self,
         config: StreamConfig, // REQUEST — api_key sent as `?key=` query param; uses `contents[]` not `messages[]`

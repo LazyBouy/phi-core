@@ -218,6 +218,15 @@ RUST QUIRK: `#[async_trait]` — async methods in traits
 */
 #[async_trait]
 pub trait StreamProvider: Send + Sync {
+    /// Short, stable identifier for this provider type.
+    ///
+    /// Used as the `provider_id` component of auto-derived `loop_id` signatures:
+    ///   `loop_id = "{session_id}.{provider_id}.{model_slug}.{N}"`
+    ///
+    /// Return a lowercase ASCII string with no spaces (e.g. `"anthropic"`, `"openai"`, `"google"`).
+    /// Custom providers should return a unique, stable string.
+    fn provider_id(&self) -> &str;
+
     /// Stream a completion. Send events through `tx` in real time.
     /// Returns the final, fully-assembled assistant `Message` after the stream ends.
     ///

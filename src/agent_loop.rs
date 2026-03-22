@@ -8,7 +8,7 @@
 //! Both return the *new* [`AgentMessage`]s produced by this call. Real-time progress is
 //! pushed to the caller-supplied `tx: mpsc::UnboundedSender<AgentEvent>` channel.
 //!
-//! # Hook / Event Ordering Invariant
+//! # Hook / Event Ordering Invariant - Guaranteed by design, critical for predictable integrations
 //!
 //! Every run enforces this strict ordering, regardless of how many turns or tool calls occur:
 //!
@@ -40,10 +40,10 @@ use crate::types::*;
 use std::sync::Arc;
 
 // ── Context transformation callbacks ────────────────────────────────────────
-/// Converts `AgentMessage[]` → `Message[]` before each LLM call.
 /// All hook types use `Arc` (shared ownership) so they can be cloned into closures
 /// and stored without lifetime complications. `Box<dyn Fn>` would suffice for single-owner
 /// cases but `Arc` makes it trivially cheap to share across async tasks.
+/// Converts `AgentMessage[]` → `Message[]` before each LLM call.
 pub type ConvertToLlmFn = Box<dyn Fn(&[AgentMessage]) -> Vec<Message> + Send + Sync>;
 /// Transforms the full context before `convert_to_llm` (for pruning, reordering, injection).
 pub type TransformContextFn = Box<dyn Fn(Vec<AgentMessage>) -> Vec<AgentMessage> + Send + Sync>;
@@ -193,6 +193,21 @@ pub struct AgentLoopConfig {
     /// The trigger type for the first TurnStart event in this run.
     /// Defaults to `TurnTrigger::User`; set to `SubAgent` by sub-agent callers.
     pub first_turn_trigger: TurnTrigger,
+
+    /// Stable identity for this config, used as the middle segment of `loop_id`:
+    ///   `loop_id = "{session_id}.{config_id}.{N}"`
+    ///
+    /// When `None` and the `Agent` wrapper is used, the identity is auto-derived by
+    /// `Agent::next_loop_id()` from the provider, model, and thinking level:
+    ///   `"{provider_id}.{model_slug}[.thinking]"`
+    ///
+    /// For direct callers of `agent_loop`, set `context.loop_id` explicitly — this field
+    /// is only read by `Agent::next_loop_id()` and has no effect inside `agent_loop` itself.
+    ///
+    /// Set explicitly for human-readable or deterministic loop IDs, e.g.:
+    ///   `config.config_id = Some("experiment-A".to_string());`
+    ///   → loop IDs: `ses_xyz.experiment-A.1`, `ses_xyz.experiment-A.2`, …
+    pub config_id: Option<String>,
 }
 
 /// Default convert_to_llm: keep only user/assistant/toolResult messages.
@@ -241,16 +256,25 @@ pub async fn agent_loop(
         }
     }
 
-    // only the NEW messages produced by this call (not the full context history)
+    // Generate agent_id / session_id if not set by the caller, then write them back to context
+    // so any subsequent agent_loop_continue() call on the same context inherits them automatically.
+    if context.agent_id.is_none() {
+        context.agent_id = Some(uuid::Uuid::new_v4().to_string());
+    }
+    if context.session_id.is_none() {
+        context.session_id = Some(uuid::Uuid::new_v4().to_string());
+    }
+    // loop_id: use caller-supplied value or fall back to a UUID (Agent sets this via next_loop_id).
+    if context.loop_id.is_none() {
+        context.loop_id = Some(uuid::Uuid::new_v4().to_string());
+    }
+
     tx.send(AgentEvent::AgentStart {
-        agent_id: context
-            .agent_id
-            .clone()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-        session_id: context
-            .session_id
-            .clone()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        agent_id: context.agent_id.clone().unwrap(), // safe: just set above
+        session_id: context.session_id.clone().unwrap(), // safe: just set above
+        loop_id: context.loop_id.clone().unwrap(),   // safe: just set above
+        parent_loop_id: context.parent_loop_id.clone(), // None for origin calls
+        continuation_kind: context.continuation_kind.clone(), // None for origin calls
         timestamp: chrono::Utc::now(),
         metadata: None,
     })
@@ -415,11 +439,37 @@ pub async fn agent_loop_continue(
     tx: mpsc::UnboundedSender<AgentEvent>, // OBSERVER — all AgentEvents pushed here
     cancel: tokio_util::sync::CancellationToken, // ABORT — fresh or shared token for this continuation
 ) -> Vec<AgentMessage> {
+    // Identity must carry over from the originating loop. These are set by Agent::prompt_*
+    // (or by the direct caller who bootstrapped the session). Silent UUID generation here
+    // would mean every continuation gets a different identity — breaking ancestry tracking.
+    assert!(
+        context.agent_id.is_some(),
+        "agent_loop_continue requires context.agent_id to be set — \
+         identity must carry over from the originating loop"
+    );
+    assert!(
+        context.session_id.is_some(),
+        "agent_loop_continue requires context.session_id to be set — \
+         the session must be established before a continuation"
+    );
+
     assert!(
         !context.messages.is_empty(),
         "Cannot continue: no messages in context"
     );
 
+    // LLM APIs require strict alternation: user → assistant → user → assistant → …
+    // The conversation must end on a "user" or "tool_result" message so the model
+    // has something to respond to.
+    //
+    // An assistant message as the final entry means the model already had its turn
+    // and the loop is in a "finished" state. Resuming from here would send the API
+    // a second consecutive assistant message with no user prompt — either a protocol
+    // error or a semantically broken exchange.
+    //
+    // Valid resume states:  user message (awaiting a reply)
+    //                       tool_result  (tools finished; model needs to process results)
+    // Invalid resume state: assistant    (already responded; nothing new to react to)
     if let Some(last) = context.messages.last() {
         assert!(
             last.role() != "assistant",
@@ -442,15 +492,17 @@ pub async fn agent_loop_continue(
         }
     }
 
+    // loop_id: use caller-supplied value (Agent sets this via next_loop_id) or fall back to UUID.
+    if context.loop_id.is_none() {
+        context.loop_id = Some(uuid::Uuid::new_v4().to_string());
+    }
+
     tx.send(AgentEvent::AgentStart {
-        agent_id: context
-            .agent_id
-            .clone()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-        session_id: context
-            .session_id
-            .clone()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        agent_id: context.agent_id.clone().unwrap(), // safe: asserted above
+        session_id: context.session_id.clone().unwrap(), // safe: asserted above
+        loop_id: context.loop_id.clone().unwrap(),   // safe: just set above
+        parent_loop_id: context.parent_loop_id.clone(), // set by Agent wrapper
+        continuation_kind: context.continuation_kind.clone(), // set by Agent wrapper
         timestamp: chrono::Utc::now(),
         metadata: None,
     })
@@ -525,9 +577,28 @@ async fn run_loop(
                 return loop_usage;
             }
 
-            // Determine the trigger type for this turn's TurnStart event
+            // Determine the trigger type for this turn's TurnStart event.
+            //
+            // Priority on the first turn:
+            //   1. Branch continuation   → TurnTrigger::Branch   (explicit branch signal)
+            //   2. Any other continuation (Default/Rerun) → TurnTrigger::FollowUp
+            //      (the continuation itself is the follow-up, not a fresh user turn)
+            //   3. Origin call (continuation_kind == None) → config.first_turn_trigger
+            //      (User for Agent::prompt, SubAgent for sub-agent callers)
+            //
+            // Subsequent turns always use FollowUp (tool round-trips, steering injections).
             let turn_trigger = if first_turn {
-                config.first_turn_trigger.clone()
+                if matches!(
+                    context.continuation_kind,
+                    Some(ContinuationKind::Branch { .. })
+                ) {
+                    TurnTrigger::Branch
+                } else if context.continuation_kind.is_some() {
+                    // Default or Rerun continuation — treat as a follow-up, not a new user turn
+                    TurnTrigger::FollowUp
+                } else {
+                    config.first_turn_trigger.clone()
+                }
             } else {
                 TurnTrigger::FollowUp
             };
@@ -1260,6 +1331,7 @@ async fn execute_single_tool(
                     text: "Tool execution skipped by before_tool_execution hook.".to_string(),
                 }],
                 details: serde_json::Value::Null,
+                child_loop_id: None,
             };
             let tool_result_msg = Message::ToolResult {
                 tool_call_id: id.to_string(),
@@ -1408,6 +1480,7 @@ async fn execute_single_tool(
                         text: e.to_string(), // Display trait → "Tool not found: bash", etc.
                     }],
                     details: serde_json::Value::Null,
+                    child_loop_id: None,
                 },
                 true,
             ),
@@ -1418,6 +1491,7 @@ async fn execute_single_tool(
                     text: format!("Tool {} not found", name),
                 }],
                 details: serde_json::Value::Null,
+                child_loop_id: None,
             },
             true,
         ),
@@ -1428,6 +1502,7 @@ async fn execute_single_tool(
         tool_name: name.to_string(),
         result: result.clone(),
         is_error,
+        child_loop_id: result.child_loop_id.clone(), // Some only for sub-agent tools
     })
     .ok();
     // after_tool_execution hook — fires after ToolExecutionEnd
@@ -1469,6 +1544,7 @@ fn skip_tool_call(
             text: "Skipped due to queued user message.".into(),
         }],
         details: serde_json::Value::Null,
+        child_loop_id: None,
     };
 
     tx.send(AgentEvent::ToolExecutionStart {
@@ -1483,6 +1559,7 @@ fn skip_tool_call(
         tool_name: tool_name.into(),
         result: result.clone(),
         is_error: true,
+        child_loop_id: None,
     })
     .ok();
 

@@ -56,6 +56,10 @@ pub struct OpenAiCompatProvider;
 
 #[async_trait]
 impl StreamProvider for OpenAiCompatProvider {
+    fn provider_id(&self) -> &str {
+        "openai"
+    }
+
     async fn stream(
         &self,
         config: StreamConfig, // REQUEST — model_config.base_url determines which of 15+ providers to hit

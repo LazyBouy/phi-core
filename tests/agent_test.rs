@@ -72,6 +72,7 @@ async fn test_agent_with_tools() {
             Ok(ToolResult {
                 content: vec![Content::Text { text }],
                 details: serde_json::Value::Null,
+                child_loop_id: None,
             })
         }
     }
@@ -315,7 +316,9 @@ async fn test_continue_loop_with_sender() {
         events
     });
 
-    agent.continue_loop_with_sender(tx).await;
+    agent
+        .continue_loop_with_sender(tx, ContinuationKind::Default)
+        .await;
 
     let events = consumer.await.unwrap();
     assert!(!events.is_empty());
@@ -348,6 +351,7 @@ async fn test_prompt_with_sender_tools_restored() {
             Ok(ToolResult {
                 content: vec![Content::Text { text: "ok".into() }],
                 details: serde_json::Value::Null,
+                child_loop_id: None,
             })
         }
     }

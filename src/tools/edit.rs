@@ -165,6 +165,7 @@ impl AgentTool for EditFileTool {
                 "old_lines": old_lines,
                 "new_lines": new_lines,
             }),
+            child_loop_id: None,
         })
     }
 }

@@ -106,6 +106,10 @@ impl MockProvider {
 
 #[async_trait]
 impl StreamProvider for MockProvider {
+    fn provider_id(&self) -> &str {
+        "mock"
+    }
+
     async fn stream(
         &self,
         _config: StreamConfig, // IGNORED — test double; real config not used (responses are pre-set)

@@ -176,6 +176,7 @@ impl AgentTool for ReadFileTool {
                     mime_type: mime_type.to_string(),
                 }],
                 details: serde_json::json!({ "path": path, "bytes": bytes.len() }),
+                child_loop_id: None,
             });
         }
 
@@ -229,6 +230,7 @@ impl AgentTool for ReadFileTool {
         Ok(ToolResult {
             content: vec![Content::Text { text: output }],
             details: serde_json::json!({ "path": path }),
+            child_loop_id: None,
         })
     }
 }
@@ -316,6 +318,7 @@ impl AgentTool for WriteFileTool {
                 text: format!("Wrote {} bytes to {}", bytes, path),
             }],
             details: serde_json::json!({ "path": path, "bytes": bytes }),
+            child_loop_id: None,
         })
     }
 }

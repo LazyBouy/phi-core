@@ -65,6 +65,7 @@ async fn main() {
                     text: format!("Hello, {}!", name),
                 }],
                 details: serde_json::Value::Null,
+                child_loop_id: None,
             })
         }
     }

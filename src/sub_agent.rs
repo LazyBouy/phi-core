@@ -54,6 +54,10 @@ pub struct SubAgentTool {
     tool_execution: ToolExecutionStrategy,
     retry_config: crate::retry::RetryConfig,
     max_turns: usize,
+    /// The `loop_id` of the parent agent loop that spawned this sub-agent.
+    /// Passed into the child context as `parent_loop_id` so that the full
+    /// parent → child ancestry chain is traceable via `AgentStart` events.
+    parent_loop_id: Option<String>,
 }
 
 impl SubAgentTool {
@@ -74,7 +78,20 @@ impl SubAgentTool {
             tool_execution: ToolExecutionStrategy::default(),
             retry_config: crate::retry::RetryConfig::default(),
             max_turns: DEFAULT_MAX_TURNS,
+            parent_loop_id: None,
         }
+    }
+
+    /// Set the parent loop's `loop_id` for child → parent ancestry tracking.
+    ///
+    /// When set, this value is placed in the child `AgentContext.parent_loop_id`,
+    /// which is then emitted in the child's `AgentStart` event. This creates a
+    /// bidirectional link: the parent sees the child's `loop_id` via
+    /// `ToolExecutionEnd.child_loop_id`, and the child records the parent via
+    /// `AgentStart.parent_loop_id`.
+    pub fn with_parent_loop_id(mut self, id: impl Into<String>) -> Self {
+        self.parent_loop_id = Some(id.into());
+        self
     }
 
     pub fn with_description(mut self, desc: impl Into<String>) -> Self {
@@ -272,13 +289,26 @@ impl AgentTool for SubAgentTool {
             .map(|t| Box::new(ArcToolWrapper(Arc::clone(t))) as Box<dyn AgentTool>)
             .collect();
 
+        // Generate stable identity for the child loop.
+        // Each sub-agent invocation is its own independent session: fresh agent_id,
+        // session_id, and loop_id. The parent's loop_id is carried as parent_loop_id
+        // so the ancestry chain is traceable via AgentStart events.
+        let child_agent_id = uuid::Uuid::new_v4().to_string();
+        let child_session_id = uuid::Uuid::new_v4().to_string();
+        // ".sub.1" — ".sub" marks this as a sub-agent loop (distinguishes from top-level loops
+        // in the parent session), ".1" is the loop counter (fresh session → always starts at 1).
+        let child_loop_id = format!("{}.sub.1", child_session_id);
+
         // Fresh context for the sub-agent
         let mut context = AgentContext {
             system_prompt: self.system_prompt.clone(),
             messages: Vec::new(),
             tools,
-            agent_id: None,
-            session_id: None,
+            agent_id: Some(child_agent_id),
+            session_id: Some(child_session_id),
+            loop_id: Some(child_loop_id),
+            parent_loop_id: self.parent_loop_id.clone(), // links child back to parent
+            continuation_kind: None,
         };
 
         // Config referencing the Arc'd provider
@@ -316,6 +346,7 @@ impl AgentTool for SubAgentTool {
             on_error: None,
             input_filters: vec![],
             first_turn_trigger: TurnTrigger::SubAgent,
+            config_id: None,
         };
 
         /*
@@ -372,6 +403,7 @@ impl AgentTool for SubAgentTool {
                             on_update(ToolResult {
                                 content: vec![Content::Text { text }],
                                 details: serde_json::json!({ "sub_agent": tool_name }),
+                                child_loop_id: None,
                             });
                         }
                     }
@@ -381,9 +413,12 @@ impl AgentTool for SubAgentTool {
             None
         };
 
-        // Run the sub-agent loop
+        // Run the sub-agent loop. We capture context.loop_id after the call to surface it
+        // in ToolExecutionEnd.child_loop_id. The loop_id is already Some (we set it above);
+        // agent_loop only writes it when None, so our value is preserved.
         let prompt = AgentMessage::Llm(Message::user(task));
         let new_messages = agent_loop(vec![prompt], &mut context, &config, tx, cancel).await;
+        let returned_child_loop_id = context.loop_id.clone();
 
         /*
         RUST QUIRK: `let _ = handle.await` — explicitly discarding a Result
@@ -413,6 +448,7 @@ impl AgentTool for SubAgentTool {
         Ok(ToolResult {
             content: vec![Content::Text { text: result_text }],
             details,
+            child_loop_id: returned_child_loop_id,
         })
     }
 }
