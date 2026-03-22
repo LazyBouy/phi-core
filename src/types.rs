@@ -1,3 +1,4 @@
+use crate::provider::CostConfig;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
@@ -489,6 +490,13 @@ pub struct Usage {
     #[serde(default = "default_cache_read")]
     pub cache_read: u64,
     */
+    /// Reasoning / thinking tokens — a subset of `output`.
+    /// Non-zero only for providers that report reasoning tokens separately
+    /// (OpenAI o-series via `completion_tokens_details.reasoning_tokens`,
+    /// OpenAI Responses API via `output_token_details.reasoning_tokens`).
+    /// Defaults to 0 for all other providers.
+    #[serde(default)]
+    pub reasoning: u64,
     #[serde(default)]
     pub cache_read: u64,
     #[serde(default)]
@@ -498,6 +506,17 @@ pub struct Usage {
 }
 
 impl Usage {
+    /// Estimated dollar cost for this usage given per-million-token rates.
+    ///
+    /// `reasoning` tokens are already counted in `output`, so they are not
+    /// double-charged — the breakdown is purely informational.
+    pub fn estimated_cost(&self, cost: &CostConfig) -> f64 {
+        (self.input as f64 / 1_000_000.0) * cost.input_per_million
+            + (self.output as f64 / 1_000_000.0) * cost.output_per_million
+            + (self.cache_read as f64 / 1_000_000.0) * cost.cache_read_per_million
+            + (self.cache_write as f64 / 1_000_000.0) * cost.cache_write_per_million
+    }
+
     /// Fraction of input tokens served from cache (0.0–1.0).
     /// Returns 0.0 if no input tokens were processed.
     pub fn cache_hit_rate(&self) -> f64 {
@@ -1036,6 +1055,9 @@ pub enum AgentEvent {
         /// All new messages added during this run (not the full history).
         /// Empty when `rejection` is `Some` — input was blocked before the LLM was called.
         messages: Vec<AgentMessage>,
+        /// Total token usage accumulated across all turns in this run.
+        /// All fields are 0 when `rejection` is `Some` (no LLM calls were made).
+        usage: Usage,
         /// Wall-clock time when the agent loop exited.
         timestamp: chrono::DateTime<chrono::Utc>,
         /// `Some(reason)` when an InputFilter rejected the input before any LLM call.
@@ -1061,6 +1083,9 @@ pub enum AgentEvent {
     TurnEnd {
         /// The assistant message produced this turn (may include text, thinking, and tool calls).
         message: AgentMessage,
+        /// Token usage for this turn — direct access without destructuring `message`.
+        /// Useful for per-turn cost tracking and rate-limit management.
+        usage: Usage,
         /// Wall-clock time when this turn completed (after all tool calls finished executing).
         timestamp: chrono::DateTime<chrono::Utc>,
         /// Executed tool results from this turn. Empty when no tool calls were made (`StopReason::Stop`).

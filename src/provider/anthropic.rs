@@ -906,6 +906,7 @@ mod tests {
         let usage = Usage {
             input: 100,
             output: 50,
+            reasoning: 0,
             cache_read: 900,
             cache_write: 0,
             total_tokens: 1050,

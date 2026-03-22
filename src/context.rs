@@ -630,6 +630,11 @@ pub struct ExecutionLimits {
     pub max_total_tokens: usize,
     /// Maximum wall-clock duration. Uses std::time::Duration (not f64 seconds) for precision.
     pub max_duration: std::time::Duration,
+    /// Maximum cumulative dollar cost for the run. `None` means no cost cap.
+    /// Requires `AgentLoopConfig.cost_config` to be set — without pricing rates the
+    /// accumulated cost is always 0.0 and this limit has no effect.
+    #[serde(default)]
+    pub max_cost: Option<f64>,
 }
 
 impl Default for ExecutionLimits {
@@ -638,6 +643,7 @@ impl Default for ExecutionLimits {
             max_turns: 50,
             max_total_tokens: 1_000_000,
             max_duration: std::time::Duration::from_secs(600),
+            max_cost: None,
         }
     }
 }
@@ -647,6 +653,9 @@ pub struct ExecutionTracker {
     pub limits: ExecutionLimits,
     pub turns: usize,
     pub tokens_used: usize,
+    /// Accumulated dollar cost across all turns. Updated via `record_cost()`.
+    /// Only non-zero when `AgentLoopConfig.cost_config` is set.
+    pub cost_accumulated: f64,
     pub started_at: std::time::Instant,
 }
 
@@ -656,6 +665,7 @@ impl ExecutionTracker {
             limits,
             turns: 0,
             tokens_used: 0,
+            cost_accumulated: 0.0,
             started_at: std::time::Instant::now(),
         }
     }
@@ -663,6 +673,11 @@ impl ExecutionTracker {
     pub fn record_turn(&mut self, tokens: usize) {
         self.turns += 1;
         self.tokens_used += tokens;
+    }
+
+    /// Accumulate incremental cost for the current turn.
+    pub fn record_cost(&mut self, cost: f64) {
+        self.cost_accumulated += cost;
     }
 
     /// Check if any limit has been exceeded. Returns the reason if so.
@@ -710,6 +725,14 @@ impl ExecutionTracker {
                 elapsed.as_secs_f64(),
                 self.limits.max_duration.as_secs_f64()
             ));
+        }
+        if let Some(max) = self.limits.max_cost {
+            if self.cost_accumulated >= max {
+                return Some(format!(
+                    "Max cost reached (${:.4}/${:.4})",
+                    self.cost_accumulated, max
+                ));
+            }
         }
         None // All limits OK — return None (no reason to stop)
     }
@@ -909,6 +932,7 @@ mod tests {
             max_turns: 3,
             max_total_tokens: 1000,
             max_duration: std::time::Duration::from_secs(60),
+            max_cost: None,
         };
 
         let mut tracker = ExecutionTracker::new(limits);

@@ -58,12 +58,13 @@ The loop: stream assistant response → extract tool calls → execute tools (pa
 - **`AgentMessage`** — `Llm(Message)` | `Extension(ExtensionMessage)` — extension messages (`role`, `kind`, `data`) don't enter LLM context
 - **`AgentEvent`** — full event stream emitted to callers: `AgentStart`, `TurnStart`, `MessageStart/Update/End`, `ToolExecutionStart/Update/End`, `ProgressMessage`, `InputRejected`, `TurnEnd`, `AgentEnd`
 - **`StopReason`** — `Stop`, `Length`, `ToolUse`, `Error`, `Aborted`
+- **`Usage`** — token metrics per turn or accumulated: `input`, `output`, `reasoning` (subset of `output`; non-zero for OpenAI o-series only), `cache_read`, `cache_write`, `total_tokens`. `estimated_cost(&CostConfig)` computes dollar cost. Carried directly on `TurnEnd.usage` and `AgentEnd.usage` (no message destructuring needed).
 
 ### Context Management (`context.rs`)
 
 - **`ContextTracker`** — hybrid real-usage + estimation for token tracking
 - **`compact_messages()`** — tiered compaction: Level 1 (truncate tool outputs) → Level 2 (summarize old turns) → Level 3 (drop middle turns)
-- **`ExecutionLimits`/`ExecutionTracker`** — max turns (50), max tokens (1M), max duration (10 min)
+- **`ExecutionLimits`/`ExecutionTracker`** — max turns (50), max tokens (1M), max duration (10 min), max cost (None = unlimited; requires `AgentLoopConfig.cost_config`)
 
 ### Tool Execution (`agent_loop.rs`)
 

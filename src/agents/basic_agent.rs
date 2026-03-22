@@ -640,6 +640,7 @@ impl BasicAgent {
             after_tool_execution_update: None,
             on_error: self.on_error.clone(),
             input_filters: self.input_filters.clone(),
+            cost_config: None,
             first_turn_trigger: TurnTrigger::User,
             config_id: None, // auto-derived in next_loop_id() from provider + model + thinking_level
         }

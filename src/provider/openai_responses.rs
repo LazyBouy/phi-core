@@ -186,6 +186,9 @@ impl StreamProvider for OpenAiResponsesProvider {
                                                 usage.input = u.input_tokens;
                                                 usage.output = u.output_tokens;
                                                 usage.total_tokens = u.total_tokens;
+                                                if let Some(details) = u.output_token_details {
+                                                    usage.reasoning = details.reasoning_tokens;
+                                                }
                                             }
                                             if resp.status == Some("incomplete".to_string()) {
                                                 stop_reason = StopReason::Length;
@@ -463,4 +466,12 @@ struct ResponseUsage {
     output_tokens: u64,
     #[serde(default)]
     total_tokens: u64,
+    #[serde(default)]
+    output_token_details: Option<ResponseOutputTokenDetails>,
+}
+
+#[derive(Deserialize)]
+struct ResponseOutputTokenDetails {
+    #[serde(default)]
+    reasoning_tokens: u64,
 }

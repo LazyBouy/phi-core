@@ -37,6 +37,7 @@ fn make_config(provider: Arc<dyn phi_core::provider::StreamProvider>) -> AgentLo
         before_tool_execution_update: None,
         after_tool_execution_update: None,
         input_filters: vec![],
+        cost_config: None,
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
     }
@@ -820,6 +821,7 @@ async fn test_retry_on_rate_limit_succeeds() {
         before_tool_execution_update: None,
         after_tool_execution_update: None,
         input_filters: vec![],
+        cost_config: None,
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
     };
@@ -899,6 +901,7 @@ async fn test_retry_exhausted_returns_error() {
         before_tool_execution_update: None,
         after_tool_execution_update: None,
         input_filters: vec![],
+        cost_config: None,
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
     };
@@ -980,6 +983,7 @@ async fn test_no_retry_on_auth_error() {
         before_tool_execution_update: None,
         after_tool_execution_update: None,
         input_filters: vec![],
+        cost_config: None,
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
     };
@@ -1049,6 +1053,7 @@ async fn test_retry_none_disables_retries() {
         before_tool_execution_update: None,
         after_tool_execution_update: None,
         input_filters: vec![],
+        cost_config: None,
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
     };
@@ -1308,6 +1313,7 @@ async fn test_on_error_fires_on_provider_error() {
         before_tool_execution_update: None,
         after_tool_execution_update: None,
         input_filters: vec![],
+        cost_config: None,
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
     };
@@ -2237,6 +2243,224 @@ async fn test_filter_warns_follow_up_message() {
 }
 
 // ---------------------------------------------------------------------------
+// Usage tracking tests (TurnEnd.usage, AgentEnd.usage, reasoning, budget)
+// ---------------------------------------------------------------------------
+
+/// A StreamProvider that wraps MockProvider but injects a specific Usage into the returned message.
+struct WithUsageProvider {
+    usage: Usage,
+    inner: MockProvider,
+}
+
+#[async_trait::async_trait]
+impl phi_core::provider::StreamProvider for WithUsageProvider {
+    fn provider_id(&self) -> &str {
+        "mock-with-usage"
+    }
+
+    async fn stream(
+        &self,
+        config: phi_core::provider::StreamConfig,
+        tx: tokio::sync::mpsc::UnboundedSender<phi_core::provider::StreamEvent>,
+        cancel: CancellationToken,
+    ) -> Result<phi_core::Message, phi_core::provider::ProviderError> {
+        let mut msg = self.inner.stream(config, tx, cancel).await?;
+        if let phi_core::Message::Assistant { ref mut usage, .. } = msg {
+            *usage = self.usage.clone();
+        }
+        Ok(msg)
+    }
+}
+
+#[tokio::test]
+async fn test_turn_end_carries_usage() {
+    let expected_usage = Usage {
+        input: 200,
+        output: 80,
+        reasoning: 0,
+        cache_read: 0,
+        cache_write: 0,
+        total_tokens: 280,
+    };
+    let provider = Arc::new(WithUsageProvider {
+        usage: expected_usage.clone(),
+        inner: MockProvider::text("Hello"),
+    });
+    let config = make_config(provider);
+    let mut context = AgentContext {
+        system_prompt: "sys".into(),
+        messages: vec![],
+        tools: vec![],
+        ..Default::default()
+    };
+    let (tx, rx) = mpsc::unbounded_channel();
+    let prompts = vec![AgentMessage::Llm(Message::User {
+        content: vec![Content::Text { text: "hi".into() }],
+        timestamp: 0,
+    })];
+    agent_loop(prompts, &mut context, &config, tx, CancellationToken::new()).await;
+    let events = collect_events(rx);
+    let turn_end = events.iter().find_map(|e| {
+        if let AgentEvent::TurnEnd { usage, .. } = e {
+            Some(usage.clone())
+        } else {
+            None
+        }
+    });
+    assert!(turn_end.is_some(), "TurnEnd event not found");
+    assert_eq!(turn_end.unwrap(), expected_usage);
+}
+
+#[tokio::test]
+async fn test_agent_end_carries_accumulated_usage() {
+    let turn_usage = Usage {
+        input: 100,
+        output: 50,
+        reasoning: 0,
+        cache_read: 0,
+        cache_write: 0,
+        total_tokens: 150,
+    };
+    // Two-turn run: MockProvider returns two text responses
+    let provider = Arc::new(WithUsageProvider {
+        usage: turn_usage.clone(),
+        inner: MockProvider::texts(vec!["First", "Second"]),
+    });
+    let mut config = make_config(provider);
+    config.get_follow_up_messages = Some(Box::new({
+        let called = std::sync::atomic::AtomicBool::new(false);
+        let called = Arc::new(called);
+        move || {
+            if !called.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                vec![AgentMessage::Llm(Message::User {
+                    content: vec![Content::Text { text: "follow up".into() }],
+                    timestamp: 0,
+                })]
+            } else {
+                vec![]
+            }
+        }
+    }));
+    let mut context = AgentContext {
+        system_prompt: "sys".into(),
+        messages: vec![],
+        tools: vec![],
+        ..Default::default()
+    };
+    let (tx, rx) = mpsc::unbounded_channel();
+    let prompts = vec![AgentMessage::Llm(Message::User {
+        content: vec![Content::Text { text: "start".into() }],
+        timestamp: 0,
+    })];
+    agent_loop(prompts, &mut context, &config, tx, CancellationToken::new()).await;
+    let events = collect_events(rx);
+    let agent_end_usage = events.iter().find_map(|e| {
+        if let AgentEvent::AgentEnd { usage, .. } = e {
+            Some(usage.clone())
+        } else {
+            None
+        }
+    });
+    assert!(agent_end_usage.is_some(), "AgentEnd event not found");
+    let total = agent_end_usage.unwrap();
+    // Two turns each with input=100, output=50 → total input=200, output=100
+    assert_eq!(total.input, 200);
+    assert_eq!(total.output, 100);
+}
+
+#[tokio::test]
+async fn test_reasoning_tokens_accumulated() {
+    let turn_usage = Usage {
+        input: 300,
+        output: 120,
+        reasoning: 50,
+        cache_read: 0,
+        cache_write: 0,
+        total_tokens: 420,
+    };
+    let provider = Arc::new(WithUsageProvider {
+        usage: turn_usage.clone(),
+        inner: MockProvider::text("Done with reasoning"),
+    });
+    let config = make_config(provider);
+    let mut context = AgentContext {
+        system_prompt: "sys".into(),
+        messages: vec![],
+        tools: vec![],
+        ..Default::default()
+    };
+    let (tx, rx) = mpsc::unbounded_channel();
+    let prompts = vec![AgentMessage::Llm(Message::User {
+        content: vec![Content::Text { text: "think hard".into() }],
+        timestamp: 0,
+    })];
+    agent_loop(prompts, &mut context, &config, tx, CancellationToken::new()).await;
+    let events = collect_events(rx);
+    let agent_end_usage = events.iter().find_map(|e| {
+        if let AgentEvent::AgentEnd { usage, .. } = e {
+            Some(usage.clone())
+        } else {
+            None
+        }
+    });
+    assert!(agent_end_usage.is_some());
+    assert_eq!(agent_end_usage.unwrap().reasoning, 50);
+}
+
+#[tokio::test]
+async fn test_budget_enforcement_stops_loop() {
+    use phi_core::context::ExecutionLimits;
+    use phi_core::provider::CostConfig;
+
+    // Each turn: output=1 token, priced at $1_000_000 per million = $1.00 per turn.
+    // Budget: $0.50 → first turn costs $1.00 which exceeds the budget.
+    // The check happens AFTER the first turn, so 1 TurnStart fires then the loop stops.
+    let turn_usage = Usage {
+        input: 0,
+        output: 1,
+        reasoning: 0,
+        cache_read: 0,
+        cache_write: 0,
+        total_tokens: 1,
+    };
+    let provider = Arc::new(WithUsageProvider {
+        usage: turn_usage,
+        inner: MockProvider::texts(vec!["First", "Second"]),
+    });
+    let mut config = make_config(provider);
+    config.cost_config = Some(CostConfig {
+        input_per_million: 0.0,
+        output_per_million: 1_000_000.0, // $1 per token
+        cache_read_per_million: 0.0,
+        cache_write_per_million: 0.0,
+    });
+    config.execution_limits = Some(ExecutionLimits {
+        max_turns: 10,
+        max_total_tokens: 1_000_000,
+        max_duration: std::time::Duration::from_secs(60),
+        max_cost: Some(0.50), // $0.50 budget — first turn ($1.00) exceeds it
+    });
+    let mut context = AgentContext {
+        system_prompt: "sys".into(),
+        messages: vec![],
+        tools: vec![],
+        ..Default::default()
+    };
+    let (tx, rx) = mpsc::unbounded_channel();
+    let prompts = vec![AgentMessage::Llm(Message::User {
+        content: vec![Content::Text { text: "go".into() }],
+        timestamp: 0,
+    })];
+    agent_loop(prompts, &mut context, &config, tx, CancellationToken::new()).await;
+    let events = collect_events(rx);
+    let turn_starts = events.iter().filter(|e| matches!(e, AgentEvent::TurnStart { .. })).count();
+    // First turn runs, cost check fires after it, loop stops before second turn
+    assert_eq!(turn_starts, 1, "expected 1 TurnStart before budget cut-off, got {}", turn_starts);
+    // AgentEnd must always be emitted
+    assert!(events.iter().any(|e| matches!(e, AgentEvent::AgentEnd { .. })));
+}
+
+// ---------------------------------------------------------------------------
 // CompactionStrategy tests
 // ---------------------------------------------------------------------------
 
@@ -2339,6 +2563,7 @@ async fn test_custom_compaction_strategy_is_called() {
         before_tool_execution_update: None,
         after_tool_execution_update: None,
         input_filters: vec![],
+        cost_config: None,
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
     };
@@ -2427,6 +2652,7 @@ async fn test_none_compaction_strategy_uses_default() {
         before_tool_execution_update: None,
         after_tool_execution_update: None,
         input_filters: vec![],
+        cost_config: None,
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
     };

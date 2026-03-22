@@ -44,6 +44,7 @@ fn test_message_assistant_roundtrip() {
         usage: Usage {
             input: 100,
             output: 50,
+            reasoning: 0,
             cache_read: 10,
             cache_write: 5,
             total_tokens: 165,
@@ -174,6 +175,7 @@ fn test_execution_limits_roundtrip() {
         max_turns: 25,
         max_total_tokens: 500_000,
         max_duration: std::time::Duration::from_secs(300),
+        max_cost: None,
     };
     let json = serde_json::to_string(&limits).expect("serialize");
     let back: ExecutionLimits = serde_json::from_str(&json).expect("deserialize");

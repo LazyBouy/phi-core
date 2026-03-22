@@ -35,7 +35,7 @@ use crate::context::{
     CompactionStrategy, ContextConfig, DefaultCompaction, ExecutionLimits, ExecutionTracker,
 };
 
-use crate::provider::{ModelConfig, StreamConfig, StreamEvent, StreamProvider, ToolDefinition};
+use crate::provider::{CostConfig, ModelConfig, StreamConfig, StreamEvent, StreamProvider, ToolDefinition};
 use crate::types::*;
 use std::sync::Arc;
 
@@ -148,7 +148,9 @@ pub struct AgentLoopConfig {
     /// `compact_messages()` call. Only invoked when `context_config` is `Some`.
     pub compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
 
-    /// Execution limits (max turns, tokens, duration).
+    /// Execution limits (max turns, tokens, duration, cost).
+    /// Cost enforcement requires `cost_config` to be set — without pricing rates
+    /// `ExecutionLimits.max_cost` has no effect (accumulated cost stays 0.0).
     pub execution_limits: Option<ExecutionLimits>,
 
     /// Prompt caching configuration.
@@ -189,6 +191,12 @@ pub struct AgentLoopConfig {
     /// Filters run in order; first `Reject` wins and discards any accumulated
     /// warnings. `Warn` messages accumulate and are appended to the user message.
     pub input_filters: Vec<Arc<dyn InputFilter>>, // from types.rs
+
+    /// Pricing rates used to compute per-turn cost for budget enforcement.
+    /// When set, `estimated_cost()` is called after each turn and the result is
+    /// forwarded to `ExecutionTracker`. Required for `ExecutionLimits.max_cost` to
+    /// have any effect — without rates, accumulated cost is always 0.0.
+    pub cost_config: Option<CostConfig>,
 
     /// The trigger type for the first TurnStart event in this run.
     /// Defaults to `TurnTrigger::User`; set to `SubAgent` by sub-agent callers.
@@ -248,6 +256,7 @@ pub async fn agent_loop(
         if !before_loop(&context.messages, 0) {
             tx.send(AgentEvent::AgentEnd {
                 messages: vec![],
+                usage: Usage::default(),
                 timestamp: chrono::Utc::now(),
                 rejection: None,
             })
@@ -291,6 +300,7 @@ pub async fn agent_loop(
             // AgentEnd.rejection is Some — the agent never actually started.
             tx.send(AgentEvent::AgentEnd {
                 messages: vec![],
+                usage: Usage::default(),
                 timestamp: chrono::Utc::now(),
                 rejection: Some(reason),
             })
@@ -319,6 +329,7 @@ pub async fn agent_loop(
 
     tx.send(AgentEvent::AgentEnd {
         messages: new_messages.clone(),
+        usage: loop_usage.clone(),
         timestamp: chrono::Utc::now(),
         rejection: None,
     })
@@ -396,6 +407,7 @@ pub async fn agent_loop_continue(
         if !before_loop(&context.messages, 0) {
             tx.send(AgentEvent::AgentEnd {
                 messages: vec![],
+                usage: Usage::default(),
                 timestamp: chrono::Utc::now(),
                 rejection: None,
             })
@@ -424,6 +436,7 @@ pub async fn agent_loop_continue(
 
     tx.send(AgentEvent::AgentEnd {
         messages: new_messages.clone(),
+        usage: loop_usage.clone(),
         timestamp: chrono::Utc::now(),
         rejection: None,
     })
@@ -633,12 +646,20 @@ async fn run_loop(
                     // Accumulate usage into loop total
                     loop_usage.input += usage.input;
                     loop_usage.output += usage.output;
+                    loop_usage.reasoning += usage.reasoning;
                     loop_usage.cache_read += usage.cache_read;
                     loop_usage.cache_write += usage.cache_write;
                     loop_usage.total_tokens += usage.total_tokens;
+                    // Record cost for budget enforcement
+                    if let Some(ref cost_cfg) = config.cost_config {
+                        if let Some(ref mut t) = tracker {
+                            t.record_cost(usage.estimated_cost(cost_cfg));
+                        }
+                    }
                     // TurnEnd fires BEFORE after_turn
                     tx.send(AgentEvent::TurnEnd {
                         message: agent_msg,
+                        usage: usage.clone(),
                         timestamp: chrono::Utc::now(),
                         tool_results: vec![],
                     })
@@ -707,13 +728,21 @@ async fn run_loop(
             // Accumulate usage into loop total
             loop_usage.input += turn_usage.input;
             loop_usage.output += turn_usage.output;
+            loop_usage.reasoning += turn_usage.reasoning;
             loop_usage.cache_read += turn_usage.cache_read;
             loop_usage.cache_write += turn_usage.cache_write;
             loop_usage.total_tokens += turn_usage.total_tokens;
+            // Record cost for budget enforcement
+            if let Some(ref cost_cfg) = config.cost_config {
+                if let Some(ref mut t) = tracker {
+                    t.record_cost(turn_usage.estimated_cost(cost_cfg));
+                }
+            }
 
             // TurnEnd fires BEFORE after_turn
             tx.send(AgentEvent::TurnEnd {
                 message: agent_msg,
+                usage: turn_usage.clone(),
                 timestamp: chrono::Utc::now(),
                 tool_results,
             })

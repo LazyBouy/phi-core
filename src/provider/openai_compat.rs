@@ -179,6 +179,9 @@ impl StreamProvider for OpenAiCompatProvider {
                                 if let Some(details) = &u.prompt_tokens_details {
                                     usage.cache_read = details.cached_tokens; // prompt cache hits
                                 }
+                                if let Some(details) = &u.completion_tokens_details {
+                                    usage.reasoning = details.reasoning_tokens; // o-series reasoning
+                                }
                             }
 
                             for choice in &chunk.choices {
@@ -673,12 +676,20 @@ struct OpenAiUsage {
     total_tokens: u64,
     #[serde(default)]
     prompt_tokens_details: Option<OpenAiPromptTokensDetails>,
+    #[serde(default)]
+    completion_tokens_details: Option<OpenAiCompletionTokensDetails>,
 }
 
 #[derive(Deserialize)]
 struct OpenAiPromptTokensDetails {
     #[serde(default)]
     cached_tokens: u64,
+}
+
+#[derive(Deserialize)]
+struct OpenAiCompletionTokensDetails {
+    #[serde(default)]
+    reasoning_tokens: u64,
 }
 
 #[cfg(test)]

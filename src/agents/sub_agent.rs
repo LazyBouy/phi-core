@@ -331,6 +331,7 @@ impl AgentTool for SubAgentTool {
                 // Generous token/duration limits — turn limit is the primary guard
                 max_total_tokens: 1_000_000,
                 max_duration: std::time::Duration::from_secs(300),
+                max_cost: None,
             }),
             cache_config: self.cache_config.clone(),
             tool_execution: self.tool_execution.clone(),
@@ -345,6 +346,7 @@ impl AgentTool for SubAgentTool {
             after_tool_execution_update: None,
             on_error: None,
             input_filters: vec![],
+            cost_config: None,
             first_turn_trigger: TurnTrigger::SubAgent,
             config_id: None,
         };

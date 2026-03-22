@@ -38,6 +38,7 @@ fn make_config(provider: Arc<dyn phi_core::provider::StreamProvider>) -> AgentLo
         before_tool_execution_update: None,
         after_tool_execution_update: None,
         input_filters: vec![],
+        cost_config: None,
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
     }
