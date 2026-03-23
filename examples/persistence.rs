@@ -7,17 +7,16 @@
 //! - Continuing the conversation from saved state
 
 use phi_core::{Agent, BasicAgent};
-use phi_core::provider::MockProvider;
+use phi_core::provider::{ModelConfig, MockProvider};
 use phi_core::types::*;
 
 #[tokio::main]
 async fn main() {
     // --- Phase 1: Initial conversation ---
     let provider = MockProvider::text("The capital of France is Paris.");
-    let mut agent = BasicAgent::new(provider)
-        .with_system_prompt("You are a helpful assistant.")
-        .with_model("mock")
-        .with_api_key("test");
+    let mut agent = BasicAgent::new(ModelConfig::anthropic("mock", "mock", "test"))
+        .with_provider_override(std::sync::Arc::new(provider))
+        .with_system_prompt("You are a helpful assistant.");
 
     println!("=== Phase 1: Initial conversation ===");
     let mut rx = agent.prompt("What is the capital of France?").await;
@@ -42,10 +41,9 @@ async fn main() {
 
     // --- Phase 2: Restore and continue ---
     let provider2 = MockProvider::text("Paris is also known as the City of Light.");
-    let mut agent2 = BasicAgent::new(provider2)
-        .with_system_prompt("You are a helpful assistant.")
-        .with_model("mock")
-        .with_api_key("test");
+    let mut agent2 = BasicAgent::new(ModelConfig::anthropic("mock", "mock", "test"))
+        .with_provider_override(std::sync::Arc::new(provider2))
+        .with_system_prompt("You are a helpful assistant.");
 
     agent2.restore_messages(&json).expect("Failed to restore");
     println!(

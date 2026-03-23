@@ -78,22 +78,21 @@ ARCHITECTURE: StreamConfig — the "envelope" passed into every provider call
 
 Every `StreamProvider::stream()` call receives exactly one `StreamConfig`.
 It bundles everything the provider needs to make one API request:
-  - model / api_key / base_url (via model_config) — where to send the request
+  - model_config — the complete provider identity: id, api_key, base_url, compat flags
   - messages / system_prompt / tools — the conversation payload
-  - thinking_level / max_tokens / temperature — generation parameters
+  - thinking_level / max_tokens / temperature — per-call generation overrides
   - cache_config — whether to send prompt-caching headers
+
+`model_config` is required (non-optional). Every provider reads at minimum
+`model_config.id` (model name) and `model_config.api_key` (auth credential).
+Providers with custom endpoints also read `model_config.base_url`, `model_config.headers`,
+and (for OpenAI-compat) `model_config.compat`.
 
 Why not pass individual arguments?
   If `stream()` took 10 positional parameters it would be unergonomic and break
   callers every time we added a field. A config struct is extensible: adding a
   field is backward-compatible if the caller can use `Default::default()` for it.
   Python analogy: kwargs dict passed to a function, or a dataclass payload.
-
-RUST QUIRK: `#[derive(Debug, Clone)]` on a struct with Vec fields
-  `Debug` — lets you print with `{:?}`, enabled by all fields being Debug.
-  `Clone` — deep-copies the whole struct (including Vec contents).
-  Vec<ToolDefinition> clones each element; String and Option<T> all implement Clone.
-  Deriving is zero-cost codegen: the compiler writes the impl for you.
 
 RUST QUIRK: `Option<u32>` and `Option<f32>` — "nullable" fields
   Rust has no null. `Option<T>` is an explicit "maybe absent" wrapper:
@@ -103,17 +102,16 @@ RUST QUIRK: `Option<u32>` and `Option<f32>` — "nullable" fields
 */
 #[derive(Debug, Clone)]
 pub struct StreamConfig {
-    pub model: String,
+    /// Complete provider identity: model id, api_key, base_url, compat flags, cost rates.
+    /// All providers read `model_config.id` and `model_config.api_key`; most also read
+    /// `model_config.base_url` and `model_config.headers`.
+    pub model_config: ModelConfig,
     pub system_prompt: String,
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDefinition>,
     pub thinking_level: ThinkingLevel,
-    pub api_key: String,
-    pub max_tokens: Option<u32>,
+    pub max_tokens: Option<u32>,   // overrides model_config.max_tokens when Some
     pub temperature: Option<f32>,
-    /// Optional model configuration for multi-provider support.
-    /// When set, providers use this for base_url, compat flags, headers, etc.
-    pub model_config: Option<ModelConfig>,
     /// Prompt caching configuration. Default: enabled with auto strategy.
     pub cache_config: CacheConfig,
 }

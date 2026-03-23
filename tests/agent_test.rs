@@ -2,7 +2,7 @@
 
 use phi_core::BasicAgent;
 use phi_core::provider::mock::*;
-use phi_core::provider::MockProvider;
+use phi_core::provider::{ModelConfig, MockProvider};
 use phi_core::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -11,10 +11,9 @@ use tokio::sync::mpsc;
 #[tokio::test]
 async fn test_agent_simple_prompt() {
     let provider = MockProvider::text("Hello!");
-    let mut agent = BasicAgent::new(provider)
-        .with_system_prompt("You are helpful.")
-        .with_model("mock")
-        .with_api_key("test");
+    let mut agent = BasicAgent::new(ModelConfig::anthropic("mock", "mock", "test"))
+        .with_provider_override(Arc::new(provider))
+        .with_system_prompt("You are helpful.");
 
     let rx = agent.prompt("Hi there").await;
 
@@ -32,10 +31,9 @@ async fn test_agent_simple_prompt() {
 #[tokio::test]
 async fn test_agent_reset() {
     let provider = MockProvider::text("Hello!");
-    let mut agent = BasicAgent::new(provider)
-        .with_system_prompt("test")
-        .with_model("mock")
-        .with_api_key("test");
+    let mut agent = BasicAgent::new(ModelConfig::anthropic("mock", "mock", "test"))
+        .with_provider_override(Arc::new(provider))
+        .with_system_prompt("test");
 
     let _ = agent.prompt("Hi").await;
     assert!(!agent.messages().is_empty());
@@ -85,10 +83,9 @@ async fn test_agent_with_tools() {
         MockResponse::Text("Echoed: hello".into()),
     ]);
 
-    let mut agent = BasicAgent::new(provider)
+    let mut agent = BasicAgent::new(ModelConfig::anthropic("mock", "mock", "test"))
+        .with_provider_override(Arc::new(provider))
         .with_system_prompt("test")
-        .with_model("mock")
-        .with_api_key("test")
         .with_tools(vec![Box::new(EchoTool)]);
 
     let _ = agent.prompt("Echo hello").await;
@@ -100,16 +97,15 @@ async fn test_agent_with_tools() {
 #[tokio::test]
 async fn test_agent_builder_pattern() {
     let provider = MockProvider::text("ok");
-    let agent = BasicAgent::new(provider)
+    let agent = BasicAgent::new(ModelConfig::anthropic("test-model", "test-model", "key123"))
+        .with_provider_override(Arc::new(provider))
         .with_system_prompt("sys")
-        .with_model("test-model")
-        .with_api_key("key123")
         .with_thinking(ThinkingLevel::Medium)
         .with_max_tokens(4096);
 
     assert_eq!(agent.system_prompt, "sys");
-    assert_eq!(agent.model, "test-model");
-    assert_eq!(agent.api_key, "key123");
+    assert_eq!(agent.model_config.id, "test-model");
+    assert_eq!(agent.model_config.api_key, "key123");
     assert_eq!(agent.thinking_level, ThinkingLevel::Medium);
     assert_eq!(agent.max_tokens, Some(4096));
 }
@@ -136,9 +132,8 @@ async fn test_with_messages_builder() {
     ];
 
     let provider = MockProvider::text("ok");
-    let agent = BasicAgent::new(provider)
-        .with_model("mock")
-        .with_api_key("test")
+    let agent = BasicAgent::new(ModelConfig::anthropic("mock", "mock", "test"))
+        .with_provider_override(Arc::new(provider))
         .with_messages(saved.clone());
 
     assert_eq!(agent.messages().len(), 2);
@@ -148,20 +143,18 @@ async fn test_with_messages_builder() {
 #[tokio::test]
 async fn test_save_and_restore_messages() {
     let provider = MockProvider::text("Hello!");
-    let mut agent = BasicAgent::new(provider)
-        .with_system_prompt("test")
-        .with_model("mock")
-        .with_api_key("test");
+    let mut agent = BasicAgent::new(ModelConfig::anthropic("mock", "mock", "test"))
+        .with_provider_override(Arc::new(provider))
+        .with_system_prompt("test");
 
     let _ = agent.prompt("Hi").await;
     let json = agent.save_messages().expect("save should succeed");
 
     // Create a fresh agent and restore
     let provider2 = MockProvider::text("ok");
-    let mut agent2 = BasicAgent::new(provider2)
-        .with_system_prompt("test")
-        .with_model("mock")
-        .with_api_key("test");
+    let mut agent2 = BasicAgent::new(ModelConfig::anthropic("mock", "mock", "test"))
+        .with_provider_override(Arc::new(provider2))
+        .with_system_prompt("test");
 
     agent2
         .restore_messages(&json)
@@ -173,10 +166,9 @@ async fn test_save_and_restore_messages() {
 async fn test_agent_continues_after_restore() {
     // First agent: prompt → get response → save
     let provider1 = MockProvider::text("First response");
-    let mut agent1 = BasicAgent::new(provider1)
-        .with_system_prompt("test")
-        .with_model("mock")
-        .with_api_key("test");
+    let mut agent1 = BasicAgent::new(ModelConfig::anthropic("mock", "mock", "test"))
+        .with_provider_override(Arc::new(provider1))
+        .with_system_prompt("test");
 
     let _ = agent1.prompt("Hello").await;
     let json = agent1.save_messages().expect("save");
@@ -184,10 +176,9 @@ async fn test_agent_continues_after_restore() {
     // Second agent: restore → prompt again
     // The MockProvider will receive the full restored history + new prompt
     let provider2 = MockProvider::text("Second response");
-    let mut agent2 = BasicAgent::new(provider2)
-        .with_system_prompt("test")
-        .with_model("mock")
-        .with_api_key("test");
+    let mut agent2 = BasicAgent::new(ModelConfig::anthropic("mock", "mock", "test"))
+        .with_provider_override(Arc::new(provider2))
+        .with_system_prompt("test");
 
     agent2.restore_messages(&json).expect("restore");
     let _ = agent2.prompt("Follow up").await;
@@ -207,10 +198,9 @@ async fn test_agent_continues_after_restore() {
 #[tokio::test]
 async fn test_prompt_with_sender_streams_events() {
     let provider = MockProvider::text("Hello!");
-    let mut agent = BasicAgent::new(provider)
-        .with_system_prompt("test")
-        .with_model("mock")
-        .with_api_key("test");
+    let mut agent = BasicAgent::new(ModelConfig::anthropic("mock", "mock", "test"))
+        .with_provider_override(Arc::new(provider))
+        .with_system_prompt("test");
 
     let (tx, mut rx) = mpsc::unbounded_channel();
     let event_count = Arc::new(AtomicUsize::new(0));
@@ -235,10 +225,9 @@ async fn test_prompt_with_sender_streams_events() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_prompt_with_sender_real_time_streaming() {
     let provider = MockProvider::text("Hello!");
-    let mut agent = BasicAgent::new(provider)
-        .with_system_prompt("test")
-        .with_model("mock")
-        .with_api_key("test");
+    let mut agent = BasicAgent::new(ModelConfig::anthropic("mock", "mock", "test"))
+        .with_provider_override(Arc::new(provider))
+        .with_system_prompt("test");
 
     let (tx, mut rx) = mpsc::unbounded_channel();
     let received_during = Arc::new(AtomicUsize::new(0));
@@ -262,10 +251,9 @@ async fn test_prompt_with_sender_real_time_streaming() {
 #[tokio::test]
 async fn test_prompt_messages_with_sender() {
     let provider = MockProvider::text("Response");
-    let mut agent = BasicAgent::new(provider)
-        .with_system_prompt("test")
-        .with_model("mock")
-        .with_api_key("test");
+    let mut agent = BasicAgent::new(ModelConfig::anthropic("mock", "mock", "test"))
+        .with_provider_override(Arc::new(provider))
+        .with_system_prompt("test");
 
     let (tx, mut rx) = mpsc::unbounded_channel();
 
@@ -288,10 +276,9 @@ async fn test_prompt_messages_with_sender() {
 #[tokio::test]
 async fn test_continue_loop_with_sender() {
     let provider = MockProvider::text("Continued response");
-    let mut agent = BasicAgent::new(provider)
-        .with_system_prompt("test")
-        .with_model("mock")
-        .with_api_key("test");
+    let mut agent = BasicAgent::new(ModelConfig::anthropic("mock", "mock", "test"))
+        .with_provider_override(Arc::new(provider))
+        .with_system_prompt("test");
 
     // First, add some messages to continue from (last must not be assistant)
     agent.append_message(AgentMessage::Llm(Message::user("Hello")));
@@ -357,10 +344,9 @@ async fn test_prompt_with_sender_tools_restored() {
     }
 
     let provider = MockProvider::text("Hello!");
-    let mut agent = BasicAgent::new(provider)
+    let mut agent = BasicAgent::new(ModelConfig::anthropic("mock", "mock", "test"))
+        .with_provider_override(Arc::new(provider))
         .with_system_prompt("test")
-        .with_model("mock")
-        .with_api_key("test")
         .with_tools(vec![Box::new(DummyTool)]);
 
     let (tx, mut rx) = mpsc::unbounded_channel();

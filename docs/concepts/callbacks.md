@@ -19,7 +19,7 @@ phi-core provides three tiers of lifecycle callbacks that let you observe and co
 Called once before `AgentStart` is emitted. Receives the current message history and an initial usage counter of 0. Return `false` to abort the entire run — `AgentEnd` is emitted with an empty message list and the loop exits immediately.
 
 ```rust
-let agent = Agent::new(provider)
+let agent = BasicAgent::new(ModelConfig::anthropic("claude-sonnet-4-20250514", "Claude Sonnet 4", &api_key))
     .on_before_loop(|messages, _usage| {
         println!("Starting run with {} existing messages", messages.len());
         true // return false to abort
@@ -31,7 +31,7 @@ let agent = Agent::new(provider)
 Called once after `AgentEnd` is emitted. Receives the new messages produced during the run and the accumulated `Usage` across all turns.
 
 ```rust
-let agent = Agent::new(provider)
+let agent = BasicAgent::new(ModelConfig::anthropic("claude-sonnet-4-20250514", "Claude Sonnet 4", &api_key))
     .on_after_loop(|new_messages, total_usage| {
         println!(
             "Run complete: {} new messages, {} total tokens",
@@ -50,7 +50,7 @@ let agent = Agent::new(provider)
 Called before each LLM call. Receives the current message history and the turn number (0-indexed). Return `false` to abort the loop.
 
 ```rust
-let agent = Agent::new(provider)
+let agent = BasicAgent::new(ModelConfig::anthropic("claude-sonnet-4-20250514", "Claude Sonnet 4", &api_key))
     .on_before_turn(|messages, turn| {
         println!("Turn {} starting with {} messages", turn, messages.len());
         turn < 10 // Stop after 10 turns
@@ -67,7 +67,7 @@ use std::sync::{Arc, Mutex};
 let total_cost = Arc::new(Mutex::new(0u64));
 let cost_tracker = total_cost.clone();
 
-let agent = Agent::new(provider)
+let agent = BasicAgent::new(ModelConfig::anthropic("claude-sonnet-4-20250514", "Claude Sonnet 4", &api_key))
     .on_after_turn(move |_messages, usage| {
         let mut cost = cost_tracker.lock().unwrap();
         *cost += usage.input + usage.output;
@@ -80,7 +80,7 @@ let agent = Agent::new(provider)
 Called when the LLM returns a `StopReason::Error`. Receives the error message string.
 
 ```rust
-let agent = Agent::new(provider)
+let agent = BasicAgent::new(ModelConfig::anthropic("claude-sonnet-4-20250514", "Claude Sonnet 4", &api_key))
     .on_error(|err| {
         eprintln!("LLM error: {}", err);
         // Log to monitoring, send alert, etc.
@@ -96,7 +96,7 @@ let agent = Agent::new(provider)
 Called before each tool starts, after the `ToolExecutionStart` event would normally emit. Receives the call ID, tool name, and arguments. Return `false` to skip the tool — a `ToolExecutionEnd` with an error result is emitted and the tool's `execute()` is never called.
 
 ```rust
-let agent = Agent::new(provider)
+let agent = BasicAgent::new(ModelConfig::anthropic("claude-sonnet-4-20250514", "Claude Sonnet 4", &api_key))
     .on_before_tool_execution(|call_id, name, _args| {
         println!("About to run tool: {}", name);
         // Return false to block specific tools:
@@ -109,7 +109,7 @@ let agent = Agent::new(provider)
 Called after each tool finishes (after `ToolExecutionEnd` is emitted). Receives the tool name, call ID, and whether the result was an error.
 
 ```rust
-let agent = Agent::new(provider)
+let agent = BasicAgent::new(ModelConfig::anthropic("claude-sonnet-4-20250514", "Claude Sonnet 4", &api_key))
     .on_after_tool_execution(|name, call_id, is_error| {
         if is_error {
             eprintln!("Tool {} ({}) failed", name, call_id);
@@ -122,7 +122,7 @@ let agent = Agent::new(provider)
 Called before each `ToolExecutionUpdate` event (streaming progress from a running tool). Return `false` to suppress the event — the tool keeps running and the final `ToolResult` is unaffected; only the intermediate streaming update is dropped.
 
 ```rust
-let agent = Agent::new(provider)
+let agent = BasicAgent::new(ModelConfig::anthropic("claude-sonnet-4-20250514", "Claude Sonnet 4", &api_key))
     .on_before_tool_execution_update(|name, call_id, text| {
         // Only forward updates for bash tool
         name == "bash"
@@ -134,7 +134,7 @@ let agent = Agent::new(provider)
 Called after each `ToolExecutionUpdate` event, only if it was not suppressed by `before_tool_execution_update`.
 
 ```rust
-let agent = Agent::new(provider)
+let agent = BasicAgent::new(ModelConfig::anthropic("claude-sonnet-4-20250514", "Claude Sonnet 4", &api_key))
     .on_after_tool_execution_update(|name, call_id, text| {
         // e.g., log streaming updates to a file
     });
@@ -180,7 +180,7 @@ after_loop
 All callbacks are optional and independent:
 
 ```rust
-let agent = Agent::new(provider)
+let agent = BasicAgent::new(ModelConfig::anthropic("claude-sonnet-4-20250514", "Claude Sonnet 4", &api_key))
     .on_before_loop(|_msgs, _| true)
     .on_after_loop(|msgs, usage| {
         println!("Done: {} messages, {} tokens", msgs.len(), usage.total_tokens);
@@ -208,8 +208,10 @@ For direct loop usage without the `Agent` wrapper:
 ```rust
 use std::sync::Arc;
 use phi_core::agent_loop::AgentLoopConfig;
+use phi_core::provider::ModelConfig;
 
 let config = AgentLoopConfig {
+    model_config: ModelConfig::anthropic("claude-sonnet-4-20250514", "Claude Sonnet 4", &api_key),
     // Loop-level
     before_loop: Some(Arc::new(|_msgs, _| true)),
     after_loop: Some(Arc::new(|msgs, usage| { /* log */ })),
@@ -222,6 +224,6 @@ let config = AgentLoopConfig {
     after_tool_execution: Some(Arc::new(|name, id, is_error| {})),
     before_tool_execution_update: Some(Arc::new(|name, id, text| true)),
     after_tool_execution_update: Some(Arc::new(|name, id, text| {})),
-    // ... other fields
+    ..Default::default()
 };
 ```

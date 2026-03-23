@@ -3,7 +3,7 @@
 ## 1. Component Map
 
 ### Agent trait + BasicAgent (`src/agents/`)
-**Responsibility:** `Agent` (trait, `agents/agent.rs`) defines the runtime interface — prompting, state access, control, and steering queues. `BasicAgent` (struct, `agents/basic_agent.rs`) is the default in-memory implementation: owns the conversation, tools, and provider, and is the application-facing entry point. `SubAgentTool` (`agents/sub_agent.rs`) implements `AgentTool` to delegate tasks to a child `agent_loop()`.
+**Responsibility:** `Agent` (trait, `agents/agent.rs`) defines the runtime interface — prompting, state access, control, and steering queues. `BasicAgent` (struct, `agents/basic_agent.rs`) is the default in-memory implementation: owns the conversation, tools, and `ModelConfig` (provider identity), and is the application-facing entry point. Construction: `BasicAgent::new(ModelConfig::anthropic(...))`. The optional `provider_override` field bypasses `ProviderRegistry` for custom or test providers. `SubAgentTool` (`agents/sub_agent.rs`) implements `AgentTool` to delegate tasks to a child `agent_loop()`.
 **Public interface:**
 - `prompt(text)` — Send a text prompt; returns an event stream receiver.
 - `prompt_messages(messages)` — Send one or more messages as a prompt; returns an event stream receiver.
@@ -41,10 +41,11 @@
 - `ExecutionLimits` — Hard caps on agent execution: max turns, max total tokens, max wall-clock duration.
 
 ### ProviderRegistry (`src/provider/registry.rs`, `src/provider/mod.rs`)
-**Responsibility:** Dispatches `StreamConfig` to the correct provider implementation based on `ApiProtocol`.
+**Responsibility:** Dispatches `StreamConfig` to the correct provider implementation based on `model_config.api: ApiProtocol`. Built inline per `agent_loop()` call; zero allocation for a registry with all built-in providers pre-registered.
 **Public interface:**
-- `ProviderRegistry::new()` — Create an empty registry; use `ProviderRegistry::default()` to pre-register all built-in providers.
-- *(implements `StreamProvider`)* — Each individual provider also directly implements `StreamProvider` for use without a registry.
+- `ProviderRegistry::default()` — Pre-registers all 7 built-in providers; used automatically by `agent_loop()` when `AgentLoopConfig.provider_override` is `None`.
+- `ProviderRegistry::new()` — Create an empty registry for custom provider sets.
+- Provider resolution: `model_config.api` selects the wire-protocol handler; `model_config` fields (`id`, `api_key`, `base_url`, `compat`, etc.) differentiate services within the same protocol.
 
 ### StreamProvider implementations (`src/provider/`)
 **Responsibility:** Translate the unified `StreamConfig` into provider-specific HTTP requests and parse streaming responses back into `StreamEvent`s.
@@ -67,7 +68,8 @@
 ### SubAgentTool (`src/agents/sub_agent.rs`)
 **Responsibility:** Implements `AgentTool` to delegate tasks to a child `agent_loop()` with isolated context, its own toolset, and a turn limit. The child gets its own `agent_id`, `session_id`, and `loop_id`; its `parent_loop_id` is linked back to the calling loop via `with_parent_loop_id`.
 **Public interface:**
-- `SubAgentTool::new(name, provider).with_*(...)` — Construct a sub-agent tool with its own system prompt, model, toolset, and turn limit, then register it as an `AgentTool`.
+- `SubAgentTool::new(name, model_config).with_*(...)` — Construct a sub-agent tool with its own `ModelConfig` (provider identity), system prompt, toolset, and turn limit, then register it as an `AgentTool`.
+- `SubAgentTool::with_provider_override(provider)` — Bypass `ProviderRegistry` dispatch; used in tests to inject `MockProvider`.
 - `SubAgentTool::with_parent_loop_id(loop_id)` — Supply the parent loop's `loop_id` so the child `AgentStart` event carries `parent_loop_id`, enabling ancestry tracing across the event stream.
 
 ### SkillSystem (`src/skills.rs`)
@@ -476,16 +478,17 @@ Entity: CacheStrategy (enum)
 ### StreamConfig (sent to provider)
 ```
 Entity: StreamConfig
-  model: String
+  model_config: ModelConfig     [REQUIRED — full provider identity: id, api_key, base_url, compat, cost]
   system_prompt: String
   messages: Vec<Message>        [LLM-only messages, Extension filtered out]
   tools: Vec<ToolDefinition>    [schema-only; no execute functions]
   thinking_level: ThinkingLevel
-  api_key: String
-  max_tokens: Option<u32>
+  max_tokens: Option<u32>       [overrides model_config.max_tokens when Some]
   temperature: Option<f32>
-  model_config: Option<ModelConfig>
   cache_config: CacheConfig
+
+Note: model identity (id, api_key, base_url, headers, compat) is accessed via
+      model_config.id, model_config.api_key, etc. No top-level model or api_key fields.
 ```
 
 ### ToolDefinition (sent to LLM)

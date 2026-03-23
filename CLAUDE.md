@@ -33,23 +33,23 @@ The central abstraction is a **stateless agent loop** (`agent_loop.rs`) driven b
 
 The loop: stream assistant response → extract tool calls → execute tools (parallel by default) → append results → repeat until `StopReason::Stop` with no follow-ups.
 
-`agent_loop` and `agent_loop_continue` are **free functions**, not methods. The `Agent` trait (`agents/agent.rs`) defines the runtime interface — prompting, state access, control, and steering queues. `BasicAgent` (`agents/basic_agent.rs`) is the default in-memory implementation: an optional stateful wrapper that manages message history, tool registry, steering/follow-up queues, and provider selection. The `_with_sender` methods (`prompt_with_sender`, `prompt_messages_with_sender`, `continue_loop_with_sender`) accept a caller-provided `mpsc::UnboundedSender<AgentEvent>` for real-time event consumption on a separate task.
+`agent_loop` and `agent_loop_continue` are **free functions**, not methods. The `Agent` trait (`agents/agent.rs`) defines the runtime interface — prompting, state access, control, and steering queues. `BasicAgent` (`agents/basic_agent.rs`) is the default in-memory implementation: an optional stateful wrapper that manages message history, tool registry, steering/follow-up queues, and model configuration. The `_with_sender` methods (`prompt_with_sender`, `prompt_messages_with_sender`, `continue_loop_with_sender`) accept a caller-provided `mpsc::UnboundedSender<AgentEvent>` for real-time event consumption on a separate task.
 
 ### Provider System
 
-7 provider implementations behind `StreamProvider`, dispatched by `ApiProtocol` enum via `ProviderRegistry`:
+7 provider implementations behind `StreamProvider`, dispatched by `ApiProtocol` enum via `ProviderRegistry`. The caller never names a provider struct — `BasicAgent::new(ModelConfig::anthropic(...))` is the full construction pattern:
 
-| Protocol | File | Covers |
+| `ApiProtocol` | File | Covers |
 |----------|------|--------|
-| `Anthropic` | `anthropic.rs` | Claude models |
-| `OpenAiCompat` | `openai_compat.rs` | OpenAI, Groq, Together, DeepSeek, Fireworks, Mistral, xAI, etc. (15+) |
+| `AnthropicMessages` | `anthropic.rs` | Claude models |
+| `OpenAiCompletions` | `openai_compat.rs` | OpenAI, Groq, Together, DeepSeek, Fireworks, Mistral, xAI, OpenRouter, etc. (15+) |
 | `OpenAiResponses` | `openai_responses.rs` | OpenAI Responses API |
-| `AzureOpenAi` | `azure_openai.rs` | Azure OpenAI |
-| `Google` | `google.rs` | Gemini |
+| `AzureOpenAiResponses` | `azure_openai.rs` | Azure OpenAI |
+| `GoogleGenerativeAi` | `google.rs` | Gemini |
 | `GoogleVertex` | `google_vertex.rs` | Vertex AI |
-| `Bedrock` | `bedrock.rs` | Amazon Bedrock (ConverseStream) |
+| `BedrockConverseStream` | `bedrock.rs` | Amazon Bedrock (ConverseStream) |
 
-`ModelConfig` + `OpenAiCompat` flags handle per-provider quirks (auth style, reasoning format, max_tokens field name, etc.).
+`ModelConfig` (`provider/model.rs`) is the single provider identity card: `id`, `name`, `api`, `provider`, `base_url`, `api_key`, `cost`, `headers`, `compat`. Factory methods: `anthropic()`, `openai()`, `local()`, `google()`, `openrouter()`. The `compat: Option<OpenAiCompat>` field holds per-provider quirk flags for the OpenAI-compat providers (auth style, reasoning format, max_tokens field name, etc.). `provider_override: Option<Arc<dyn StreamProvider>>` (skipped by serde) is an escape hatch for test injection or custom providers.
 
 ### Key Types
 
@@ -64,7 +64,7 @@ The loop: stream assistant response → extract tool calls → execute tools (pa
 
 - **`ContextTracker`** — hybrid real-usage + estimation for token tracking
 - **`compact_messages()`** — tiered compaction: Level 1 (truncate tool outputs) → Level 2 (summarize old turns) → Level 3 (drop middle turns)
-- **`ExecutionLimits`/`ExecutionTracker`** — max turns (50), max tokens (1M), max duration (10 min), max cost (None = unlimited; requires `AgentLoopConfig.cost_config`)
+- **`ExecutionLimits`/`ExecutionTracker`** — max turns (50), max tokens (1M), max duration (10 min). Cost tracking is automatic: `Usage::estimated_cost(&model_config.cost)` fires after each turn when rates are non-zero (set `model_config.cost` fields)
 
 ### Tool Execution (`agent_loop.rs`)
 
@@ -83,7 +83,12 @@ Behind the `openapi` Cargo feature. `OpenApiToolAdapter` parses an OpenAPI 3.0 s
 
 ### Testing
 
-All unit tests use `MockProvider` (`provider/mock.rs`) to simulate LLM responses without network. Test files are in `tests/` — `agent_test.rs`, `agent_loop_test.rs`, `tools_test.rs`. Follow the existing pattern of constructing a `MockProvider` with predetermined responses.
+All unit tests use `MockProvider` (`provider/mock.rs`) to simulate LLM responses without network. Test files are in `tests/` — `agent_test.rs`, `agent_loop_test.rs`, `tools_test.rs`. Construct with:
+```rust
+let agent = BasicAgent::new(ModelConfig::anthropic("mock", "mock", "test"))
+    .with_provider_override(Arc::new(MockProvider::texts(vec!["response"])));
+```
+`with_provider_override()` bypasses `ProviderRegistry` dispatch and uses the supplied provider directly.
 
 ## Key Design Conventions
 

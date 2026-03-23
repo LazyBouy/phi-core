@@ -8,7 +8,7 @@
 pub async fn agent_loop(
     prompts: Vec<AgentMessage>,
     context: &mut AgentContext,
-    config: &AgentLoopConfig<'_>,
+    config: &AgentLoopConfig,
     tx: mpsc::UnboundedSender<AgentEvent>,
     cancel: CancellationToken,
 ) -> Vec<AgentMessage>
@@ -21,7 +21,7 @@ Start an agent loop with new prompt messages. Returns all messages generated dur
 ```rust
 pub async fn agent_loop_continue(
     context: &mut AgentContext,
-    config: &AgentLoopConfig<'_>,
+    config: &AgentLoopConfig,
     tx: mpsc::UnboundedSender<AgentEvent>,
     cancel: CancellationToken,
 ) -> Vec<AgentMessage>
@@ -53,17 +53,22 @@ The trait is object-safe: `Box<dyn Agent>` and `&mut dyn Agent` work for runtime
 
 ## BasicAgent Struct
 
-The default in-memory `Agent` implementation. Owns a single linear message history, tool registry, and provider reference.
+The default in-memory `Agent` implementation. Owns a single linear message history, tool registry, and model configuration.
 
 ### Construction
 
 ```rust
-let agent = BasicAgent::new(provider);
+let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
+let agent = BasicAgent::new(ModelConfig::anthropic(
+    "claude-sonnet-4-20250514",
+    "Claude Sonnet 4",
+    &api_key,
+));
 ```
 
 | Signature | Description |
 |-----------|-------------|
-| `BasicAgent::new(provider: impl StreamProvider + 'static) -> Self` | Create a new agent with the given provider |
+| `BasicAgent::new(model_config: ModelConfig) -> Self` | Create a new agent with the given model configuration |
 
 ### Builder Methods
 
@@ -74,11 +79,10 @@ All return `Self` for chaining (unless noted as `Result`).
 | Method | Description |
 |--------|-------------|
 | `with_system_prompt(prompt) -> Self` | Set the system prompt |
-| `with_model(model) -> Self` | Set the model identifier |
-| `with_api_key(key) -> Self` | Set the API key |
 | `with_thinking(level: ThinkingLevel) -> Self` | Set thinking level (`Off`, `Minimal`, `Low`, `Medium`, `High`) |
 | `with_max_tokens(max: u32) -> Self` | Set max output tokens |
-| `with_model_config(config: ModelConfig) -> Self` | Set model config (base URL, headers, compat flags) for multi-provider support |
+| `with_model_config(config: ModelConfig) -> Self` | Replace the entire `ModelConfig` (id, api_key, base_url, compat, cost, etc.) |
+| `with_provider_override(provider: Arc<dyn StreamProvider>) -> Self` | Bypass `ProviderRegistry` dispatch and use this provider directly (primarily for testing with `MockProvider`) |
 
 **Tools & Integrations**
 

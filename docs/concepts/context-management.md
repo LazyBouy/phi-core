@@ -7,7 +7,7 @@ Long-running agents accumulate messages that exceed the model's context window. 
 Fast estimation without external tokenizer dependencies:
 
 ```rust
-use phi-core::context::{estimate_tokens, message_tokens, total_tokens};
+use phi_core::context::{estimate_tokens, message_tokens, total_tokens};
 
 estimate_tokens("Hello world");          // ~3 tokens (chars / 4)
 message_tokens(&agent_message);          // estimate for a single message
@@ -19,7 +19,7 @@ total_tokens(&messages);                 // estimate for all messages
 `ContextTracker` combines real token counts from provider responses with estimation for new messages — more accurate than pure estimation:
 
 ```rust
-use phi-core::context::ContextTracker;
+use phi_core::context::ContextTracker;
 
 let mut tracker = ContextTracker::new();
 
@@ -44,7 +44,7 @@ When the context exceeds a model's window, providers return overflow errors. phi
 Providers that check before streaming (Google, Bedrock, Vertex) return `ProviderError::ContextOverflow`:
 
 ```rust
-use phi-core::provider::ProviderError;
+use phi_core::provider::ProviderError;
 
 match agent.prompt("...").await {
     // The loop already handles this — but you can also match it:
@@ -131,7 +131,7 @@ When a limit is reached, the agent stops with a message like `"[Agent stopped: M
 ## Disabling Context Management
 
 ```rust
-let agent = Agent::new(provider)
+let agent = BasicAgent::new(model_config)
     .without_context_management();
 ```
 

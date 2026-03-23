@@ -1,17 +1,31 @@
 # OpenAI Compatible Provider
 
-`OpenAiCompatProvider` implements the OpenAI Chat Completions API. One implementation covers OpenAI, xAI, Groq, Cerebras, OpenRouter, Mistral, DeepSeek, and any other compatible API.
+One implementation (`OpenAiCompatProvider`) covers OpenAI, xAI, Groq, Cerebras, OpenRouter,
+Mistral, DeepSeek, and any other OpenAI Chat Completions-compatible API. The provider is
+selected automatically when `ModelConfig.api == ApiProtocol::OpenAiCompletions`.
+
+Per-service behavior is controlled by `OpenAiCompat` flags stored in `ModelConfig.compat`.
 
 ## Usage
 
-Requires a `ModelConfig` with `compat` flags set in `StreamConfig.model_config`:
-
 ```rust
-use phi-core::provider::{OpenAiCompatProvider, ModelConfig};
+use phi_core::BasicAgent;
+use phi_core::provider::ModelConfig;
 
-let agent = Agent::new(OpenAiCompatProvider)
-    .with_model("gpt-4o")
-    .with_api_key(std::env::var("OPENAI_API_KEY").unwrap());
+// OpenAI
+let api_key = std::env::var("OPENAI_API_KEY").unwrap();
+let agent = BasicAgent::new(ModelConfig::openai("gpt-4o", "GPT-4o", &api_key));
+
+// OpenRouter
+let or_key = std::env::var("OPENROUTER_API_KEY").unwrap();
+let agent = BasicAgent::new(ModelConfig::openrouter("anthropic/claude-sonnet-4", &or_key));
+
+// Local server (LM Studio, Ollama, llama.cpp, vLLM)
+let agent = BasicAgent::new(ModelConfig::local(
+    "http://localhost:1234/v1",
+    "my-model",
+    "",  // empty string — most local servers don't require auth
+));
 ```
 
 ## OpenAiCompat Quirk Flags
@@ -27,21 +41,22 @@ pub struct OpenAiCompat {
     pub max_tokens_field: MaxTokensField,       // MaxTokens or MaxCompletionTokens
     pub requires_tool_result_name: bool,
     pub requires_assistant_after_tool_result: bool,
-    pub thinking_format: ThinkingFormat,        // OpenAi, Xai, or Qwen
+    pub thinking_format: ThinkingFormat,        // OpenAi, Xai, Qwen, or OpenRouter
 }
 ```
 
 ## Provider Presets
 
-| Provider | Constructor | Key Differences |
+| Provider | `ModelConfig` factory | Key Differences |
 |----------|-------------|-----------------|
-| OpenAI | `OpenAiCompat::openai()` | `developer` role, `max_completion_tokens`, `store`, `reasoning_effort` |
-| xAI (Grok) | `OpenAiCompat::xai()` | `reasoning` field for thinking (not `reasoning_content`) |
-| Groq | `OpenAiCompat::groq()` | Standard defaults |
-| Cerebras | `OpenAiCompat::cerebras()` | Standard defaults |
-| OpenRouter | `OpenAiCompat::openrouter()` | `max_completion_tokens` |
-| Mistral | `OpenAiCompat::mistral()` | `max_tokens` field |
-| DeepSeek | `OpenAiCompat::deepseek()` | `max_completion_tokens` |
+| OpenAI | `ModelConfig::openai(id, name, key)` | `developer` role, `max_completion_tokens`, `store`, `reasoning_effort` |
+| OpenRouter | `ModelConfig::openrouter(id, key)` | `developer` role, `max_tokens`, OpenRouter thinking format |
+| Local | `ModelConfig::local(url, id, key)` | Generic defaults, empty api_key OK |
+| xAI (Grok) | Direct construction with `OpenAiCompat::xai()` | `reasoning` field for thinking |
+| Groq | Direct construction with `OpenAiCompat::groq()` | Standard defaults |
+| Cerebras | Direct construction with `OpenAiCompat::cerebras()` | Standard defaults |
+| Mistral | Direct construction with `OpenAiCompat::mistral()` | `max_tokens` field |
+| DeepSeek | Direct construction with `OpenAiCompat::deepseek()` | `max_completion_tokens` |
 
 ## Adding a New Compatible Provider
 
@@ -62,44 +77,29 @@ impl OpenAiCompat {
 2. Create a `ModelConfig` that uses it:
 
 ```rust
+use phi_core::provider::{ModelConfig, ApiProtocol, OpenAiCompat};
+
 let config = ModelConfig {
     id: "my-model".into(),
     name: "My Model".into(),
     api: ApiProtocol::OpenAiCompletions,
     provider: "my-provider".into(),
     base_url: "https://api.myprovider.com/v1".into(),
+    api_key: std::env::var("MY_API_KEY").unwrap_or_default(),
     compat: Some(OpenAiCompat::my_provider()),
-    // ...
+    ..Default::default()
 };
+BasicAgent::new(config)
 ```
 
 ## Thinking/Reasoning
 
 The `ThinkingFormat` enum controls how reasoning content is parsed from streams:
 
-- `ThinkingFormat::OpenAi` — Uses `reasoning_content` field (DeepSeek, default)
+- `ThinkingFormat::OpenAi` — Uses `reasoning_content` field (most providers, default)
 - `ThinkingFormat::Xai` — Uses `reasoning` field (Grok)
-- `ThinkingFormat::Qwen` — Uses `reasoning_content` field (Qwen)
-
-## Local Servers (LM Studio, Ollama, llama.cpp, vLLM)
-
-Use `ModelConfig::local()` for any local OpenAI-compatible server. No API key required:
-
-```rust
-use phi-core::agent::Agent;
-use phi-core::provider::{OpenAiCompatProvider, ModelConfig};
-
-let agent = Agent::new(OpenAiCompatProvider)
-    .with_model_config(ModelConfig::local("http://localhost:1234/v1", "my-model"))
-    .with_model("my-model")
-    .with_api_key(""); // empty string OK for local
-```
-
-Or via the CLI example:
-
-```bash
-cargo run --example cli -- --api-url http://localhost:1234/v1 --model my-model
-```
+- `ThinkingFormat::Qwen` — Uses `reasoning_content` field (Qwen variant)
+- `ThinkingFormat::OpenRouter` — Uses `reasoning_details` array (OpenRouter extended thinking)
 
 ## Auth
 

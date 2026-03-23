@@ -85,11 +85,11 @@ impl StreamProvider for AnthropicProvider {
         We detect OAuth by prefix: "sk-ant-oat" in the key. This is fragile but matches
         the real-world key format Anthropic uses for its own OAuth tokens.
         */
-        let is_oauth = config.api_key.contains("sk-ant-oat");
+        let is_oauth = config.model_config.api_key.contains("sk-ant-oat");
         let body = build_request_body(&config, is_oauth);
         debug!(
             "Anthropic request: model={}, oauth={}",
-            config.model, is_oauth
+            config.model_config.id, is_oauth
         );
 
         /*
@@ -118,7 +118,7 @@ impl StreamProvider for AnthropicProvider {
         if is_oauth {
             // OAuth token — Bearer auth with Claude Code identity headers
             builder = builder
-                .header("authorization", format!("Bearer {}", config.api_key))
+                .header("authorization", format!("Bearer {}", config.model_config.api_key))
                 .header(
                     "anthropic-beta",
                     "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14",
@@ -128,7 +128,7 @@ impl StreamProvider for AnthropicProvider {
                 .header("x-app", "cli");
         } else {
             // Standard API key auth
-            builder = builder.header("x-api-key", &config.api_key);
+            builder = builder.header("x-api-key", &config.model_config.api_key);
         }
 
         let request = builder.json(&body);
@@ -388,7 +388,7 @@ impl StreamProvider for AnthropicProvider {
                                     let err_msg = Message::Assistant {
                                         content: vec![Content::Text { text: String::new() }],
                                         stop_reason: StopReason::Error,
-                                        model: config.model.clone(),
+                                        model: config.model_config.id.clone(),
                                         provider: "anthropic".into(),
                                         usage: usage.clone(),
                                         timestamp: now_ms(),
@@ -408,7 +408,7 @@ impl StreamProvider for AnthropicProvider {
                             let err_msg = Message::Assistant {
                                 content: vec![Content::Text { text: String::new() }],
                                 stop_reason: StopReason::Error,
-                                model: config.model.clone(),
+                                model: config.model_config.id.clone(),
                                 provider: "anthropic".into(),
                                 usage: usage.clone(),
                                 timestamp: now_ms(),
@@ -432,7 +432,7 @@ impl StreamProvider for AnthropicProvider {
         let message = Message::Assistant {
             content,
             stop_reason,
-            model: config.model.clone(),
+            model: config.model_config.id.clone(),
             provider: "anthropic".into(),
             usage,
             timestamp: now_ms(),
@@ -559,7 +559,7 @@ fn build_request_body(
     }
 
     let mut body = serde_json::json!({
-        "model": config.model,
+        "model": config.model_config.id,
         "max_tokens": config.max_tokens.unwrap_or(8192),
         "stream": true,
         "messages": messages,
@@ -799,7 +799,11 @@ mod tests {
 
     fn make_config(cache: CacheConfig) -> StreamConfig {
         StreamConfig {
-            model: "claude-sonnet-4-20250514".into(),
+            model_config: crate::provider::ModelConfig::anthropic(
+                "claude-sonnet-4-20250514",
+                "Claude Sonnet 4",
+                "test-key",
+            ),
             system_prompt: "You are helpful.".into(),
             messages: vec![
                 Message::user("Hello"),
@@ -816,10 +820,8 @@ mod tests {
                 parameters: serde_json::json!({"type": "object"}),
             }],
             thinking_level: ThinkingLevel::Off,
-            api_key: "test-key".into(),
             max_tokens: Some(1024),
             temperature: None,
-            model_config: None,
             cache_config: cache,
         }
     }
@@ -921,7 +923,11 @@ mod tests {
     #[test]
     fn test_tool_result_with_image() {
         let config = StreamConfig {
-            model: "claude-sonnet-4-20250514".into(),
+            model_config: crate::provider::ModelConfig::anthropic(
+                "claude-sonnet-4-20250514",
+                "Claude Sonnet 4",
+                "test-key",
+            ),
             system_prompt: "".into(),
             messages: vec![
                 Message::Assistant {
@@ -955,10 +961,8 @@ mod tests {
             ],
             tools: vec![],
             thinking_level: ThinkingLevel::Off,
-            api_key: "test-key".into(),
             max_tokens: Some(1024),
             temperature: None,
-            model_config: None,
             cache_config: CacheConfig {
                 enabled: false,
                 strategy: CacheStrategy::Disabled,
@@ -981,7 +985,11 @@ mod tests {
     #[test]
     fn test_tool_result_text_only_uses_string() {
         let config = StreamConfig {
-            model: "claude-sonnet-4-20250514".into(),
+            model_config: crate::provider::ModelConfig::anthropic(
+                "claude-sonnet-4-20250514",
+                "Claude Sonnet 4",
+                "test-key",
+            ),
             system_prompt: "".into(),
             messages: vec![
                 Message::Assistant {
@@ -1009,10 +1017,8 @@ mod tests {
             ],
             tools: vec![],
             thinking_level: ThinkingLevel::Off,
-            api_key: "test-key".into(),
             max_tokens: Some(1024),
             temperature: None,
-            model_config: None,
             cache_config: CacheConfig {
                 enabled: false,
                 strategy: CacheStrategy::Disabled,

@@ -33,27 +33,37 @@ Caching is **enabled by default** with automatic breakpoint placement. No config
 ### Disable Caching
 
 ```rust
-use phi-core::{CacheConfig, CacheStrategy};
+use phi_core::{BasicAgent, CacheConfig, CacheStrategy};
+use phi_core::provider::ModelConfig;
 
-let agent = Agent::new(provider)
-    .with_cache_config(CacheConfig {
-        enabled: false,
-        ..Default::default()
-    });
+let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
+let agent = BasicAgent::new(ModelConfig::anthropic(
+    "claude-sonnet-4-20250514",
+    "Claude Sonnet 4",
+    &api_key,
+))
+.with_cache_config(CacheConfig {
+    enabled: false,
+    ..Default::default()
+});
 ```
 
 ### Fine-Grained Control
 
 ```rust
-let agent = Agent::new(provider)
-    .with_cache_config(CacheConfig {
-        enabled: true,
-        strategy: CacheStrategy::Manual {
-            cache_system: true,
-            cache_tools: true,
-            cache_messages: false, // Don't cache conversation history
-        },
-    });
+let agent = BasicAgent::new(ModelConfig::anthropic(
+    "claude-sonnet-4-20250514",
+    "Claude Sonnet 4",
+    &api_key,
+))
+.with_cache_config(CacheConfig {
+    enabled: true,
+    strategy: CacheStrategy::Manual {
+        cache_system: true,
+        cache_tools: true,
+        cache_messages: false, // Don't cache conversation history
+    },
+});
 ```
 
 ## Monitoring Cache Usage

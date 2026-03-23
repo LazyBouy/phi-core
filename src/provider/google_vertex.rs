@@ -76,15 +76,12 @@ impl StreamProvider for GoogleVertexProvider {
         tx: mpsc::UnboundedSender<StreamEvent>, // OBSERVER — delegates to GoogleProvider's stream logic
         cancel: tokio_util::sync::CancellationToken, // ABORT — forwarded to delegate
     ) -> Result<Message, ProviderError> {
-        let model_config = config
-            .model_config
-            .as_ref()
-            .ok_or_else(|| ProviderError::Other("ModelConfig required".into()))?;
+        let model_config = &config.model_config;
 
         // Override the base_url to use Vertex format.
         // The GoogleProvider's stream will use model_config.base_url, but we need
         // a different URL pattern. We delegate to GoogleProvider with a modified config.
-        let vertex_url = Self::vertex_url(model_config, &config.model);
+        let vertex_url = Self::vertex_url(model_config, &config.model_config.id);
 
         // Create a modified model config with the Vertex URL pattern
         let mut vertex_model = model_config.clone();
@@ -92,7 +89,7 @@ impl StreamProvider for GoogleVertexProvider {
         // We need to add the Authorization header.
         vertex_model.headers.insert(
             "authorization".to_string(),
-            format!("Bearer {}", config.api_key),
+            format!("Bearer {}", config.model_config.api_key),
         );
 
         // Build request body same as Google (same content format)
@@ -125,10 +122,6 @@ impl StreamProvider for GoogleVertexProvider {
         // Delegate SSE parsing to the Google provider's streaming logic.
         // Since the response format is identical, we reuse GoogleProvider.
         // However, we already have the response, so we'll parse it inline.
-        // For simplicity, delegate fully to GoogleProvider with modified config.
-        let mut modified_config = config.clone();
-        modified_config.model_config = Some(vertex_model);
-
         // Actually, let's just delegate to GoogleProvider. The key difference
         // is auth (Bearer vs API key in URL). We handle that by using a modified
         // model config. But GoogleProvider builds its own URL... so let's just
@@ -302,7 +295,7 @@ async fn parse_google_sse_response(
     let message = Message::Assistant {
         content,
         stop_reason,
-        model: config.model.clone(),
+        model: config.model_config.id.clone(),
         provider: provider_name.to_string(),
         usage,
         timestamp: now_ms(),

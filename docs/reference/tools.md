@@ -3,7 +3,7 @@
 phi-core ships with six coding-oriented tools. Get them all with `default_tools()`:
 
 ```rust
-use phi-core::tools::default_tools;
+use phi_core::tools::default_tools;
 let tools = default_tools();
 ```
 

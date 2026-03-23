@@ -78,7 +78,7 @@ Errors are converted to `ToolResult` with `is_error: true` and sent back to the 
 ## Implementing a Custom Tool
 
 ```rust
-use phi-core::types::*;
+use phi_core::types::*;
 use async_trait::async_trait;
 
 pub struct WeatherTool;
@@ -126,11 +126,11 @@ impl AgentTool for WeatherTool {
 Register custom tools alongside defaults:
 
 ```rust
-use phi-core::tools::default_tools;
+use phi_core::tools::default_tools;
 
 let mut tools = default_tools();
 tools.push(Box::new(WeatherTool));
-let agent = Agent::new(provider).with_tools(tools);
+let agent = BasicAgent::new(model_config).with_tools(tools);
 ```
 
 ## Error Handling
@@ -179,7 +179,7 @@ pub type ToolUpdateFn = Arc<dyn Fn(ToolResult) + Send + Sync>;
 Call `on_update` whenever you have progress to report:
 
 ```rust
-use phi-core::types::*;
+use phi_core::types::*;
 
 struct DataProcessorTool;
 
@@ -288,9 +288,9 @@ Use `on_progress` for simple status text. Use `on_update` when you need structur
 Here's a complete example: a CLI agent with a deploy tool that streams progress. The human sees real-time output while the LLM only gets the final result.
 
 ```rust
-use phi-core::agent::Agent;
-use phi-core::provider::AnthropicProvider;
-use phi-core::types::*;
+use phi_core::BasicAgent;
+use phi_core::provider::ModelConfig;
+use phi_core::types::*;
 
 /// A tool that deploys an app and streams each step.
 struct DeployTool;
@@ -353,11 +353,14 @@ impl AgentTool for DeployTool {
 
 #[tokio::main]
 async fn main() {
-    let mut agent = Agent::new(AnthropicProvider)
-        .with_system_prompt("You are a deployment assistant.")
-        .with_model("claude-sonnet-4-20250514")
-        .with_api_key(std::env::var("ANTHROPIC_API_KEY").unwrap())
-        .with_tools(vec![Box::new(DeployTool)]);
+    let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
+    let mut agent = BasicAgent::new(ModelConfig::anthropic(
+        "claude-sonnet-4-20250514",
+        "Claude Sonnet 4",
+        &api_key,
+    ))
+    .with_system_prompt("You are a deployment assistant.")
+    .with_tools(vec![Box::new(DeployTool)]);
 
     let mut rx = agent.prompt("Deploy to production").await;
 
@@ -432,18 +435,19 @@ When the LLM returns multiple tool calls in a single response (e.g., "read file 
 ### Configuration
 
 ```rust
-use phi-core::agent::Agent;
-use phi-core::types::ToolExecutionStrategy;
+use phi_core::BasicAgent;
+use phi_core::provider::ModelConfig;
+use phi_core::types::ToolExecutionStrategy;
 
 // Default — parallel (fastest)
-let agent = Agent::new(provider);
+let agent = BasicAgent::new(model_config.clone());
 
 // Sequential (debug / shared state)
-let agent = Agent::new(provider)
+let agent = BasicAgent::new(model_config.clone())
     .with_tool_execution(ToolExecutionStrategy::Sequential);
 
 // Batched — 3 at a time
-let agent = Agent::new(provider)
+let agent = BasicAgent::new(model_config.clone())
     .with_tool_execution(ToolExecutionStrategy::Batched { size: 3 });
 ```
 

@@ -123,19 +123,19 @@ can be instantiated without error. No LLM call is required to pass Level 1.
 
 ### Milestone 1.3 — Agent Struct Construction
 
-- [ ] **REQ-024:** Implement `Agent::new(provider: impl StreamProvider) -> Agent`. Initialize all fields to documented defaults: `messages = []`, `tools = []`, `thinking_level = Off`, `tool_execution = Parallel`, `steering_mode = OneAtATime`, `follow_up_mode = OneAtATime`, `context_config = Some(default)`, `execution_limits = Some(default)`, `retry_config = default`, `is_streaming = false`, `cancel = None`. *(Source: [PS])*
+- [ ] **REQ-024:** Implement `BasicAgent::new(model_config: ModelConfig) -> BasicAgent`. Initialize all fields to documented defaults: `messages = []`, `tools = []`, `thinking_level = Off`, `tool_execution = Parallel`, `steering_mode = OneAtATime`, `follow_up_mode = OneAtATime`, `context_config = Some(default)`, `execution_limits = Some(default)`, `retry_config = default`, `is_streaming = false`, `cancel = None`. *(Source: [PS])*
   - Depends on: REQ-011 through REQ-017, REQ-019, REQ-020
-  - Definition of Done: `Agent::new(mock_provider)` compiles and all fields have their documented defaults.
+  - Definition of Done: `BasicAgent::new(ModelConfig::anthropic("m", "m", "k"))` compiles and all fields have their documented defaults.
 
-- [ ] **REQ-025:** Implement builder methods: `with_system_prompt(text)`, `with_model(id)`, `with_api_key(key)`, `with_max_tokens(n)`, `with_temperature(t)`, `with_model_config(cfg)`, `with_thinking_level(level)`. *(Source: [PS])*
+- [ ] **REQ-025:** Implement builder methods: `with_system_prompt(text)`, `with_model_config(cfg)`, `with_provider_override(provider)`, `with_max_tokens(n)`, `with_thinking(level)`. *(Source: [PS])*
   - Depends on: REQ-024
-  - Definition of Done: Method chain `Agent::new(p).with_system_prompt("x").with_model("m").with_api_key("k")` compiles and all fields are set correctly.
+  - Definition of Done: Method chain `BasicAgent::new(ModelConfig::anthropic("m", "m", "k")).with_system_prompt("x")` compiles and all fields are set correctly.
 
 - [ ] **REQ-026:** Implement `with_tools(vec)`, `with_context_config(cfg)`, `with_execution_limits(limits)`, `with_retry_config(cfg)`, `with_cache_config(cfg)`, `with_tool_execution(strategy)`, `with_steering_mode(mode)`, `with_follow_up_mode(mode)`. *(Source: [PS])*
   - Depends on: REQ-024
   - Definition of Done: All builders set their respective fields; `with_tools` replaces (or extends) the tools list.
 
-- [ ] **REQ-027:** Initialize `steering_queue` and `follow_up_queue` as `Arc<Mutex<Vec<AgentMessage>>>` in `Agent::new`. *(Source: [AR])*
+- [ ] **REQ-027:** Initialize `steering_queue` and `follow_up_queue` as `Arc<Mutex<Vec<AgentMessage>>>` in `BasicAgent::new`. *(Source: [AR])*
   - Depends on: REQ-003, REQ-024
   - Definition of Done: Both queues are non-null, independently lockable, and start empty.
 
@@ -872,7 +872,7 @@ meet or exceed documented expectations.
   - Depends on: REQ-007, REQ-148
   - Definition of Done: Parent event stream includes `ToolExecutionUpdate` events showing the sub-agent's text generation in real time.
 
-- [ ] **REQ-151:** Implement `SubAgentTool` builder: `SubAgentTool::new(name, provider).with_system_prompt(...).with_model(...).with_api_key(...).with_tools(...).with_max_turns(...).with_thinking_level(...)`. *(Source: [AR])*
+- [ ] **REQ-151:** Implement `SubAgentTool` builder: `SubAgentTool::new(name, model_config).with_system_prompt(...).with_tools(...).with_max_turns(...).with_thinking(...)`. *(Source: [AR])*
   - Depends on: REQ-021, REQ-148
   - Definition of Done: A fully configured `SubAgentTool` can be added to a parent agent's tool list via `with_tools`.
 

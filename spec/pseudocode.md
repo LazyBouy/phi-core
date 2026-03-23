@@ -1413,8 +1413,8 @@ END FUNCTION
 
 ```
 SEQUENCE AgentConstruction
-  1. Agent::new(provider)
-     - Sets provider to supplied StreamProvider implementation
+  1. BasicAgent::new(model_config: ModelConfig)
+     - Stores model_config (provider identity: id, api_key, base_url, api protocol, cost rates)
      - Initializes messages = []
      - Initializes tools = []
      - Sets defaults: thinking = Off, tool_execution = Parallel, retry = default
@@ -1422,10 +1422,7 @@ SEQUENCE AgentConstruction
   2. .with_system_prompt(text)
      - Stores system_prompt string
 
-  3. .with_model(model_id)  +  .with_api_key(key)
-     - Stores model string and API key string
-
-  4. .with_tools(vec)
+  3. .with_tools(vec)
      - Replaces or extends the tools list
 
   5. .with_context_config(config)
@@ -1732,18 +1729,15 @@ PATTERN SteeringQueueSafety
 **Purpose:** Construct a BasicAgent and start a run. These are the primary application-facing entry points.
 
 ```
-FUNCTION Agent::new(provider: StreamProvider) -> Agent
-  RETURN Agent {
+FUNCTION BasicAgent::new(model_config: ModelConfig) -> BasicAgent
+  RETURN BasicAgent {
+    model_config: model_config,       // complete provider identity: id, api_key, base_url, api, cost
     system_prompt: "",
-    model: "",
-    api_key: "",
     thinking_level: Off,
     max_tokens: None,
     temperature: None,
-    model_config: None,
     messages: [],
     tools: [],
-    provider: Box(provider),          // heap-allocated; owned exclusively
     steering_queue: Arc(Mutex([])),
     follow_up_queue: Arc(Mutex([])),
     steering_mode: QueueMode::OneAtATime,

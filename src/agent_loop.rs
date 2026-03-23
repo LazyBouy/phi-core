@@ -35,7 +35,7 @@ use crate::context::{
     CompactionStrategy, ContextConfig, DefaultCompaction, ExecutionLimits, ExecutionTracker,
 };
 
-use crate::provider::{CostConfig, ModelConfig, StreamConfig, StreamEvent, StreamProvider, ToolDefinition};
+use crate::provider::{ModelConfig, ProviderRegistry, StreamConfig, StreamEvent, StreamProvider, ToolDefinition};
 use crate::types::*;
 use std::sync::Arc;
 
@@ -116,17 +116,19 @@ use tracing::warn;
 /// All hook fields are `Option<Arc<dyn Fn(...)>>`. `None` means "no hook" (zero overhead).
 /// See the module-level doc for the guaranteed ordering relative to [`AgentEvent`]s.
 pub struct AgentLoopConfig {
-    pub provider: Arc<dyn StreamProvider>,
-    pub model: String,
-    pub api_key: String,
+    /// Complete provider identity: model id, api_key, base_url, protocol, compat flags, cost rates.
+    /// The agent loop resolves the concrete `StreamProvider` from `model_config.api` via
+    /// `ProviderRegistry`. Set `provider_override` to bypass the registry for custom providers.
+    pub model_config: ModelConfig,
+
+    /// Custom provider override. When `Some`, bypasses `ProviderRegistry` dispatch and uses
+    /// this provider directly. Useful for testing (`MockProvider`) or custom implementations.
+    /// When `None` (the default), the provider is resolved from `model_config.api`.
+    pub provider_override: Option<Arc<dyn StreamProvider>>,
+
     pub thinking_level: ThinkingLevel,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
-
-    /// Optional model configuration for multi-provider support.
-    /// When set, passed through to StreamConfig so providers can use
-    /// base_url, headers, compat flags, etc.
-    pub model_config: Option<ModelConfig>,
 
     /// Convert AgentMessage[] → Message[] before each LLM call.
     /// Default: keep only LLM-compatible messages.
@@ -149,8 +151,8 @@ pub struct AgentLoopConfig {
     pub compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
 
     /// Execution limits (max turns, tokens, duration, cost).
-    /// Cost enforcement requires `cost_config` to be set — without pricing rates
-    /// `ExecutionLimits.max_cost` has no effect (accumulated cost stays 0.0).
+    /// Cost is tracked automatically using `model_config.cost` rates after each turn.
+    /// `ExecutionLimits.max_cost` enforcement is active whenever rates are non-zero.
     pub execution_limits: Option<ExecutionLimits>,
 
     /// Prompt caching configuration.
@@ -191,12 +193,6 @@ pub struct AgentLoopConfig {
     /// Filters run in order; first `Reject` wins and discards any accumulated
     /// warnings. `Warn` messages accumulate and are appended to the user message.
     pub input_filters: Vec<Arc<dyn InputFilter>>, // from types.rs
-
-    /// Pricing rates used to compute per-turn cost for budget enforcement.
-    /// When set, `estimated_cost()` is called after each turn and the result is
-    /// forwarded to `ExecutionTracker`. Required for `ExecutionLimits.max_cost` to
-    /// have any effect — without rates, accumulated cost is always 0.0.
-    pub cost_config: Option<CostConfig>,
 
     /// The trigger type for the first TurnStart event in this run.
     /// Defaults to `TurnTrigger::User`; set to `SubAgent` by sub-agent callers.
@@ -650,11 +646,9 @@ async fn run_loop(
                     loop_usage.cache_read += usage.cache_read;
                     loop_usage.cache_write += usage.cache_write;
                     loop_usage.total_tokens += usage.total_tokens;
-                    // Record cost for budget enforcement
-                    if let Some(ref cost_cfg) = config.cost_config {
-                        if let Some(ref mut t) = tracker {
-                            t.record_cost(usage.estimated_cost(cost_cfg));
-                        }
+                    // Record cost for budget enforcement (rates from model_config.cost; zero if not set)
+                    if let Some(ref mut t) = tracker {
+                        t.record_cost(usage.estimated_cost(&config.model_config.cost));
                     }
                     // TurnEnd fires BEFORE after_turn
                     tx.send(AgentEvent::TurnEnd {
@@ -732,11 +726,9 @@ async fn run_loop(
             loop_usage.cache_read += turn_usage.cache_read;
             loop_usage.cache_write += turn_usage.cache_write;
             loop_usage.total_tokens += turn_usage.total_tokens;
-            // Record cost for budget enforcement
-            if let Some(ref cost_cfg) = config.cost_config {
-                if let Some(ref mut t) = tracker {
-                    t.record_cost(turn_usage.estimated_cost(cost_cfg));
-                }
+            // Record cost for budget enforcement (rates from model_config.cost; zero if not set)
+            if let Some(ref mut t) = tracker {
+                t.record_cost(turn_usage.estimated_cost(&config.model_config.cost));
             }
 
             // TurnEnd fires BEFORE after_turn
@@ -884,19 +876,41 @@ async fn stream_assistant_response(
       if isinstance(result, Err) and result.is_retryable() and attempt < max:
           ...
     */
+    // Resolve provider: use override if set, else dispatch via registry.
+    // ProviderRegistry is built inline — all 7 built-in providers are ZSTs, so this is near-zero cost.
+    let registry = ProviderRegistry::default();
+    let provider: &dyn StreamProvider = match config.provider_override.as_deref() {
+        Some(p) => p,
+        None => match registry.get(&config.model_config.api) {
+            Some(p) => p,
+            None => {
+                return Message::Assistant {
+                    content: vec![Content::Text { text: String::new() }],
+                    stop_reason: StopReason::Error,
+                    model: config.model_config.id.clone(),
+                    provider: String::new(),
+                    usage: Usage::default(),
+                    timestamp: now_ms(),
+                    error_message: Some(format!(
+                        "No provider registered for protocol: {}",
+                        config.model_config.api
+                    )),
+                };
+            }
+        },
+    };
+
     let retry = &config.retry_config;
     let mut attempt = 0;
     let (result, mut stream_rx) = loop {
         let stream_config = StreamConfig {
-            model: config.model.clone(),
+            model_config: config.model_config.clone(),
             system_prompt: context.system_prompt.clone(),
             messages: llm_messages.clone(),
             tools: tool_defs.clone(),
             thinking_level: config.thinking_level,
-            api_key: config.api_key.clone(),
             max_tokens: config.max_tokens,
             temperature: config.temperature,
-            model_config: config.model_config.clone(),
             cache_config: config.cache_config.clone(),
         };
 
@@ -905,8 +919,7 @@ async fn stream_assistant_response(
         let (stream_tx, stream_rx) = mpsc::unbounded_channel();
         let provider_cancel = cancel.clone();
 
-        let result = config
-            .provider
+        let result = provider
             .stream(stream_config, stream_tx, provider_cancel)
             .await; // .await suspends here until the SSE stream completes
 
@@ -955,7 +968,7 @@ async fn stream_assistant_response(
                 let placeholder = AgentMessage::Llm(Message::Assistant {
                     content: Vec::new(),
                     stop_reason: StopReason::Stop,
-                    model: config.model.clone(),
+                    model: config.model_config.id.clone(),
                     provider: String::new(),
                     usage: Usage::default(),
                     timestamp: now_ms(),
@@ -1041,7 +1054,7 @@ async fn stream_assistant_response(
                     text: String::new(), // empty — the error lives in error_message
                 }],
                 stop_reason: StopReason::Error,
-                model: config.model.clone(),
+                model: config.model_config.id.clone(),
                 provider: "unknown".into(), // .into() converts &str → String
                 usage: Usage::default(),
                 timestamp: now_ms(),

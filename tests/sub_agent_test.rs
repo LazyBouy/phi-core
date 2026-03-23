@@ -2,7 +2,7 @@
 
 use phi_core::agent_loop::{agent_loop, AgentLoopConfig};
 use phi_core::provider::mock::*;
-use phi_core::provider::MockProvider;
+use phi_core::provider::{ModelConfig, MockProvider};
 use phi_core::agents::SubAgentTool;
 use phi_core::*;
 use std::sync::Arc;
@@ -11,13 +11,11 @@ use tokio_util::sync::CancellationToken;
 
 fn make_config(provider: Arc<dyn phi_core::provider::StreamProvider>) -> AgentLoopConfig {
     AgentLoopConfig {
-        provider,
-        model: "mock".into(),
-        api_key: "test".into(),
+        model_config: ModelConfig::anthropic("mock", "mock", "test"),
+        provider_override: Some(provider),
         thinking_level: ThinkingLevel::Off,
         max_tokens: None,
         temperature: None,
-        model_config: None,
         convert_to_llm: None,
         transform_context: None,
         get_steering_messages: None,
@@ -38,7 +36,6 @@ fn make_config(provider: Arc<dyn phi_core::provider::StreamProvider>) -> AgentLo
         before_tool_execution_update: None,
         after_tool_execution_update: None,
         input_filters: vec![],
-        cost_config: None,
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
     }
@@ -61,11 +58,10 @@ async fn test_sub_agent_basic() {
     // The sub-agent's mock provider returns a simple text response
     let sub_provider = Arc::new(MockProvider::text("Research result: Rust is great"));
 
-    let sub_agent = SubAgentTool::new("researcher", sub_provider)
+    let sub_agent = SubAgentTool::new("researcher", ModelConfig::anthropic("mock", "mock", "test"))
+        .with_provider_override(sub_provider)
         .with_description("Researches topics")
-        .with_system_prompt("You are a research assistant.")
-        .with_model("mock")
-        .with_api_key("test");
+        .with_system_prompt("You are a research assistant.");
 
     // Execute the sub-agent tool directly
     let params = serde_json::json!({"task": "Tell me about Rust"});
@@ -149,11 +145,10 @@ async fn test_sub_agent_with_tools() {
 
     let echo_tool: Arc<dyn AgentTool> = Arc::new(EchoTool);
 
-    let sub_agent = SubAgentTool::new("echo_agent", sub_provider)
+    let sub_agent = SubAgentTool::new("echo_agent", ModelConfig::anthropic("mock", "mock", "test"))
+        .with_provider_override(sub_provider)
         .with_description("Agent that echoes")
         .with_system_prompt("Use the echo tool.")
-        .with_model("mock")
-        .with_api_key("test")
         .with_tools(vec![echo_tool]);
 
     let params = serde_json::json!({"task": "Echo hello"});
@@ -188,9 +183,8 @@ async fn test_sub_agent_cancellation() {
     // Sub-agent provider returns text, but we cancel before execution
     let sub_provider = Arc::new(MockProvider::text("Should not appear"));
 
-    let sub_agent = SubAgentTool::new("cancelled_agent", sub_provider)
-        .with_model("mock")
-        .with_api_key("test");
+    let sub_agent = SubAgentTool::new("cancelled_agent", ModelConfig::anthropic("mock", "mock", "test"))
+        .with_provider_override(sub_provider);
 
     let cancel = CancellationToken::new();
     cancel.cancel(); // Cancel immediately
@@ -244,9 +238,8 @@ async fn test_sub_agent_max_turns() {
 
     let echo_tool: Arc<dyn AgentTool> = Arc::new(EchoTool);
 
-    let sub_agent = SubAgentTool::new("limited_agent", sub_provider)
-        .with_model("mock")
-        .with_api_key("test")
+    let sub_agent = SubAgentTool::new("limited_agent", ModelConfig::anthropic("mock", "mock", "test"))
+        .with_provider_override(sub_provider)
         .with_tools(vec![echo_tool])
         .with_max_turns(1); // Only 1 turn allowed
 
@@ -330,23 +323,21 @@ async fn test_sub_agent_parallel() {
 
     let sub_a = SubAgentTool::new(
         "agent_a",
-        Arc::new(SlowProvider {
-            delay_ms: 50,
-            text: "Result A".into(),
-        }),
+        ModelConfig::anthropic("slow", "slow", "test"),
     )
-    .with_model("slow")
-    .with_api_key("test");
+    .with_provider_override(Arc::new(SlowProvider {
+        delay_ms: 50,
+        text: "Result A".into(),
+    }));
 
     let sub_b = SubAgentTool::new(
         "agent_b",
-        Arc::new(SlowProvider {
-            delay_ms: 50,
-            text: "Result B".into(),
-        }),
+        ModelConfig::anthropic("slow", "slow", "test"),
     )
-    .with_model("slow")
-    .with_api_key("test");
+    .with_provider_override(Arc::new(SlowProvider {
+        delay_ms: 50,
+        text: "Result B".into(),
+    }));
 
     // Parent provider: first call triggers both sub-agents, second returns final text
     let parent_provider = MockProvider::new(vec![
@@ -409,9 +400,8 @@ async fn test_sub_agent_parallel() {
 async fn test_sub_agent_event_forwarding() {
     let sub_provider = Arc::new(MockProvider::text("Sub-agent done"));
 
-    let sub_agent = SubAgentTool::new("streaming_agent", sub_provider)
-        .with_model("mock")
-        .with_api_key("test");
+    let sub_agent = SubAgentTool::new("streaming_agent", ModelConfig::anthropic("mock", "mock", "test"))
+        .with_provider_override(sub_provider);
 
     let params = serde_json::json!({"task": "Do work"});
 
@@ -467,9 +457,8 @@ async fn test_sub_agent_event_forwarding() {
 async fn test_sub_agent_missing_task_parameter() {
     let sub_provider = Arc::new(MockProvider::text("Should not run"));
 
-    let sub_agent = SubAgentTool::new("test_agent", sub_provider)
-        .with_model("mock")
-        .with_api_key("test");
+    let sub_agent = SubAgentTool::new("test_agent", ModelConfig::anthropic("mock", "mock", "test"))
+        .with_provider_override(sub_provider);
 
     let params = serde_json::json!({}); // Missing "task"
 
@@ -502,10 +491,9 @@ async fn test_sub_agent_in_parent_loop() {
     // Parent calls sub-agent, sub-agent returns text, parent summarizes
     let sub_provider = Arc::new(MockProvider::text("42 is the answer"));
 
-    let sub_agent = SubAgentTool::new("calculator", sub_provider)
-        .with_description("Calculates things")
-        .with_model("mock")
-        .with_api_key("test");
+    let sub_agent = SubAgentTool::new("calculator", ModelConfig::anthropic("mock", "mock", "test"))
+        .with_provider_override(sub_provider)
+        .with_description("Calculates things");
 
     let parent_provider = MockProvider::new(vec![
         MockResponse::ToolCalls(vec![MockToolCall {

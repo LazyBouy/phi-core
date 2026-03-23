@@ -26,7 +26,7 @@ inputs as parameters and return outputs. They have no hidden state.
 The BasicAgent struct is an OPTIONAL stateful wrapper that owns:
   - Message history (Vec<AgentMessage>) — the conversation so far
   - Tools (Vec<Box<dyn AgentTool>>) — registered capabilities
-  - Provider (Box<dyn StreamProvider>) — the LLM backend
+  - ModelConfig — complete provider identity: id, api_key, base_url, api protocol, cost rates
   - Steering/follow-up queues (Arc<Mutex<>>) — for mid-run interrupts
 
 Why this separation?
@@ -35,9 +35,8 @@ Why this separation?
   - You can use agent_loop() directly if you need more control
 
 The BasicAgent uses the BUILDER PATTERN for construction:
-  BasicAgent::new(provider)
+  BasicAgent::new(ModelConfig::anthropic("claude-sonnet-4-20250514", "Claude Sonnet 4", &key))
       .with_system_prompt("...")
-      .with_model("claude-3")
       .with_tools(vec![...])
 
 Each `with_*` method takes `mut self` and returns `Self` — consuming and
@@ -52,14 +51,15 @@ Python analogy: it's like a fluent API but ownership-safe.
 pub struct BasicAgent {
     // -- Public configuration (readable/overridable externally) --
     pub system_prompt: String,
-    pub model: String,
-    pub api_key: String,
+    pub model_config: ModelConfig, // complete provider identity: model id, api_key, base_url, cost rates
+    /// Optional provider override. When set, bypasses `ProviderRegistry` dispatch.
+    /// Used primarily in tests to inject a `MockProvider`.
+    pub provider_override: Option<Arc<dyn StreamProvider>>,
     pub thinking_level: ThinkingLevel,
-    pub max_tokens: Option<u32>,  // None = use provider default
+    pub max_tokens: Option<u32>,  // None = use model_config.max_tokens
     pub temperature: Option<f32>, // None = use provider default
 
     // -- Private configuration (only mutated via builder methods) --
-    model_config: Option<ModelConfig>,
     messages: Vec<AgentMessage>, // full conversation history
 
     /*
@@ -80,19 +80,6 @@ pub struct BasicAgent {
     doesn't need explicit boxing because all objects are already heap-allocated.
     */
     tools: Vec<Box<dyn AgentTool>>,
-
-    /*
-    RUST QUIRK: `Arc<dyn StreamProvider>` — shared ownership for the provider
-
-    `AgentLoopConfig.provider` requires `Arc<dyn StreamProvider>` (shared ownership)
-    because the config is passed into async closures that may outlive the current stack frame.
-    BasicAgent therefore stores the provider as `Arc` so it can cheaply clone the pointer
-    into `build_config()` without moving or copying the underlying provider.
-
-    `Arc::clone()` just bumps an atomic reference count — cheap, no data duplication.
-    Python analogy: storing any object reference; Python objects are already reference-counted.
-    */
-    provider: Arc<dyn StreamProvider>,
 
     /*
     RUST QUIRK: `Arc<Mutex<Vec<AgentMessage>>>` — shared mutable state across threads
@@ -176,37 +163,16 @@ pub struct BasicAgent {
 }
 
 impl BasicAgent {
-    /*
-    RUST QUIRK: `impl StreamProvider + 'static` — accepting any concrete type
-
-    `impl Trait` in function parameters means "accept any type that implements this trait"
-    without needing a generic type parameter `<T: StreamProvider>`.
-
-    `+ 'static` means "the type must not contain any non-static references" —
-    i.e., it must own all its data (no borrowed references that could dangle).
-    Required because we store it in `Box<dyn StreamProvider>`, which may outlive
-    the call site. All owned types (structs with no &-references) are 'static.
-
-    `Box::new(provider)` — move the provider onto the heap and erase its concrete type.
-    After this, we only know it's "some StreamProvider" — dynamic dispatch from here on.
-
-    Python analogy:
-      def __init__(self, provider: StreamProvider):
-          self.provider = provider
-    No boxing needed because Python objects are already heap-allocated.
-    */
-    pub fn new(provider: impl StreamProvider + 'static) -> Self {
+    pub fn new(model_config: ModelConfig) -> Self {
         Self {
+            model_config,
+            provider_override: None,
             system_prompt: String::new(),
-            model: String::new(),
-            api_key: String::new(),
             thinking_level: ThinkingLevel::Off,
             max_tokens: None,
             temperature: None,
-            model_config: None,
             messages: Vec::new(),
             tools: Vec::new(),
-            provider: Arc::new(provider), // erase concrete type, store as trait object
             steering_queue: Arc::new(Mutex::new(Vec::new())), // empty, shared with closures
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),
             steering_mode: QueueMode::OneAtATime,
@@ -254,16 +220,6 @@ impl BasicAgent {
         self
     }
 
-    pub fn with_model(mut self, model: impl Into<String>) -> Self {
-        self.model = model.into();
-        self
-    }
-
-    pub fn with_api_key(mut self, key: impl Into<String>) -> Self {
-        self.api_key = key.into();
-        self
-    }
-
     pub fn with_thinking(mut self, level: ThinkingLevel) -> Self {
         self.thinking_level = level;
         self
@@ -275,7 +231,14 @@ impl BasicAgent {
     }
 
     pub fn with_model_config(mut self, config: ModelConfig) -> Self {
-        self.model_config = Some(config);
+        self.model_config = config;
+        self
+    }
+
+    /// Override the provider used by the agent loop, bypassing `ProviderRegistry` dispatch.
+    /// Primarily used in tests to inject a `MockProvider`.
+    pub fn with_provider_override(mut self, provider: Arc<dyn StreamProvider>) -> Self {
+        self.provider_override = Some(provider);
         self
     }
 
@@ -541,8 +504,8 @@ impl BasicAgent {
             };
             format!(
                 "{}.{}{}",
-                config.provider.provider_id(),
-                slugify(&config.model),
+                config.model_config.provider,
+                slugify(&config.model_config.id),
                 thinking_part
             )
         };
@@ -587,13 +550,11 @@ impl BasicAgent {
         let follow_up_mode = self.follow_up_mode;
 
         AgentLoopConfig {
-            provider: self.provider.clone(), // Arc::clone — cheap reference count bump
-            model: self.model.clone(),
-            api_key: self.api_key.clone(),
+            model_config: self.model_config.clone(),
+            provider_override: self.provider_override.clone(),
             thinking_level: self.thinking_level,
             max_tokens: self.max_tokens,
             temperature: self.temperature,
-            model_config: self.model_config.clone(),
             convert_to_llm: None,
             transform_context: None,
             get_steering_messages: Some(Box::new(move || {
@@ -640,7 +601,6 @@ impl BasicAgent {
             after_tool_execution_update: None,
             on_error: self.on_error.clone(),
             input_filters: self.input_filters.clone(),
-            cost_config: None,
             first_turn_trigger: TurnTrigger::User,
             config_id: None, // auto-derived in next_loop_id() from provider + model + thinking_level
         }

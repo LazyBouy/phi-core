@@ -68,27 +68,24 @@ impl StreamProvider for BedrockProvider {
         tx: mpsc::UnboundedSender<StreamEvent>, // OBSERVER — receives events from ConverseStream binary framing
         cancel: tokio_util::sync::CancellationToken, // ABORT — races against ConverseStream
     ) -> Result<Message, ProviderError> {
-        let model_config = config
-            .model_config
-            .as_ref()
-            .ok_or_else(|| ProviderError::Other("ModelConfig required".into()))?;
+        let model_config = &config.model_config;
 
         let base_url = &model_config.base_url;
-        let url = format!("{}/model/{}/converse-stream", base_url, config.model);
+        let url = format!("{}/model/{}/converse-stream", base_url, config.model_config.id);
 
         let body = build_bedrock_body(&config);
-        debug!("Bedrock request: model={} url={}", config.model, url);
+        debug!("Bedrock request: model={} url={}", config.model_config.id, url);
 
         /*
-        RUST QUIRK: `config.api_key.splitn(3, ':').collect::<Vec<&str>>()`
+        RUST QUIRK: `config.model_config.api_key.splitn(3, ':').collect::<Vec<&str>>()`
 
         `.splitn(n, delimiter)` — split into at most n parts (see module doc above).
         `.collect::<Vec<&str>>()` — turbofish: collect into a Vec<&str> (borrowed slices
-          into config.api_key's underlying String; valid as long as config is alive).
+          into config.model_config.api_key's underlying String; valid as long as config is alive).
         `parts.len() < 2` — validate we got at least access_key AND secret_key.
         Python analogy: `parts = api_key.split(":", 2)` + `if len(parts) < 2: raise ...`
         */
-        let parts: Vec<&str> = config.api_key.splitn(3, ':').collect();
+        let parts: Vec<&str> = config.model_config.api_key.splitn(3, ':').collect();
         if parts.len() < 2 {
             return Err(ProviderError::Auth(
                 "Bedrock api_key must be 'access_key:secret_key[:session_token]'".into(),
@@ -108,7 +105,7 @@ impl StreamProvider for BedrockProvider {
         // If no auth headers provided, try basic Bearer auth as fallback
         // (works with some Bedrock proxy configurations)
         if !model_config.headers.contains_key("authorization") {
-            request = request.header("authorization", format!("Bearer {}", config.api_key));
+            request = request.header("authorization", format!("Bearer {}", config.model_config.api_key));
         }
 
         let response = request
@@ -241,7 +238,7 @@ impl StreamProvider for BedrockProvider {
         let message = Message::Assistant {
             content,
             stop_reason,
-            model: config.model.clone(),
+            model: config.model_config.id.clone(),
             provider: model_config.provider.clone(),
             usage,
             timestamp: now_ms(),
@@ -438,15 +435,17 @@ mod tests {
     #[test]
     fn test_build_bedrock_body() {
         let config = StreamConfig {
-            model: "anthropic.claude-3-sonnet-20240229-v1:0".into(),
+            model_config: crate::provider::ModelConfig::anthropic(
+                "anthropic.claude-3-sonnet-20240229-v1:0",
+                "Claude Sonnet",
+                "key:secret",
+            ),
             system_prompt: "Be helpful".into(),
             messages: vec![Message::user("Hello")],
             tools: vec![],
             thinking_level: ThinkingLevel::Off,
-            api_key: "key:secret".into(),
             max_tokens: Some(1024),
             temperature: None,
-            model_config: None,
             cache_config: CacheConfig::default(),
         };
 

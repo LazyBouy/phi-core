@@ -20,7 +20,7 @@
 //!   /model <name>   Switch model mid-session
 
 use phi_core::BasicAgent;
-use phi_core::provider::{AnthropicProvider, ModelConfig, OpenAiCompatProvider};
+use phi_core::provider::ModelConfig;
 use phi_core::skills::SkillSet;
 use phi_core::tools::default_tools;
 use phi_core::*;
@@ -97,14 +97,12 @@ async fn main() {
     };
 
     let mut agent = if let Some(ref url) = api_url {
-        BasicAgent::new(OpenAiCompatProvider).with_model_config(ModelConfig::local(url, &model))
+        BasicAgent::new(ModelConfig::local(url, &model, ""))
     } else {
-        BasicAgent::new(AnthropicProvider)
+        BasicAgent::new(ModelConfig::anthropic(&model, &model, &api_key))
     };
     agent = agent
         .with_system_prompt(SYSTEM_PROMPT)
-        .with_model(&model)
-        .with_api_key(&api_key)
         .with_skills(skills.clone())
         .with_tools(default_tools());
 
@@ -154,15 +152,12 @@ async fn main() {
             s if s.starts_with("/model ") => {
                 let new_model = s.trim_start_matches("/model ").trim();
                 agent = if let Some(ref url) = api_url {
-                    BasicAgent::new(OpenAiCompatProvider)
-                        .with_model_config(ModelConfig::local(url, new_model))
+                    BasicAgent::new(ModelConfig::local(url, new_model, ""))
                 } else {
-                    BasicAgent::new(AnthropicProvider)
+                    BasicAgent::new(ModelConfig::anthropic(new_model, new_model, &api_key))
                 };
                 agent = agent
                     .with_system_prompt(SYSTEM_PROMPT)
-                    .with_model(new_model)
-                    .with_api_key(&api_key)
                     .with_skills(skills.clone())
                     .with_tools(default_tools());
                 println!("{DIM}  (switched to {new_model}, conversation cleared){RESET}\n");

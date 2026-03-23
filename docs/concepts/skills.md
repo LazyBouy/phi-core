@@ -44,26 +44,34 @@ For complex diffs: `bash {baseDir}/scripts/diff_summary.sh`
 ## Loading skills
 
 ```rust
-use phi-core::SkillSet;
+use phi_core::SkillSet;
+use std::path::PathBuf;
 
 // Load from multiple directories (later dirs override earlier on name conflict)
-let skills = SkillSet::load(&["./skills", "~/.phi-core/skills"])?;
+let skills = SkillSet::load(&[PathBuf::from("./skills"), PathBuf::from("~/.phi-core/skills")]);
 
 // Or load from a single directory with a label
-let workspace_skills = SkillSet::load_dir("./skills", "workspace")?;
+let workspace_skills = SkillSet::load_dir("./skills", "workspace");
 ```
 
 ## Using with Agent
 
 ```rust
-use phi-core::{Agent, SkillSet};
+use phi_core::{BasicAgent, SkillSet};
+use phi_core::provider::ModelConfig;
+use std::path::PathBuf;
 
-let skills = SkillSet::load(&["./skills"])?;
+let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
+let skills = SkillSet::load(&[PathBuf::from("./skills")]);
 
-let agent = Agent::new(provider)
-    .with_system_prompt("You are a coding assistant.")
-    .with_skills(skills)  // Appends skill index to system prompt
-    .with_tools(tools);
+let agent = BasicAgent::new(ModelConfig::anthropic(
+    "claude-sonnet-4-20250514",
+    "Claude Sonnet 4",
+    &api_key,
+))
+.with_system_prompt("You are a coding assistant.")
+.with_skills(skills)  // Appends skill index to system prompt
+.with_tools(tools);
 ```
 
 The agent's system prompt will include:

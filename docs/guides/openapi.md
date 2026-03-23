@@ -7,21 +7,24 @@ Auto-generate `AgentTool` implementations from OpenAPI 3.0 specs. Point an agent
 ## Quick Start
 
 ```rust
-use phi-core::Agent;
-use phi-core::openapi::{OpenApiToolAdapter, OpenApiConfig, OperationFilter};
-use phi-core::provider::AnthropicProvider;
+use phi_core::BasicAgent;
+use phi_core::openapi::{OpenApiToolAdapter, OpenApiConfig, OperationFilter};
+use phi_core::provider::ModelConfig;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let api_key = std::env::var("ANTHROPIC_API_KEY")?;
     let config = OpenApiConfig::new()
         .with_bearer_token("sk-...");
 
-    let agent = Agent::new(AnthropicProvider)
-        .with_system_prompt("You are an API assistant.")
-        .with_model("claude-sonnet-4-20250514")
-        .with_api_key(std::env::var("ANTHROPIC_API_KEY")?)
-        .with_openapi_file("petstore.yaml", config, &OperationFilter::All)
-        .await?;
+    let agent = BasicAgent::new(ModelConfig::anthropic(
+        "claude-sonnet-4-20250514",
+        "Claude Sonnet 4",
+        &api_key,
+    ))
+    .with_system_prompt("You are an API assistant.")
+    .with_openapi_file("petstore.yaml", config, &OperationFilter::All)
+    .await?;
 
     Ok(())
 }
@@ -125,9 +128,9 @@ Non-2xx responses are **not** treated as errors — they're returned as text so 
 OpenAPI tools work alongside built-in tools and MCP tools:
 
 ```rust
-use phi-core::tools::default_tools;
+use phi_core::tools::default_tools;
 
-let agent = Agent::new(provider)
+let agent = BasicAgent::new(model_config)
     .with_tools(default_tools())
     .with_openapi_file("github.yaml", github_config, &github_filter).await?
     .with_mcp_server_stdio("db-server", &[], None).await?;

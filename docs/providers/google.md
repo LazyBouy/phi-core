@@ -2,17 +2,21 @@
 
 Two providers for Google's Gemini models:
 
-- `GoogleProvider` — Google AI Studio (Generative AI API)
-- `GoogleVertexProvider` — Google Cloud Vertex AI
+- `GoogleProvider` — Google AI Studio (Generative AI API) via `ApiProtocol::GoogleGenerativeAi`
+- `GoogleVertexProvider` — Google Cloud Vertex AI via `ApiProtocol::GoogleVertex`
 
 ## Google AI Studio
 
 ```rust
-use phi-core::provider::GoogleProvider;
+use phi_core::BasicAgent;
+use phi_core::provider::ModelConfig;
 
-let agent = Agent::new(GoogleProvider)
-    .with_model("gemini-2.0-flash")
-    .with_api_key(std::env::var("GOOGLE_API_KEY").unwrap());
+let api_key = std::env::var("GOOGLE_API_KEY").unwrap();
+let agent = BasicAgent::new(ModelConfig::google(
+    "gemini-2.0-flash",
+    "Gemini 2.0 Flash",
+    &api_key,
+));
 ```
 
 ### API Details
@@ -45,6 +49,23 @@ Uses SSE format (`alt=sse`). Each chunk contains `candidates` with `content.part
 
 `GoogleVertexProvider` uses the same message format but with Vertex AI authentication and endpoints.
 
+```rust
+use phi_core::BasicAgent;
+use phi_core::provider::{ModelConfig, ApiProtocol};
+
+// Vertex AI uses OAuth2 Bearer tokens as the api_key
+let access_token = get_access_token(); // your OAuth2 helper
+let agent = BasicAgent::new(ModelConfig {
+    id: "gemini-2.0-flash".into(),
+    name: "Gemini 2.0 Flash (Vertex)".into(),
+    api: ApiProtocol::GoogleVertex,
+    provider: "google_vertex".into(),
+    base_url: "https://us-central1-aiplatform.googleapis.com".into(),
+    api_key: access_token,
+    ..Default::default()
+});
+```
+
 - **Protocol**: `ApiProtocol::GoogleVertex`
-- **Auth**: OAuth2 / service account credentials
+- **Auth**: OAuth2 / service account credentials (Bearer token in `api_key`)
 - **Endpoint pattern**: `https://{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/{region}/publishers/google/models/{model}:streamGenerateContent`

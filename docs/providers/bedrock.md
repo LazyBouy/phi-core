@@ -1,15 +1,25 @@
 # Amazon Bedrock Provider
 
-`BedrockProvider` implements the AWS Bedrock ConverseStream API.
+Handles the AWS Bedrock ConverseStream API. Selected automatically when
+`ModelConfig.api == ApiProtocol::BedrockConverseStream`.
 
 ## Usage
 
 ```rust
-use phi-core::provider::BedrockProvider;
+use phi_core::BasicAgent;
+use phi_core::provider::{ModelConfig, ApiProtocol};
 
-let agent = Agent::new(BedrockProvider)
-    .with_model("anthropic.claude-3-sonnet-20240229-v1:0")
-    .with_api_key("ACCESS_KEY:SECRET_KEY");  // or ACCESS_KEY:SECRET_KEY:SESSION_TOKEN
+// With static credentials in api_key: "ACCESS_KEY:SECRET_KEY" or "ACCESS_KEY:SECRET_KEY:SESSION_TOKEN"
+let creds = std::env::var("AWS_BEDROCK_CREDENTIALS").unwrap_or_default();
+let agent = BasicAgent::new(ModelConfig {
+    id: "anthropic.claude-3-sonnet-20240229-v1:0".into(),
+    name: "Claude Sonnet (Bedrock)".into(),
+    api: ApiProtocol::BedrockConverseStream,
+    provider: "bedrock".into(),
+    base_url: "https://bedrock-runtime.us-east-1.amazonaws.com".into(),
+    api_key: creds, // "access_key:secret_key[:session_token]", or "" for IAM roles
+    ..Default::default()
+});
 ```
 
 ## Authentication
@@ -21,7 +31,8 @@ The `api_key` field uses a colon-separated format:
 {access_key_id}:{secret_access_key}:{session_token}
 ```
 
-Alternatively, provide pre-computed auth headers via `ModelConfig.headers` or use an IAM proxy that handles SigV4 signing.
+For IAM roles (e.g., EC2 instance profiles, ECS task roles), pass an empty `api_key` and provide
+pre-computed `Authorization` headers via `ModelConfig.headers`.
 
 ## API Details
 

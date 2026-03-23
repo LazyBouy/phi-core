@@ -51,23 +51,20 @@ impl StreamProvider for OpenAiResponsesProvider {
         tx: mpsc::UnboundedSender<StreamEvent>, // OBSERVER — receives events; no [DONE] sentinel (stream just closes)
         cancel: tokio_util::sync::CancellationToken, // ABORT — races against SSE stream
     ) -> Result<Message, ProviderError> {
-        let model_config = config
-            .model_config
-            .as_ref()
-            .ok_or_else(|| ProviderError::Other("ModelConfig required".into()))?;
+        let model_config = &config.model_config;
 
         let url = format!("{}/responses", model_config.base_url);
         let body = build_request_body(&config, model_config);
         debug!(
             "OpenAI Responses request: model={} url={}",
-            config.model, url
+            config.model_config.id, url
         );
 
         let client = reqwest::Client::new();
         let mut request = client
             .post(&url)
             .header("content-type", "application/json")
-            .header("authorization", format!("Bearer {}", config.api_key));
+            .header("authorization", format!("Bearer {}", config.model_config.api_key));
 
         for (k, v) in &model_config.headers {
             request = request.header(k, v);
@@ -202,7 +199,7 @@ impl StreamProvider for OpenAiResponsesProvider {
                                     let err_msg = Message::Assistant {
                                         content: vec![Content::Text { text: String::new() }],
                                         stop_reason: StopReason::Error,
-                                        model: config.model.clone(),
+                                        model: config.model_config.id.clone(),
                                         provider: model_config.provider.clone(),
                                         usage: usage.clone(),
                                         timestamp: now_ms(),
@@ -222,7 +219,7 @@ impl StreamProvider for OpenAiResponsesProvider {
                             let err_msg = Message::Assistant {
                                 content: vec![Content::Text { text: String::new() }],
                                 stop_reason: StopReason::Error,
-                                model: config.model.clone(),
+                                model: config.model_config.id.clone(),
                                 provider: model_config.provider.clone(),
                                 usage: usage.clone(),
                                 timestamp: now_ms(),
@@ -257,7 +254,7 @@ impl StreamProvider for OpenAiResponsesProvider {
         let message = Message::Assistant {
             content,
             stop_reason,
-            model: config.model.clone(),
+            model: config.model_config.id.clone(),
             provider: model_config.provider.clone(),
             usage,
             timestamp: now_ms(),
@@ -384,7 +381,7 @@ fn build_request_body(
     }
 
     let mut body = serde_json::json!({
-        "model": config.model,
+        "model": config.model_config.id,
         "stream": true,
         "input": input,
     });

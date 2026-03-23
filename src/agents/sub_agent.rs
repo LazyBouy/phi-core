@@ -15,19 +15,19 @@
 //!
 //! ```rust,no_run
 //! use phi_core::agents::SubAgentTool;
-//! use phi_core::provider::AnthropicProvider;
-//! use std::sync::Arc;
+//! use phi_core::provider::ModelConfig;
 //!
-//! let researcher = SubAgentTool::new("researcher", Arc::new(AnthropicProvider))
-//!     .with_description("Searches codebases and documents")
-//!     .with_system_prompt("You are a research assistant.")
-//!     .with_model("claude-sonnet-4-20250514")
-//!     .with_api_key("sk-...");
+//! let researcher = SubAgentTool::new(
+//!     "researcher",
+//!     ModelConfig::anthropic("claude-sonnet-4-20250514", "Claude Sonnet 4", "sk-..."),
+//! )
+//! .with_description("Searches codebases and documents")
+//! .with_system_prompt("You are a research assistant.");
 //! ```
 
 use crate::agent_loop::{agent_loop, AgentLoopConfig};
 use crate::context::ExecutionLimits;
-use crate::provider::StreamProvider;
+use crate::provider::{ModelConfig, StreamProvider};
 use crate::types::*;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -44,9 +44,8 @@ pub struct SubAgentTool {
     tool_name: String,
     tool_description: String,
     system_prompt: String,
-    model: String,
-    api_key: String,
-    provider: Arc<dyn StreamProvider>,
+    model_config: ModelConfig,
+    provider_override: Option<Arc<dyn StreamProvider>>,
     tools: Vec<Arc<dyn AgentTool>>,
     thinking_level: ThinkingLevel,
     max_tokens: Option<u32>,
@@ -61,16 +60,15 @@ pub struct SubAgentTool {
 }
 
 impl SubAgentTool {
-    /// Create a new sub-agent tool with a name and provider.
-    pub fn new(name: impl Into<String>, provider: Arc<dyn StreamProvider>) -> Self {
+    /// Create a new sub-agent tool with a name and model config.
+    pub fn new(name: impl Into<String>, model_config: ModelConfig) -> Self {
         let name = name.into();
         Self {
             tool_description: format!("Delegate a task to the '{}' sub-agent", name),
             tool_name: name,
             system_prompt: String::new(),
-            model: String::new(),
-            api_key: String::new(),
-            provider,
+            model_config,
+            provider_override: None,
             tools: Vec::new(),
             thinking_level: ThinkingLevel::Off,
             max_tokens: None,
@@ -94,6 +92,13 @@ impl SubAgentTool {
         self
     }
 
+    /// Override the provider used by this sub-agent, bypassing `ProviderRegistry` dispatch.
+    /// Primarily used in tests to inject a `MockProvider`.
+    pub fn with_provider_override(mut self, provider: Arc<dyn StreamProvider>) -> Self {
+        self.provider_override = Some(provider);
+        self
+    }
+
     pub fn with_description(mut self, desc: impl Into<String>) -> Self {
         self.tool_description = desc.into();
         self
@@ -101,16 +106,6 @@ impl SubAgentTool {
 
     pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.system_prompt = prompt.into();
-        self
-    }
-
-    pub fn with_model(mut self, model: impl Into<String>) -> Self {
-        self.model = model.into();
-        self
-    }
-
-    pub fn with_api_key(mut self, key: impl Into<String>) -> Self {
-        self.api_key = key.into();
         self
     }
 
@@ -311,15 +306,13 @@ impl AgentTool for SubAgentTool {
             continuation_kind: None,
         };
 
-        // Config referencing the Arc'd provider
+        // Config for the sub-agent loop
         let config = AgentLoopConfig {
-            provider: self.provider.clone(),
-            model: self.model.clone(),
-            api_key: self.api_key.clone(),
+            model_config: self.model_config.clone(),
+            provider_override: self.provider_override.clone(),
             thinking_level: self.thinking_level,
             max_tokens: self.max_tokens,
             temperature: None,
-            model_config: None,
             convert_to_llm: None,
             transform_context: None,
             get_steering_messages: None,
@@ -346,7 +339,6 @@ impl AgentTool for SubAgentTool {
             after_tool_execution_update: None,
             on_error: None,
             input_filters: vec![],
-            cost_config: None,
             first_turn_trigger: TurnTrigger::SubAgent,
             config_id: None,
         };

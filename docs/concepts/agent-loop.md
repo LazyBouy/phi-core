@@ -42,7 +42,7 @@ Starts a new agent run with prompt messages:
 pub async fn agent_loop(
     prompts: Vec<AgentMessage>,
     context: &mut AgentContext,
-    config: &AgentLoopConfig<'_>,
+    config: &AgentLoopConfig,
     tx: mpsc::UnboundedSender<AgentEvent>,
     cancel: CancellationToken,
 ) -> Vec<AgentMessage>
@@ -57,7 +57,7 @@ Resumes from existing context (e.g., after an error, retry, or branch):
 ```rust
 pub async fn agent_loop_continue(
     context: &mut AgentContext,
-    config: &AgentLoopConfig<'_>,
+    config: &AgentLoopConfig,
     tx: mpsc::UnboundedSender<AgentEvent>,
     cancel: CancellationToken,
 ) -> Vec<AgentMessage>
@@ -70,15 +70,15 @@ The last message in context must also **not** be an assistant message.
 ## AgentLoopConfig
 
 ```rust
-pub struct AgentLoopConfig<'a> {
-    pub provider: &'a dyn StreamProvider,
-    pub model: String,
-    pub api_key: String,
+pub struct AgentLoopConfig {
+    /// REQUIRED — complete provider identity: model id, api_key, base_url, protocol, cost rates.
+    pub model_config: ModelConfig,
+    /// Optional override — bypasses ProviderRegistry, used for MockProvider in tests.
+    pub provider_override: Option<Arc<dyn StreamProvider>>,
     pub config_id: Option<String>,
     pub thinking_level: ThinkingLevel,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
-    pub model_config: Option<ModelConfig>,
     pub convert_to_llm: Option<ConvertToLlmFn>,
     pub transform_context: Option<TransformContextFn>,
     pub get_steering_messages: Option<GetMessagesFn>,
@@ -99,17 +99,16 @@ pub struct AgentLoopConfig<'a> {
     pub after_tool_execution_update: Option<AfterToolExecutionUpdateFn>,
     pub input_filters: Vec<Arc<dyn InputFilter>>,
     pub compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
+    pub first_turn_trigger: TurnTrigger,
 }
 ```
 
 | Field | Purpose |
 |-------|---------|
-| `provider` | The `StreamProvider` implementation to use |
-| `model` | Model identifier (e.g., `"claude-sonnet-4-20250514"`) |
-| `api_key` | API key for the provider |
+| `model_config` | **Required.** Complete provider identity: model id, api_key, base_url, api protocol, cost rates, compat flags. The provider is resolved from `model_config.api` via `ProviderRegistry`. |
+| `provider_override` | Custom `Arc<dyn StreamProvider>` — bypasses registry when `Some`. Used for `MockProvider` in tests or fully custom backends. |
 | `config_id` | Optional stable identity for this config; auto-derived as `"{provider_id}.{model_slug}[.thinking]"` when `None`. Used as the middle segment of `loop_id`. |
 | `thinking_level` | `Off`, `Minimal`, `Low`, `Medium`, `High` |
-| `model_config` | Optional `ModelConfig` for multi-provider support (base URL, headers, compat flags) |
 | `convert_to_llm` | Custom `AgentMessage[] → Message[]` conversion |
 | `transform_context` | Pre-processing hook for context pruning |
 | `get_steering_messages` | Returns user interruptions during tool execution |
@@ -202,8 +201,8 @@ let config = AgentLoopConfig {
 By default, when context exceeds the token budget in `ContextConfig`, phi-core runs a 3-level compaction strategy: truncate tool outputs → summarize old turns → drop middle messages. You can replace this with your own `CompactionStrategy`:
 
 ```rust
-use phi-core::context::{CompactionStrategy, ContextConfig, compact_messages};
-use phi-core::types::*;
+use phi_core::context::{CompactionStrategy, ContextConfig, compact_messages};
+use phi_core::types::*;
 
 struct MyCompaction;
 
@@ -218,7 +217,7 @@ impl CompactionStrategy for MyCompaction {
     }
 }
 
-let agent = Agent::new(provider)
+let agent = BasicAgent::new(model_config)
     .with_compaction_strategy(MyCompaction);
 ```
 

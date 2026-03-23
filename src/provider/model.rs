@@ -204,6 +204,9 @@ pub enum ThinkingFormat {
     OpenAi,
     Xai,
     Qwen,
+    /// OpenRouter streaming format: reads thinking text from `delta.reasoning_details`
+    /// array entries where `type == "thinking"`.
+    OpenRouter,
 }
 
 /// Compatibility flags for OpenAI-compatible providers.
@@ -329,8 +332,10 @@ impl OpenAiCompat {
     /// Compat flags for OpenRouter.
     pub fn openrouter() -> Self {
         Self {
+            supports_developer_role: true,                       // OpenRouter supports "developer" role
             supports_usage_in_streaming: true,
-            max_tokens_field: MaxTokensField::MaxCompletionTokens,
+            max_tokens_field: MaxTokensField::MaxTokens,         // OpenRouter uses max_tokens (not max_completion_tokens)
+            thinking_format: ThinkingFormat::OpenRouter,         // reasoning_details array format
             ..Default::default()
         }
     }
@@ -398,6 +403,11 @@ pub struct ModelConfig {
     pub provider: String,
     /// Base URL for API requests (without trailing slash).
     pub base_url: String,
+    /// Authentication credential for this provider (API key, Bearer token, or
+    /// `access_key:secret[:session_token]` for Bedrock).
+    /// Defaults to an empty string so config files can omit it and supply via env instead.
+    #[serde(default)]
+    pub api_key: String,
     /// Whether this model supports reasoning/thinking.
     pub reasoning: bool,
     /// Context window size in tokens.
@@ -418,8 +428,9 @@ pub struct ModelConfig {
 impl ModelConfig {
     /// Create a new Anthropic model config.
     pub fn anthropic(
-        id: impl Into<String>, // API ID — model identifier sent in the request body (e.g. "claude-sonnet-4-20250514")
-        name: impl Into<String>, // DISPLAY NAME — human-readable label for logging/UI; not sent to the API
+        id: impl Into<String>,      // API ID — model identifier sent in the request body (e.g. "claude-sonnet-4-20250514")
+        name: impl Into<String>,    // DISPLAY NAME — human-readable label for logging/UI; not sent to the API
+        api_key: impl Into<String>, // AUTH — "sk-ant-..." or OAuth token "sk-ant-oat..."
     ) -> Self {
         Self {
             id: id.into(),
@@ -427,6 +438,7 @@ impl ModelConfig {
             api: ApiProtocol::AnthropicMessages,
             provider: "anthropic".into(),
             base_url: "https://api.anthropic.com".into(),
+            api_key: api_key.into(),
             reasoning: false,
             context_window: 200_000,
             max_tokens: 8192,
@@ -438,8 +450,9 @@ impl ModelConfig {
 
     /// Create a new OpenAI model config.
     pub fn openai(
-        id: impl Into<String>, // API ID — model identifier sent in the request body (e.g. "gpt-4o")
-        name: impl Into<String>, // DISPLAY NAME — human-readable label for logging/UI; not sent to the API
+        id: impl Into<String>,      // API ID — model identifier sent in the request body (e.g. "gpt-4o")
+        name: impl Into<String>,    // DISPLAY NAME — human-readable label for logging/UI; not sent to the API
+        api_key: impl Into<String>, // AUTH — "sk-..."
     ) -> Self {
         Self {
             id: id.into(),
@@ -447,6 +460,7 @@ impl ModelConfig {
             api: ApiProtocol::OpenAiCompletions,
             provider: "openai".into(),
             base_url: "https://api.openai.com/v1".into(),
+            api_key: api_key.into(),
             reasoning: false,
             context_window: 128_000,
             max_tokens: 4096,
@@ -457,10 +471,11 @@ impl ModelConfig {
     }
 
     /// Create a config for a local OpenAI-compatible server (LM Studio, Ollama, etc.).
-    /// No API key required — sends an empty Bearer token.
+    /// Pass an empty string for `api_key` — most local servers don't require authentication.
     pub fn local(
         base_url: impl Into<String>, // ENDPOINT — full base URL of the local server (e.g. "http://localhost:1234/v1")
         model_id: impl Into<String>, // API ID — model name expected by the local server (e.g. "llama-3.1-8b")
+        api_key: impl Into<String>,  // AUTH — empty string for unauthenticated local servers
     ) -> Self {
         Self {
             id: model_id.into(),
@@ -468,6 +483,7 @@ impl ModelConfig {
             api: ApiProtocol::OpenAiCompletions,
             provider: "local".into(),
             base_url: base_url.into(), // caller provides e.g. "http://localhost:1234/v1"
+            api_key: api_key.into(),
             reasoning: false,
             context_window: 128_000,
             max_tokens: 4096,
@@ -479,8 +495,9 @@ impl ModelConfig {
 
     /// Create a new Google Generative AI (Gemini) model config.
     pub fn google(
-        id: impl Into<String>, // API ID — model identifier sent in the request URL (e.g. "gemini-2.5-pro")
-        name: impl Into<String>, // DISPLAY NAME — human-readable label for logging/UI; not sent to the API
+        id: impl Into<String>,      // API ID — model identifier sent in the request URL (e.g. "gemini-2.5-pro")
+        name: impl Into<String>,    // DISPLAY NAME — human-readable label for logging/UI; not sent to the API
+        api_key: impl Into<String>, // AUTH — Google AI Studio API key
     ) -> Self {
         Self {
             id: id.into(),
@@ -488,12 +505,36 @@ impl ModelConfig {
             api: ApiProtocol::GoogleGenerativeAi,
             provider: "google".into(),
             base_url: "https://generativelanguage.googleapis.com".into(),
+            api_key: api_key.into(),
             reasoning: false,
             context_window: 1_000_000,
             max_tokens: 8192,
             cost: CostConfig::default(),
             headers: HashMap::new(),
             compat: None, // Google has its own protocol, no compat flags needed
+        }
+    }
+
+    /// Create a new OpenRouter model config.
+    /// `model_id` uses the `provider/model` format (e.g. `"anthropic/claude-sonnet-4"`).
+    pub fn openrouter(
+        model_id: impl Into<String>, // API ID — "provider/model" format (e.g. "anthropic/claude-sonnet-4")
+        api_key: impl Into<String>,  // AUTH — "sk-or-..."
+    ) -> Self {
+        let id = model_id.into();
+        Self {
+            name: id.clone(),
+            id,
+            api: ApiProtocol::OpenAiCompletions,
+            provider: "openrouter".into(),
+            base_url: "https://openrouter.ai/api/v1".into(),
+            api_key: api_key.into(),
+            reasoning: false,
+            context_window: 200_000, // conservative default; varies by routed model
+            max_tokens: 4096,
+            cost: CostConfig::default(),
+            headers: HashMap::new(),
+            compat: Some(OpenAiCompat::openrouter()),
         }
     }
 }
@@ -504,15 +545,16 @@ mod tests {
 
     #[test]
     fn test_model_config_anthropic() {
-        let config = ModelConfig::anthropic("claude-sonnet-4-20250514", "Claude Sonnet 4");
+        let config = ModelConfig::anthropic("claude-sonnet-4-20250514", "Claude Sonnet 4", "sk-ant-key");
         assert_eq!(config.api, ApiProtocol::AnthropicMessages);
         assert_eq!(config.provider, "anthropic");
+        assert_eq!(config.api_key, "sk-ant-key");
         assert!(config.compat.is_none());
     }
 
     #[test]
     fn test_model_config_openai() {
-        let config = ModelConfig::openai("gpt-4o", "GPT-4o");
+        let config = ModelConfig::openai("gpt-4o", "GPT-4o", "sk-key");
         assert_eq!(config.api, ApiProtocol::OpenAiCompletions);
         let compat = config.compat.unwrap();
         assert!(compat.supports_store);

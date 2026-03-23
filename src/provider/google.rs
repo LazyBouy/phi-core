@@ -59,20 +59,17 @@ impl StreamProvider for GoogleProvider {
         tx: mpsc::UnboundedSender<StreamEvent>, // OBSERVER — two-phase: send() checks status first, then streams SSE
         cancel: tokio_util::sync::CancellationToken, // ABORT — races against SSE stream
     ) -> Result<Message, ProviderError> {
-        let model_config = config
-            .model_config
-            .as_ref()
-            .ok_or_else(|| ProviderError::Other("ModelConfig required".into()))?;
+        let model_config = &config.model_config;
 
         let base_url = &model_config.base_url;
         // Google embeds the API key as a query parameter (not a header like other providers)
         let url = format!(
             "{}/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
-            base_url, config.model, config.api_key
+            base_url, config.model_config.id, config.model_config.api_key
         );
 
         let body = build_request_body(&config);
-        debug!("Google GenAI request: model={}", config.model);
+        debug!("Google GenAI request: model={}", config.model_config.id);
 
         let client = reqwest::Client::new();
         let mut request = client.post(&url).header("content-type", "application/json");
@@ -231,7 +228,7 @@ impl StreamProvider for GoogleProvider {
         let message = Message::Assistant {
             content,
             stop_reason,
-            model: config.model.clone(),
+            model: config.model_config.id.clone(),
             provider: model_config.provider.clone(),
             usage,
             timestamp: now_ms(),
@@ -418,15 +415,13 @@ mod tests {
     #[test]
     fn test_build_google_request() {
         let config = StreamConfig {
-            model: "gemini-2.0-flash".into(),
+            model_config: crate::provider::ModelConfig::google("gemini-2.0-flash", "Gemini Flash", "test"),
             system_prompt: "Be helpful".into(),
             messages: vec![Message::user("Hello")],
             tools: vec![],
             thinking_level: ThinkingLevel::Off,
-            api_key: "test".into(),
             max_tokens: Some(1024),
             temperature: Some(0.7),
-            model_config: None,
             cache_config: CacheConfig::default(),
         };
 

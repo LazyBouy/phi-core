@@ -14,21 +14,24 @@ The [Model Context Protocol (MCP)](https://modelcontextprotocol.io) is a JSON-RP
 Use `with_mcp_server_stdio()` to spawn an MCP server process and register its tools:
 
 ```rust
-use phi-core::Agent;
-use phi-core::provider::AnthropicProvider;
+use phi_core::BasicAgent;
+use phi_core::provider::ModelConfig;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut agent = Agent::new(AnthropicProvider)
-        .with_system_prompt("You are a helpful assistant with file access.")
-        .with_model("claude-sonnet-4-20250514")
-        .with_api_key(std::env::var("ANTHROPIC_API_KEY")?)
-        .with_mcp_server_stdio(
-            "npx",
-            &["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
-            None,
-        )
-        .await?;
+    let api_key = std::env::var("ANTHROPIC_API_KEY")?;
+    let mut agent = BasicAgent::new(ModelConfig::anthropic(
+        "claude-sonnet-4-20250514",
+        "Claude Sonnet 4",
+        &api_key,
+    ))
+    .with_system_prompt("You are a helpful assistant with file access.")
+    .with_mcp_server_stdio(
+        "npx",
+        &["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+        None,
+    )
+    .await?;
 
     let rx = agent.prompt("List files in /tmp").await;
     // handle events...
@@ -44,7 +47,7 @@ use std::collections::HashMap;
 let mut env = HashMap::new();
 env.insert("API_TOKEN".into(), "secret".into());
 
-let agent = Agent::new(provider)
+let agent = BasicAgent::new(model_config)
     .with_mcp_server_stdio("my-mcp-server", &["--port", "0"], Some(env))
     .await?;
 ```
@@ -54,7 +57,7 @@ let agent = Agent::new(provider)
 For remote MCP servers exposed over HTTP:
 
 ```rust
-let agent = Agent::new(provider)
+let agent = BasicAgent::new(model_config)
     .with_mcp_server_http("http://localhost:8080/mcp")
     .await?;
 ```
@@ -73,9 +76,9 @@ MCP tools appear alongside built-in tools. The LLM sees them with their original
 ## Mixing Built-in and MCP Tools
 
 ```rust
-use phi-core::tools::default_tools;
+use phi_core::tools::default_tools;
 
-let agent = Agent::new(provider)
+let agent = BasicAgent::new(model_config)
     .with_tools(default_tools())  // bash, read, write, edit, list, search
     .with_mcp_server_stdio("my-db-server", &[], None)
     .await?;
@@ -87,7 +90,7 @@ let agent = Agent::new(provider)
 For lower-level control, use `McpClient` directly:
 
 ```rust
-use phi-core::mcp::{McpClient, McpToolAdapter};
+use phi_core::mcp::{McpClient, McpToolAdapter};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 

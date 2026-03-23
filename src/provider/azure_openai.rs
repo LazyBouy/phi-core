@@ -55,10 +55,7 @@ impl StreamProvider for AzureOpenAiProvider {
         tx: mpsc::UnboundedSender<StreamEvent>, // OBSERVER — delegate to OpenAiCompatProvider::stream internally
         cancel: tokio_util::sync::CancellationToken, // ABORT — forwarded to delegate
     ) -> Result<Message, ProviderError> {
-        let model_config = config
-            .model_config
-            .as_ref()
-            .ok_or_else(|| ProviderError::Other("ModelConfig required".into()))?;
+        let model_config = &config.model_config;
 
         /*
         ARCHITECTURE: Azure URL construction
@@ -79,13 +76,13 @@ impl StreamProvider for AzureOpenAiProvider {
         );
 
         let body = build_azure_request_body(&config);
-        debug!("Azure OpenAI request: model={} url={}", config.model, url);
+        debug!("Azure OpenAI request: model={} url={}", config.model_config.id, url);
 
         let client = reqwest::Client::new();
         let mut request = client
             .post(&url)
             .header("content-type", "application/json")
-            .header("api-key", &config.api_key); // Azure uses `api-key` header, NOT `Authorization: Bearer`
+            .header("api-key", &config.model_config.api_key); // Azure uses `api-key` header, NOT `Authorization: Bearer`
 
         for (k, v) in &model_config.headers {
             request = request.header(k, v);
@@ -176,7 +173,7 @@ impl StreamProvider for AzureOpenAiProvider {
                                     let err_msg = Message::Assistant {
                                         content: vec![Content::Text { text: String::new() }],
                                         stop_reason: StopReason::Error,
-                                        model: config.model.clone(),
+                                        model: config.model_config.id.clone(),
                                         provider: model_config.provider.clone(),
                                         usage: usage.clone(),
                                         timestamp: now_ms(),
@@ -194,7 +191,7 @@ impl StreamProvider for AzureOpenAiProvider {
                             let err_msg = Message::Assistant {
                                 content: vec![Content::Text { text: String::new() }],
                                 stop_reason: StopReason::Error,
-                                model: config.model.clone(),
+                                model: config.model_config.id.clone(),
                                 provider: model_config.provider.clone(),
                                 usage: usage.clone(),
                                 timestamp: now_ms(),
@@ -231,7 +228,7 @@ impl StreamProvider for AzureOpenAiProvider {
         let message = Message::Assistant {
             content,
             stop_reason,
-            model: config.model.clone(),
+            model: config.model_config.id.clone(),
             provider: model_config.provider.clone(),
             usage,
             timestamp: now_ms(),
@@ -355,7 +352,7 @@ fn build_azure_request_body(config: &StreamConfig) -> serde_json::Value {
     }
 
     let mut body = serde_json::json!({
-        "model": config.model,
+        "model": config.model_config.id,
         "stream": true,
         "input": input,
     });

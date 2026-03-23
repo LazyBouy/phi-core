@@ -42,7 +42,7 @@
 | User prompt | `Vec<AgentMessage>` or `String` | Text (or multi-content) messages to start or continue a conversation |
 | System prompt | `String` | Instruction set defining agent behavior, injected at each LLM call |
 | Tool definitions | `Vec<Box<dyn AgentTool>>` | Executable tools exposed to the LLM via JSON Schema |
-| LLM provider config | API key, model name, `ModelConfig` | Credentials and model selection for any supported provider |
+| LLM provider config | `ModelConfig` | Single provider identity card: `id`, `api_key`, `base_url`, `api: ApiProtocol`, `cost`, `compat`. Factory methods: `ModelConfig::anthropic()`, `::openai()`, `::local()`, `::google()`, `::openrouter()`. Pass to `BasicAgent::new()` or `AgentLoopConfig.model_config`. |
 | Steering messages | `Vec<AgentMessage>` via queue | User-injected messages that interrupt mid-run tool execution |
 | Follow-up messages | `Vec<AgentMessage>` via queue | Queued tasks appended when the agent would otherwise stop |
 | Context config | `ContextConfig` | Token budget, compaction parameters |
@@ -107,11 +107,13 @@ A child instance of the agent loop spawned internally when a `SubAgentTool` is c
 
 | Term | Definition |
 |---|---|
-| **Agent** | The runtime interface trait (`src/agents/agent.rs`). Programs against this trait to remain independent of the specific implementation. `BasicAgent` (`src/agents/basic_agent.rs`) is the default in-memory implementation: owns conversation history, tools, provider reference, and configuration. The application-facing entry point. |
+| **Agent** | The runtime interface trait (`src/agents/agent.rs`). Programs against this trait to remain independent of the specific implementation. `BasicAgent` (`src/agents/basic_agent.rs`) is the default in-memory implementation: owns conversation history, tools, `ModelConfig` (provider identity + auth + cost), and configuration. Construction: `BasicAgent::new(ModelConfig::anthropic(...))`. The application-facing entry point. |
 | **Agent Loop** | The recursive execution cycle (`src/agent_loop.rs`) that calls the LLM, processes tool calls, checks steering, and repeats until the LLM stops or limits are hit. |
 | **Turn** | One complete LLM call plus the resulting tool executions. Bounded by `TurnStart`/`TurnEnd` events. |
 | **Steering** | A `Vec<AgentMessage>` injected into the running loop between tool executions. Used to redirect the agent mid-task without restarting it. |
 | **Follow-up** | A `Vec<AgentMessage>` queued to be injected after the agent would naturally stop. Extends the run without creating a new `agent_loop()` call. |
+| **ModelConfig** | The single, complete description of a provider connection (`src/provider/model.rs`). Fields: `id` (model name sent to API), `name` (display label), `api: ApiProtocol` (wire-protocol dispatch key), `provider` (logging label), `base_url`, `api_key`, `cost: CostConfig`, `headers`, `compat: Option<OpenAiCompat>`. Factory methods: `anthropic()`, `openai()`, `local()`, `google()`, `openrouter()`. Passed to `BasicAgent::new()`, `SubAgentTool::new()`, and `AgentLoopConfig.model_config`. |
+| **ApiProtocol** | Enum that selects which HTTP wire format to use: `AnthropicMessages`, `OpenAiCompletions`, `OpenAiResponses`, `AzureOpenAiResponses`, `GoogleGenerativeAi`, `GoogleVertex`, `BedrockConverseStream`. Used by `ProviderRegistry` as a dispatch key. |
 | **StreamProvider** | The trait (`src/provider/traits.rs`) that any LLM backend must implement. Has a single method `stream()` that takes a `StreamConfig` and sends `StreamEvent`s. |
 | **AgentTool** | The trait (`src/types.rs`) that any executable tool must implement. Methods: `name()`, `label()`, `description()`, `parameters_schema()`, `execute()`. |
 | **ToolContext** | A struct passed to `AgentTool::execute()` containing the call ID, name, cancellation token, and optional progress callbacks. |
@@ -137,7 +139,7 @@ A child instance of the agent loop spawned internally when a `SubAgentTool` is c
 | **ProviderError** | The error enum returned by `StreamProvider::stream()`. Variants: `Api`, `Network`, `Auth`, `RateLimited`, `ContextOverflow`, `Cancelled`, `Other`. |
 | **ToolDefinition** | A schema-only description of a tool sent to the LLM (name, description, JSON Schema parameters). Does not include the `execute` function. |
 | **RetryConfig** | Exponential-backoff configuration for retrying `RateLimited` and `Network` provider errors. |
-| **AgentLoopConfig** | A flat configuration struct passed to `agent_loop()` / `agent_loop_continue()` bundling all behavioral settings. |
+| **AgentLoopConfig** | A flat configuration struct passed to `agent_loop()` / `agent_loop_continue()` bundling all behavioral settings. Required field: `model_config: ModelConfig` (provider identity, auth, cost rates). Optional `provider_override: Option<Arc<dyn StreamProvider>>` bypasses registry dispatch (used in tests). |
 | **QueueMode** | Controls how queued messages (steering/follow-ups) are consumed per read. `OneAtATime` (default): pops only the first queued message. `All`: drains the entire queue at once. |
 | **McpContent** | A content item returned by an MCP tool call. Variants: `Text { text }` and `Image { data: base64, mimeType }`. |
 | **OpenApiAuth** | Authentication method for OpenAPI requests. Variants: `None`, `Bearer(token)`, `ApiKey { header, value }`. Token/value is redacted in debug output. |

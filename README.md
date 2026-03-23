@@ -44,13 +44,18 @@ phi-core = { version = "0.6", features = ["openapi"] }
 ### Basic prompt
 
 ```rust
-use phi_core::{Agent, providers::AnthropicProvider};
+use phi_core::BasicAgent;
+use phi_core::provider::ModelConfig;
+use phi_core::{AgentEvent, StreamDelta};
 
 #[tokio::main]
 async fn main() {
-    let mut agent = Agent::new(AnthropicProvider)
-        .with_model("claude-sonnet-4-20250514")
-        .with_api_key(std::env::var("ANTHROPIC_API_KEY").unwrap());
+    let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
+    let mut agent = BasicAgent::new(ModelConfig::anthropic(
+        "claude-sonnet-4-20250514",
+        "Claude Sonnet 4",
+        &api_key,
+    ));
 
     let mut rx = agent.prompt("What is 2 + 2?").await;
 
@@ -65,13 +70,17 @@ async fn main() {
 ### With built-in tools
 
 ```rust
-use phi_core::{Agent, providers::AnthropicProvider, tools::default_tools};
+use phi_core::{BasicAgent, tools::default_tools};
+use phi_core::provider::ModelConfig;
 
-let mut agent = Agent::new(AnthropicProvider)
-    .with_model("claude-sonnet-4-20250514")
-    .with_api_key(std::env::var("ANTHROPIC_API_KEY").unwrap())
-    .with_system_prompt("You are a coding assistant with access to the local filesystem.")
-    .with_tools(default_tools());
+let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
+let mut agent = BasicAgent::new(ModelConfig::anthropic(
+    "claude-sonnet-4-20250514",
+    "Claude Sonnet 4",
+    &api_key,
+))
+.with_system_prompt("You are a coding assistant with access to the local filesystem.")
+.with_tools(default_tools());
 
 let mut rx = agent.prompt("List the files in the current directory.").await;
 ```
@@ -79,7 +88,8 @@ let mut rx = agent.prompt("List the files in the current directory.").await;
 ### Custom tool
 
 ```rust
-use phi_core::{AgentTool, ToolContext, ToolResult, ToolError};
+use phi_core::{BasicAgent, AgentTool, ToolContext, ToolResult, ToolError};
+use phi_core::provider::ModelConfig;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
@@ -107,8 +117,13 @@ impl AgentTool for GreetTool {
     }
 }
 
-let mut agent = Agent::new(AnthropicProvider)
-    .with_tools(vec![Box::new(GreetTool)]);
+let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
+let mut agent = BasicAgent::new(ModelConfig::anthropic(
+    "claude-sonnet-4-20250514",
+    "Claude Sonnet 4",
+    &api_key,
+))
+.with_tools(vec![Box::new(GreetTool)]);
 ```
 
 ---
@@ -138,18 +153,21 @@ The **agent loop** is the heartbeat:
 
 ### Provider System
 
-All LLM providers implement a single `StreamProvider` trait, dispatched by `ApiProtocol`:
+All providers are selected by `ModelConfig.api: ApiProtocol` and resolved automatically via
+`ProviderRegistry`. You never name a provider struct directly — just pass a `ModelConfig`:
 
-| Provider | Covers |
-|---|---|
-| `AnthropicProvider` | Claude models |
-| `OpenAiCompatProvider` | OpenAI, Groq, Together, DeepSeek, Fireworks, Mistral, xAI, and 15+ more |
-| `OpenAiResponsesProvider` | OpenAI Responses API |
-| `AzureOpenAiProvider` | Azure OpenAI |
-| `GoogleProvider` | Gemini |
-| `GoogleVertexProvider` | Vertex AI |
-| `BedrockProvider` | AWS Bedrock (ConverseStream) |
-| `MockProvider` | Testing |
+| `ApiProtocol` variant | Wire format | Factory method |
+|---|---|---|
+| `AnthropicMessages` | Anthropic Messages API | `ModelConfig::anthropic(id, name, key)` |
+| `OpenAiCompletions` | OpenAI Chat Completions (15+ backends) | `ModelConfig::openai(id, name, key)` / `ModelConfig::local(url, id, key)` / `ModelConfig::openrouter(id, key)` |
+| `OpenAiResponses` | OpenAI Responses API | Direct struct construction |
+| `AzureOpenAiResponses` | Azure OpenAI | Direct struct construction |
+| `GoogleGenerativeAi` | Gemini | `ModelConfig::google(id, name, key)` |
+| `GoogleVertex` | Vertex AI | Direct struct construction |
+| `BedrockConverseStream` | AWS Bedrock | Direct struct construction |
+
+`OpenAiCompat` flags handle the 15+ OpenAI-compatible provider quirks (auth style, reasoning
+format, `max_tokens` field name, etc.) without needing a separate provider per service.
 
 ### Key Types
 
@@ -170,19 +188,27 @@ All LLM providers implement a single `StreamProvider` trait, dispatched by `ApiP
 ### Construction
 
 ```rust
-Agent::new(provider)
-    .with_model("claude-sonnet-4-20250514")
-    .with_api_key("sk-...")
-    .with_system_prompt("You are a helpful assistant.")
-    .with_tools(default_tools())
-    .with_thinking_level(ThinkingLevel::Medium)
-    .with_max_tokens(8192)
-    .with_temperature(0.7)
-    .with_context_config(ContextConfig { max_context_tokens: 80_000, ..Default::default() })
-    .with_execution_limits(ExecutionLimits { max_turns: 30, ..Default::default() })
-    .with_retry_config(RetryConfig::default())
-    .with_tool_execution(ToolExecutionStrategy::Parallel)
-    .with_cache_config(CacheConfig { enabled: true, strategy: CacheStrategy::Auto });
+use phi_core::BasicAgent;
+use phi_core::provider::ModelConfig;
+
+let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
+let mut agent = BasicAgent::new(ModelConfig::anthropic(
+    "claude-sonnet-4-20250514",
+    "Claude Sonnet 4",
+    &api_key,
+))
+.with_system_prompt("You are a helpful assistant.")
+.with_tools(default_tools())
+.with_thinking(ThinkingLevel::Medium)
+.with_max_tokens(8192)
+.with_context_config(ContextConfig { max_context_tokens: 80_000, ..Default::default() })
+.with_execution_limits(ExecutionLimits { max_turns: 30, ..Default::default() })
+.with_retry_config(RetryConfig::default())
+.with_tool_execution(ToolExecutionStrategy::Parallel)
+.with_cache_config(CacheConfig { enabled: true, strategy: CacheStrategy::Auto });
+
+// Temperature is a public field (no builder method):
+agent.temperature = Some(0.7);
 ```
 
 ### Conversation methods
@@ -348,9 +374,20 @@ Control how concurrent tool calls are handled:
 For advanced use cases, use the stateless free functions directly:
 
 ```rust
-use phi_core::agent_loop::{agent_loop, agent_loop_continue, AgentLoopConfig};
+use phi_core::agent_loop::{agent_loop, AgentLoopConfig};
+use phi_core::provider::ModelConfig;
+use phi_core::{AgentContext, AgentMessage, Message, tools::default_tools};
 
-let config = AgentLoopConfig::default();
+let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
+let config = AgentLoopConfig {
+    model_config: ModelConfig::anthropic(
+        "claude-sonnet-4-20250514",
+        "Claude Sonnet 4",
+        &api_key,
+    ),
+    ..Default::default()
+};
+
 let mut context = AgentContext {
     system_prompt: "You are a helpful assistant.".into(),
     messages: vec![],
@@ -359,7 +396,7 @@ let mut context = AgentContext {
 };
 
 let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-let cancel = CancellationToken::new();
+let cancel = tokio_util::sync::CancellationToken::new();
 
 let new_messages = agent_loop(
     vec![AgentMessage::Llm(Message::user("Hello"))],
@@ -374,64 +411,97 @@ let new_messages = agent_loop(
 
 ## Providers
 
+`ModelConfig` is the single descriptor for every provider connection — it bundles the model ID,
+API key, base URL, and any per-provider quirk flags. Pass it to `BasicAgent::new()` or
+`SubAgentTool::new()`.
+
 ### Anthropic
 
 ```rust
-Agent::new(AnthropicProvider)
-    .with_model("claude-sonnet-4-20250514")
-    .with_api_key(std::env::var("ANTHROPIC_API_KEY").unwrap())
-    // Enable extended thinking
-    .with_thinking_level(ThinkingLevel::High)
-    // Enable prompt caching
-    .with_cache_config(CacheConfig { enabled: true, strategy: CacheStrategy::Auto })
+use phi_core::BasicAgent;
+use phi_core::provider::ModelConfig;
+
+let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
+BasicAgent::new(ModelConfig::anthropic(
+    "claude-sonnet-4-20250514",
+    "Claude Sonnet 4",
+    &api_key,
+))
+// Enable extended thinking
+.with_thinking(ThinkingLevel::High)
+// Enable prompt caching
+.with_cache_config(CacheConfig { enabled: true, strategy: CacheStrategy::Auto })
 ```
 
 ### OpenAI
 
 ```rust
-Agent::new(OpenAiCompatProvider)
-    .with_model("gpt-4o")
-    .with_api_key(std::env::var("OPENAI_API_KEY").unwrap())
+use phi_core::provider::ModelConfig;
+
+let api_key = std::env::var("OPENAI_API_KEY").unwrap();
+BasicAgent::new(ModelConfig::openai("gpt-4o", "GPT-4o", &api_key))
 ```
 
 ### OpenAI-compatible (Groq, Together, DeepSeek, etc.)
 
 ```rust
-Agent::new(OpenAiCompatProvider)
-    .with_model("llama-3.3-70b-versatile")
-    .with_api_key(std::env::var("GROQ_API_KEY").unwrap())
-    .with_model_config(ModelConfig {
-        base_url: Some("https://api.groq.com/openai/v1".into()),
-        ..Default::default()
-    })
+use phi_core::provider::{ModelConfig, OpenAiCompat};
+
+// Groq — pass the base URL via ModelConfig::local()
+let api_key = std::env::var("GROQ_API_KEY").unwrap();
+BasicAgent::new(ModelConfig::local(
+    "https://api.groq.com/openai/v1",
+    "llama-3.3-70b-versatile",
+    &api_key,
+))
+
+// OpenRouter — dedicated factory with correct compat flags
+let or_key = std::env::var("OPENROUTER_API_KEY").unwrap();
+BasicAgent::new(ModelConfig::openrouter("anthropic/claude-sonnet-4", &or_key))
 ```
 
 ### Google Gemini
 
 ```rust
-Agent::new(GoogleProvider)
-    .with_model("gemini-2.5-pro")
-    .with_api_key(std::env::var("GEMINI_API_KEY").unwrap())
+use phi_core::provider::ModelConfig;
+
+let api_key = std::env::var("GEMINI_API_KEY").unwrap();
+BasicAgent::new(ModelConfig::google("gemini-2.5-pro", "Gemini 2.5 Pro", &api_key))
 ```
 
 ### AWS Bedrock
 
 ```rust
-Agent::new(BedrockProvider)
-    .with_model("anthropic.claude-sonnet-4-20250514-v1:0")
-    // Uses AWS SDK default credential chain (env vars, ~/.aws/credentials, IAM role, etc.)
+use phi_core::provider::{ModelConfig, ApiProtocol};
+
+// Bedrock uses "access_key:secret[:session_token]" as api_key, or "" for IAM roles
+let creds = std::env::var("AWS_BEDROCK_CREDENTIALS").unwrap_or_default();
+BasicAgent::new(ModelConfig {
+    id: "anthropic.claude-sonnet-4-20250514-v1:0".into(),
+    name: "Claude Sonnet 4 (Bedrock)".into(),
+    api: ApiProtocol::BedrockConverseStream,
+    provider: "bedrock".into(),
+    base_url: "us-east-1".into(), // AWS region
+    api_key: creds,
+    ..Default::default()
+})
 ```
 
 ### Azure OpenAI
 
 ```rust
-Agent::new(AzureOpenAiProvider)
-    .with_model("gpt-4o")
-    .with_api_key(std::env::var("AZURE_OPENAI_API_KEY").unwrap())
-    .with_model_config(ModelConfig {
-        base_url: Some("https://my-resource.openai.azure.com/openai/deployments/my-deployment".into()),
-        ..Default::default()
-    })
+use phi_core::provider::{ModelConfig, ApiProtocol};
+
+let api_key = std::env::var("AZURE_OPENAI_API_KEY").unwrap();
+BasicAgent::new(ModelConfig {
+    id: "gpt-4o".into(),
+    name: "GPT-4o (Azure)".into(),
+    api: ApiProtocol::AzureOpenAiResponses,
+    provider: "azure_openai".into(),
+    base_url: "https://my-resource.openai.azure.com/openai/deployments/my-deployment".into(),
+    api_key,
+    ..Default::default()
+})
 ```
 
 ---
@@ -441,8 +511,14 @@ Agent::new(AzureOpenAiProvider)
 Connect to any [Model Context Protocol](https://modelcontextprotocol.io) server:
 
 ```rust
+use phi_core::BasicAgent;
+use phi_core::provider::ModelConfig;
+
+let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
+let model_config = ModelConfig::anthropic("claude-sonnet-4-20250514", "Claude Sonnet 4", &api_key);
+
 // stdio (local process)
-let mut agent = Agent::new(AnthropicProvider)
+let mut agent = BasicAgent::new(model_config.clone())
     .with_mcp_server_stdio(
         "npx",
         &["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"],
@@ -451,7 +527,7 @@ let mut agent = Agent::new(AnthropicProvider)
     .await?;
 
 // HTTP (remote server)
-let mut agent = Agent::new(AnthropicProvider)
+let mut agent = BasicAgent::new(model_config)
     .with_mcp_server_http("http://localhost:3000")
     .await?;
 ```
@@ -465,15 +541,22 @@ MCP tools are exposed transparently as `AgentTool` instances — the agent loop 
 Auto-generate tools from any OpenAPI 3.0 spec (requires `openapi` feature):
 
 ```rust
+use phi_core::BasicAgent;
+use phi_core::provider::ModelConfig;
 use phi_core::openapi::{OpenApiConfig, OperationFilter};
 
-let mut agent = Agent::new(AnthropicProvider)
-    .with_openapi_file(
-        Path::new("petstore.yaml"),
-        OpenApiConfig { base_url: "https://api.example.com".into(), ..Default::default() },
-        &OperationFilter::All,
-    )
-    .await?;
+let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
+let mut agent = BasicAgent::new(ModelConfig::anthropic(
+    "claude-sonnet-4-20250514",
+    "Claude Sonnet 4",
+    &api_key,
+))
+.with_openapi_file(
+    Path::new("petstore.yaml"),
+    OpenApiConfig { base_url: "https://api.example.com".into(), ..Default::default() },
+    &OperationFilter::All,
+)
+.await?;
 
 // Filter to specific operations
 .with_openapi_url(
@@ -490,19 +573,31 @@ let mut agent = Agent::new(AnthropicProvider)
 Delegate tasks to isolated child agent instances:
 
 ```rust
-use phi_core::sub_agent::SubAgentTool;
+use phi_core::BasicAgent;
+use phi_core::agents::SubAgentTool;
+use phi_core::provider::ModelConfig;
+use phi_core::tools::default_tools;
 
-let sub_agent_tool = SubAgentTool::new(
+let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
+
+let researcher = SubAgentTool::new(
     "researcher",
-    "Research a topic and return a summary",
-    AnthropicProvider,
-    "claude-haiku-4-5",
-    api_key,
-    default_tools(),
+    ModelConfig::anthropic("claude-haiku-4-5-20251001", "Claude Haiku", &api_key),
+)
+.with_description("Research a topic and return a summary")
+.with_tools(
+    default_tools()
+        .into_iter()
+        .map(|t| std::sync::Arc::from(t))
+        .collect(),
 );
 
-let mut agent = Agent::new(AnthropicProvider)
-    .with_tools(vec![Box::new(sub_agent_tool)]);
+let mut agent = BasicAgent::new(ModelConfig::anthropic(
+    "claude-sonnet-4-20250514",
+    "Claude Sonnet 4",
+    &api_key,
+))
+.with_sub_agent(researcher);
 ```
 
 Sub-agents get their own isolated conversation context and cannot themselves spawn further sub-agents (depth limiting is enforced automatically).
@@ -523,9 +618,17 @@ Review the provided code for correctness, performance, security, and style...
 ```
 
 ```rust
+use phi_core::{BasicAgent, SkillSet};
+use phi_core::provider::ModelConfig;
+
+let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
 let skills = SkillSet::load(&[PathBuf::from("./skills")]);
-let mut agent = Agent::new(AnthropicProvider)
-    .with_skills(skills);
+let mut agent = BasicAgent::new(ModelConfig::anthropic(
+    "claude-sonnet-4-20250514",
+    "Claude Sonnet 4",
+    &api_key,
+))
+.with_skills(skills);
 // Skills are injected as an <available_skills> block in the system prompt
 ```
 
@@ -549,19 +652,40 @@ agent.restore_messages(&json)?;
 
 ## Callbacks
 
-Hook into the agent loop with before/after turn callbacks:
+Hook into the agent loop with before/after turn callbacks via the builder API:
+
+```rust
+use phi_core::BasicAgent;
+use phi_core::provider::ModelConfig;
+
+let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
+let agent = BasicAgent::new(ModelConfig::anthropic(
+    "claude-sonnet-4-20250514",
+    "Claude Sonnet 4",
+    &api_key,
+))
+.on_before_turn(|messages, turn_index| {
+    println!("Turn {} starting, {} messages in history", turn_index, messages.len());
+    true // return false to abort the turn
+})
+.on_after_turn(|messages, usage| {
+    println!("Turn ended. Tokens used: {}", usage.total_tokens);
+});
+```
+
+For the low-level API, callbacks live on `AgentLoopConfig`:
 
 ```rust
 use phi_core::agent_loop::AgentLoopConfig;
+use std::sync::Arc;
 
 let config = AgentLoopConfig {
-    before_turn: Some(Arc::new(|ctx| {
-        println!("Turn starting, {} messages in history", ctx.messages.len());
-        Ok(())
+    before_turn: Some(Arc::new(|messages, turn_index| {
+        println!("Turn {} starting", turn_index);
+        true
     })),
-    after_turn: Some(Arc::new(|ctx, stop_reason| {
-        println!("Turn ended: {:?}", stop_reason);
-        Ok(())
+    after_turn: Some(Arc::new(|messages, usage| {
+        println!("Turn ended: {} tokens", usage.total_tokens);
     })),
     ..Default::default()
 };

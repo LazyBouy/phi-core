@@ -1,6 +1,6 @@
 # Sub-Agents
 
-Sub-agents let a parent agent delegate tasks to child agent loops, each with their own system prompt, tools, and provider. The parent LLM invokes them like any other tool.
+Sub-agents let a parent agent delegate tasks to child agent loops, each with their own system prompt, tools, and `ModelConfig`. The parent LLM invokes them like any other tool.
 
 ## Overview
 
@@ -19,34 +19,41 @@ Each sub-agent invocation starts a fresh conversation — no state leaks between
 ## Creating Sub-Agents
 
 ```rust
-use std::sync::Arc;
 use phi_core::agents::SubAgentTool;
-use phi_core::provider::AnthropicProvider;
+use phi_core::provider::ModelConfig;
 use phi_core::tools;
+use std::sync::Arc;
 
-let researcher = SubAgentTool::new("researcher", Arc::new(AnthropicProvider))
-    .with_description("Searches and reads files to gather information.")
-    .with_system_prompt("You are a research assistant. Be thorough and concise.")
-    .with_model("claude-sonnet-4-20250514")
-    .with_api_key(&api_key)
-    .with_tools(vec![
-        Arc::new(tools::ReadFileTool::new()),
-        Arc::new(tools::SearchTool::new()),
-    ])
-    .with_max_turns(10);
+let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
+
+let researcher = SubAgentTool::new(
+    "researcher",
+    ModelConfig::anthropic("claude-sonnet-4-20250514", "Claude Sonnet 4", &api_key),
+)
+.with_description("Searches and reads files to gather information.")
+.with_system_prompt("You are a research assistant. Be thorough and concise.")
+.with_tools(vec![
+    Arc::new(tools::ReadFileTool::new()),
+    Arc::new(tools::SearchTool::new()),
+])
+.with_max_turns(10);
 ```
 
 ## Registering on a Parent Agent
 
 ```rust
 use phi_core::BasicAgent;
+use phi_core::provider::ModelConfig;
 
-let mut agent = BasicAgent::new(AnthropicProvider)
-    .with_system_prompt("You coordinate between sub-agents.")
-    .with_model("claude-sonnet-4-20250514")
-    .with_api_key(api_key)
-    .with_sub_agent(researcher)
-    .with_sub_agent(coder);
+let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
+let mut agent = BasicAgent::new(ModelConfig::anthropic(
+    "claude-sonnet-4-20250514",
+    "Claude Sonnet 4",
+    &api_key,
+))
+.with_system_prompt("You coordinate between sub-agents.")
+.with_sub_agent(researcher)
+.with_sub_agent(coder);
 ```
 
 The parent sees sub-agents as regular tools. It decides when to delegate based on its system prompt.
@@ -61,7 +68,8 @@ When the parent LLM calls multiple sub-agents in a single response, they run con
 |--------|---------|
 | `with_description()` | What the parent LLM sees (helps it decide when to delegate) |
 | `with_system_prompt()` | The sub-agent's own instructions |
-| `with_model()` / `with_api_key()` | Can use a different model than the parent |
+| `with_model_config(config)` | Replace the entire model config after construction |
+| `with_provider_override(provider)` | Bypass `ProviderRegistry` (primarily for tests) |
 | `with_tools()` | Tools available to the sub-agent (accepts `Vec<Arc<dyn AgentTool>>`) |
 | `with_max_turns(N)` | Turn limit (default: 10). Primary guard against runaway execution. |
 | `with_thinking()` | Enable extended thinking for the sub-agent |

@@ -3,17 +3,20 @@
 ## Basic Example with Anthropic
 
 ```rust
-use phi-core::{Agent, AgentEvent, StreamDelta};
-use phi-core::provider::AnthropicProvider;
-use phi-core::tools::default_tools;
+use phi_core::{BasicAgent, AgentEvent, StreamDelta};
+use phi_core::provider::ModelConfig;
+use phi_core::tools::default_tools;
 
 #[tokio::main]
 async fn main() {
-    let mut agent = Agent::new(AnthropicProvider)
-        .with_system_prompt("You are a helpful coding assistant.")
-        .with_model("claude-sonnet-4-20250514")
-        .with_api_key(std::env::var("ANTHROPIC_API_KEY").unwrap())
-        .with_tools(default_tools());
+    let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
+    let mut agent = BasicAgent::new(ModelConfig::anthropic(
+        "claude-sonnet-4-20250514",
+        "Claude Sonnet 4",
+        &api_key,
+    ))
+    .with_system_prompt("You are a helpful coding assistant.")
+    .with_tools(default_tools());
 
     let mut rx = agent.prompt("List the files in the current directory").await;
 
@@ -27,7 +30,7 @@ async fn main() {
             AgentEvent::ToolExecutionStart { tool_name, .. } => {
                 println!("\n→ Running tool: {}", tool_name);
             }
-            AgentEvent::ToolExecutionEnd { tool_name, result, is_error, .. } => {
+            AgentEvent::ToolExecutionEnd { tool_name, is_error, .. } => {
                 if is_error {
                     println!("  ✗ {} failed", tool_name);
                 } else {
@@ -45,19 +48,18 @@ async fn main() {
 
 ## Example with OpenAI-Compatible Provider
 
-For OpenAI, xAI, Groq, or any compatible API, use `OpenAiCompatProvider` with a `ModelConfig`:
+For OpenAI, xAI, Groq, or any compatible API, use `ModelConfig::openai()` or `ModelConfig::local()`:
 
 ```rust
-use phi-core::{Agent, AgentEvent};
-use phi-core::provider::OpenAiCompatProvider;
-use phi-core::tools::default_tools;
+use phi_core::{BasicAgent, AgentEvent, StreamDelta};
+use phi_core::provider::ModelConfig;
+use phi_core::tools::default_tools;
 
 #[tokio::main]
 async fn main() {
-    let mut agent = Agent::new(OpenAiCompatProvider)
+    let api_key = std::env::var("OPENAI_API_KEY").unwrap();
+    let mut agent = BasicAgent::new(ModelConfig::openai("gpt-4o", "GPT-4o", &api_key))
         .with_system_prompt("You are a helpful assistant.")
-        .with_model("gpt-4o")
-        .with_api_key(std::env::var("OPENAI_API_KEY").unwrap())
         .with_tools(default_tools());
 
     let mut rx = agent.prompt("What is 2 + 2?").await;
@@ -65,7 +67,7 @@ async fn main() {
     while let Some(event) = rx.recv().await {
         match event {
             AgentEvent::MessageUpdate { delta, .. } => {
-                if let phi-core::StreamDelta::Text { delta } = delta {
+                if let StreamDelta::Text { delta } = delta {
                     print!("{}", delta);
                 }
             }
@@ -81,17 +83,20 @@ async fn main() {
 By default, `agent.prompt()` blocks until the loop finishes and returns a receiver with all events buffered. To consume events in real-time, use `prompt_with_sender()` with a caller-provided channel:
 
 ```rust
-use phi-core::{Agent, AgentEvent, StreamDelta};
-use phi-core::provider::AnthropicProvider;
-use phi-core::tools::default_tools;
+use phi_core::{BasicAgent, AgentEvent, StreamDelta};
+use phi_core::provider::ModelConfig;
+use phi_core::tools::default_tools;
 
 #[tokio::main]
 async fn main() {
-    let mut agent = Agent::new(AnthropicProvider)
-        .with_system_prompt("You are a helpful assistant.")
-        .with_model("claude-sonnet-4-20250514")
-        .with_api_key(std::env::var("ANTHROPIC_API_KEY").unwrap())
-        .with_tools(default_tools());
+    let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
+    let mut agent = BasicAgent::new(ModelConfig::anthropic(
+        "claude-sonnet-4-20250514",
+        "Claude Sonnet 4",
+        &api_key,
+    ))
+    .with_system_prompt("You are a helpful assistant.")
+    .with_tools(default_tools());
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
@@ -123,9 +128,9 @@ async fn main() {
 For more control, use `agent_loop()` directly:
 
 ```rust
-use phi-core::agent_loop::{agent_loop, AgentLoopConfig};
-use phi-core::provider::AnthropicProvider;
-use phi-core::types::*;
+use phi_core::agent_loop::{agent_loop, AgentLoopConfig};
+use phi_core::provider::ModelConfig;
+use phi_core::types::*;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -134,20 +139,24 @@ async fn main() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
+    let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
+
     let mut context = AgentContext {
         system_prompt: "You are helpful.".into(),
         messages: Vec::new(),
-        tools: phi-core::tools::default_tools(),
+        tools: phi_core::tools::default_tools(),
+        ..Default::default()
     };
 
     let config = AgentLoopConfig {
-        provider: &AnthropicProvider,
-        model: "claude-sonnet-4-20250514".into(),
-        api_key: std::env::var("ANTHROPIC_API_KEY").unwrap(),
+        model_config: ModelConfig::anthropic(
+            "claude-sonnet-4-20250514",
+            "Claude Sonnet 4",
+            &api_key,
+        ),
         thinking_level: ThinkingLevel::Off,
         max_tokens: None,
         temperature: None,
-        model_config: None,
         convert_to_llm: None,
         transform_context: None,
         get_steering_messages: None,
@@ -157,18 +166,19 @@ async fn main() {
         execution_limits: None,
         cache_config: CacheConfig::default(),
         tool_execution: ToolExecutionStrategy::default(),
-        retry_config: phi-core::RetryConfig::default(),
+        retry_config: phi_core::RetryConfig::default(),
         before_turn: None,
         after_turn: None,
         on_error: None,
         input_filters: vec![],
+        ..Default::default()
     };
 
     let prompts = vec![AgentMessage::Llm(Message::user("Hello!"))];
     let new_messages = agent_loop(prompts, &mut context, &config, tx, cancel).await;
 
     // Drain events
-    while let Ok(event) = rx.try_recv() {
+    while let Ok(_event) = rx.try_recv() {
         // handle events...
     }
 

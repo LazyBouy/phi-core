@@ -1,15 +1,24 @@
 # Azure OpenAI Provider
 
-`AzureOpenAiProvider` implements the OpenAI Responses API format with Azure-specific authentication and URL patterns.
+Handles the OpenAI Responses API format with Azure-specific authentication and URL patterns.
+Selected automatically when `ModelConfig.api == ApiProtocol::AzureOpenAiResponses`.
 
 ## Usage
 
 ```rust
-use phi-core::provider::AzureOpenAiProvider;
+use phi_core::BasicAgent;
+use phi_core::provider::{ModelConfig, ApiProtocol};
 
-let agent = Agent::new(AzureOpenAiProvider)
-    .with_model("gpt-4o")
-    .with_api_key(std::env::var("AZURE_OPENAI_API_KEY").unwrap());
+let api_key = std::env::var("AZURE_OPENAI_API_KEY").unwrap();
+let agent = BasicAgent::new(ModelConfig {
+    id: "gpt-4o".into(),
+    name: "GPT-4o (Azure)".into(),
+    api: ApiProtocol::AzureOpenAiResponses,
+    provider: "azure_openai".into(),
+    base_url: "https://my-resource.openai.azure.com/openai/deployments/my-deployment".into(),
+    api_key,
+    ..Default::default()
+});
 ```
 
 ## Authentication

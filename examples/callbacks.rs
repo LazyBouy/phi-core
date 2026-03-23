@@ -10,7 +10,7 @@
 
 use phi_core::BasicAgent;
 use phi_core::provider::mock::*;
-use phi_core::provider::MockProvider;
+use phi_core::provider::{ModelConfig, MockProvider};
 use phi_core::types::*;
 use std::sync::{Arc, Mutex};
 
@@ -70,10 +70,9 @@ async fn main() {
         }
     }
 
-    let mut agent = BasicAgent::new(provider)
+    let mut agent = BasicAgent::new(ModelConfig::anthropic("mock", "mock", "test"))
+        .with_provider_override(Arc::new(provider))
         .with_system_prompt("You are helpful.")
-        .with_model("mock")
-        .with_api_key("test")
         .with_tools(vec![Box::new(GreetTool)])
         // Limit to 5 turns (plenty for this example)
         .on_before_turn(|messages, turn| {

@@ -50,31 +50,45 @@ With defaults, the retry delays are approximately:
 ### Using the Agent builder
 
 ```rust
-use phi-core::agent::Agent;
-use phi-core::retry::RetryConfig;
+use phi_core::{BasicAgent, RetryConfig};
+use phi_core::provider::ModelConfig;
+
+let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
 
 // Default — 3 retries, exponential backoff (recommended)
-let agent = Agent::new(provider);
+let agent = BasicAgent::new(ModelConfig::anthropic(
+    "claude-sonnet-4-20250514",
+    "Claude Sonnet 4",
+    &api_key,
+));
 
 // Custom — more retries, longer initial delay
-let agent = Agent::new(provider)
-    .with_retry_config(RetryConfig {
-        max_retries: 5,
-        initial_delay_ms: 2000,
-        backoff_multiplier: 2.0,
-        max_delay_ms: 60_000,
-    });
+let agent = BasicAgent::new(ModelConfig::anthropic(
+    "claude-sonnet-4-20250514",
+    "Claude Sonnet 4",
+    &api_key,
+))
+.with_retry_config(RetryConfig {
+    max_retries: 5,
+    initial_delay_ms: 2000,
+    backoff_multiplier: 2.0,
+    max_delay_ms: 60_000,
+});
 
 // Disable retries entirely
-let agent = Agent::new(provider)
-    .with_retry_config(RetryConfig::none());
+let agent = BasicAgent::new(ModelConfig::anthropic(
+    "claude-sonnet-4-20250514",
+    "Claude Sonnet 4",
+    &api_key,
+))
+.with_retry_config(RetryConfig::none());
 ```
 
 ### Using AgentLoopConfig directly
 
 ```rust
-use phi-core::agent_loop::AgentLoopConfig;
-use phi-core::retry::RetryConfig;
+use phi_core::agent_loop::AgentLoopConfig;
+use phi_core::RetryConfig;
 
 let config = AgentLoopConfig {
     // ...other fields...
@@ -84,6 +98,7 @@ let config = AgentLoopConfig {
         backoff_multiplier: 2.0,
         max_delay_ms: 30_000,
     },
+    ..Default::default()
 };
 ```
 

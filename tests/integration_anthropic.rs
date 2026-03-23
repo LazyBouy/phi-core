@@ -4,7 +4,7 @@
 //! These tests are #[ignore] by default so they don't run in CI without a key.
 
 use phi_core::agent_loop::{agent_loop, AgentLoopConfig};
-use phi_core::provider::AnthropicProvider;
+use phi_core::provider::{AnthropicProvider, ModelConfig};
 use phi_core::tools;
 use phi_core::types::*;
 use std::sync::Arc;
@@ -15,15 +15,14 @@ fn api_key() -> String {
     std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY must be set")
 }
 
-fn make_config(provider: Arc<dyn phi_core::provider::StreamProvider>) -> AgentLoopConfig {
+fn make_config() -> AgentLoopConfig {
+    let key = api_key();
     AgentLoopConfig {
-        provider,
-        model: "claude-sonnet-4-20250514".into(),
-        api_key: api_key(),
+        model_config: ModelConfig::anthropic("claude-sonnet-4-20250514", "Claude Sonnet 4", &key),
+        provider_override: Some(Arc::new(AnthropicProvider)),
         thinking_level: ThinkingLevel::Off,
         max_tokens: Some(1024),
         temperature: Some(0.0),
-        model_config: None,
         convert_to_llm: None,
         transform_context: None,
         get_steering_messages: None,
@@ -44,7 +43,6 @@ fn make_config(provider: Arc<dyn phi_core::provider::StreamProvider>) -> AgentLo
         before_tool_execution_update: None,
         after_tool_execution_update: None,
         input_filters: vec![],
-        cost_config: None,
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
     }
@@ -86,8 +84,7 @@ fn has_assistant_message(messages: &[AgentMessage]) -> bool {
 #[tokio::test]
 #[ignore]
 async fn test_anthropic_simple_text() {
-    let provider = AnthropicProvider;
-    let config = make_config(Arc::new(provider));
+    let config = make_config();
     let (tx, mut rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -143,8 +140,7 @@ async fn test_anthropic_simple_text() {
 #[tokio::test]
 #[ignore]
 async fn test_anthropic_tool_use() {
-    let provider = AnthropicProvider;
-    let config = make_config(Arc::new(provider));
+    let config = make_config();
     let (tx, mut rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -210,8 +206,7 @@ async fn test_anthropic_tool_use() {
 #[tokio::test]
 #[ignore]
 async fn test_anthropic_multi_turn() {
-    let provider = AnthropicProvider;
-    let config = make_config(Arc::new(provider));
+    let config = make_config();
     let cancel = CancellationToken::new();
 
     let mut context = AgentContext {

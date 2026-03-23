@@ -1,15 +1,19 @@
 # Anthropic Provider
 
-`AnthropicProvider` implements the Anthropic Messages API with SSE streaming.
+Handles the Anthropic Messages API with SSE streaming. Selected automatically when `ModelConfig.api == ApiProtocol::AnthropicMessages`.
 
 ## Usage
 
 ```rust
-use phi-core::provider::AnthropicProvider;
+use phi_core::BasicAgent;
+use phi_core::provider::ModelConfig;
 
-let agent = Agent::new(AnthropicProvider)
-    .with_model("claude-sonnet-4-20250514")
-    .with_api_key(std::env::var("ANTHROPIC_API_KEY").unwrap());
+let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
+let agent = BasicAgent::new(ModelConfig::anthropic(
+    "claude-sonnet-4-20250514",
+    "Claude Sonnet 4",
+    &api_key,
+));
 ```
 
 ## Features

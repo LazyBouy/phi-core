@@ -2,7 +2,7 @@
 
 use phi_core::agent_loop::{agent_loop, agent_loop_continue, AgentLoopConfig};
 use phi_core::provider::mock::*;
-use phi_core::provider::MockProvider;
+use phi_core::provider::{ModelConfig, MockProvider};
 use phi_core::*;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -10,13 +10,11 @@ use tokio_util::sync::CancellationToken;
 
 fn make_config(provider: Arc<dyn phi_core::provider::StreamProvider>) -> AgentLoopConfig {
     AgentLoopConfig {
-        provider,
-        model: "mock".into(),
-        api_key: "test".into(),
+        model_config: ModelConfig::anthropic("mock", "mock", "test"),
+        provider_override: Some(provider),
         thinking_level: ThinkingLevel::Off,
         max_tokens: None,
         temperature: None,
-        model_config: None,
         convert_to_llm: None,
         transform_context: None,
         get_steering_messages: None,
@@ -37,7 +35,6 @@ fn make_config(provider: Arc<dyn phi_core::provider::StreamProvider>) -> AgentLo
         before_tool_execution_update: None,
         after_tool_execution_update: None,
         input_filters: vec![],
-        cost_config: None,
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
     }
@@ -789,13 +786,11 @@ async fn test_retry_on_rate_limit_succeeds() {
     });
 
     let config = AgentLoopConfig {
-        provider: Arc::clone(&provider) as Arc<dyn phi_core::provider::StreamProvider>,
-        model: "mock".into(),
-        api_key: "test".into(),
+        model_config: ModelConfig::anthropic("mock", "mock", "test"),
+        provider_override: Some(Arc::clone(&provider) as Arc<dyn phi_core::provider::StreamProvider>),
         thinking_level: ThinkingLevel::Off,
         max_tokens: None,
         temperature: None,
-        model_config: None,
         convert_to_llm: None,
         transform_context: None,
         get_steering_messages: None,
@@ -821,7 +816,6 @@ async fn test_retry_on_rate_limit_succeeds() {
         before_tool_execution_update: None,
         after_tool_execution_update: None,
         input_filters: vec![],
-        cost_config: None,
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
     };
@@ -869,13 +863,11 @@ async fn test_retry_exhausted_returns_error() {
     });
 
     let config = AgentLoopConfig {
-        provider: Arc::clone(&provider) as Arc<dyn phi_core::provider::StreamProvider>,
-        model: "mock".into(),
-        api_key: "test".into(),
+        model_config: ModelConfig::anthropic("mock", "mock", "test"),
+        provider_override: Some(Arc::clone(&provider) as Arc<dyn phi_core::provider::StreamProvider>),
         thinking_level: ThinkingLevel::Off,
         max_tokens: None,
         temperature: None,
-        model_config: None,
         convert_to_llm: None,
         transform_context: None,
         get_steering_messages: None,
@@ -901,7 +893,6 @@ async fn test_retry_exhausted_returns_error() {
         before_tool_execution_update: None,
         after_tool_execution_update: None,
         input_filters: vec![],
-        cost_config: None,
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
     };
@@ -956,13 +947,11 @@ async fn test_no_retry_on_auth_error() {
     });
 
     let config = AgentLoopConfig {
-        provider: Arc::clone(&provider) as Arc<dyn phi_core::provider::StreamProvider>,
-        model: "mock".into(),
-        api_key: "test".into(),
+        model_config: ModelConfig::anthropic("mock", "mock", "test"),
+        provider_override: Some(Arc::clone(&provider) as Arc<dyn phi_core::provider::StreamProvider>),
         thinking_level: ThinkingLevel::Off,
         max_tokens: None,
         temperature: None,
-        model_config: None,
         convert_to_llm: None,
         transform_context: None,
         get_steering_messages: None,
@@ -983,7 +972,6 @@ async fn test_no_retry_on_auth_error() {
         before_tool_execution_update: None,
         after_tool_execution_update: None,
         input_filters: vec![],
-        cost_config: None,
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
     };
@@ -1026,13 +1014,11 @@ async fn test_retry_none_disables_retries() {
     });
 
     let config = AgentLoopConfig {
-        provider: Arc::clone(&provider) as Arc<dyn phi_core::provider::StreamProvider>,
-        model: "mock".into(),
-        api_key: "test".into(),
+        model_config: ModelConfig::anthropic("mock", "mock", "test"),
+        provider_override: Some(Arc::clone(&provider) as Arc<dyn phi_core::provider::StreamProvider>),
         thinking_level: ThinkingLevel::Off,
         max_tokens: None,
         temperature: None,
-        model_config: None,
         convert_to_llm: None,
         transform_context: None,
         get_steering_messages: None,
@@ -1053,7 +1039,6 @@ async fn test_retry_none_disables_retries() {
         before_tool_execution_update: None,
         after_tool_execution_update: None,
         input_filters: vec![],
-        cost_config: None,
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
     };
@@ -1284,13 +1269,11 @@ async fn test_on_error_fires_on_provider_error() {
     let error_msgs_clone = error_msgs.clone();
 
     let config = AgentLoopConfig {
-        provider: Arc::clone(&provider) as Arc<dyn phi_core::provider::StreamProvider>,
-        model: "mock".into(),
-        api_key: "test".into(),
+        model_config: ModelConfig::anthropic("mock", "mock", "test"),
+        provider_override: Some(Arc::clone(&provider) as Arc<dyn phi_core::provider::StreamProvider>),
         thinking_level: ThinkingLevel::Off,
         max_tokens: None,
         temperature: None,
-        model_config: None,
         convert_to_llm: None,
         transform_context: None,
         get_steering_messages: None,
@@ -1313,7 +1296,6 @@ async fn test_on_error_fires_on_provider_error() {
         before_tool_execution_update: None,
         after_tool_execution_update: None,
         input_filters: vec![],
-        cost_config: None,
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
     };
@@ -2428,12 +2410,12 @@ async fn test_budget_enforcement_stops_loop() {
         inner: MockProvider::texts(vec!["First", "Second"]),
     });
     let mut config = make_config(provider);
-    config.cost_config = Some(CostConfig {
+    config.model_config.cost = CostConfig {
         input_per_million: 0.0,
         output_per_million: 1_000_000.0, // $1 per token
         cache_read_per_million: 0.0,
         cache_write_per_million: 0.0,
-    });
+    };
     config.execution_limits = Some(ExecutionLimits {
         max_turns: 10,
         max_total_tokens: 1_000_000,
@@ -2530,13 +2512,11 @@ async fn test_custom_compaction_strategy_is_called() {
     let provider = MockProvider::text("Got it.");
 
     let config = AgentLoopConfig {
-        provider: Arc::new(provider) as Arc<dyn phi_core::provider::StreamProvider>,
-        model: "test".into(),
-        api_key: "test".into(),
+        model_config: ModelConfig::anthropic("test", "test", "test"),
+        provider_override: Some(Arc::new(provider) as Arc<dyn phi_core::provider::StreamProvider>),
         thinking_level: ThinkingLevel::Off,
         max_tokens: None,
         temperature: None,
-        model_config: None,
         convert_to_llm: None,
         transform_context: None,
         get_steering_messages: None,
@@ -2563,7 +2543,6 @@ async fn test_custom_compaction_strategy_is_called() {
         before_tool_execution_update: None,
         after_tool_execution_update: None,
         input_filters: vec![],
-        cost_config: None,
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
     };
@@ -2619,13 +2598,11 @@ async fn test_none_compaction_strategy_uses_default() {
     let provider = MockProvider::text("Got it.");
 
     let config = AgentLoopConfig {
-        provider: Arc::new(provider) as Arc<dyn phi_core::provider::StreamProvider>,
-        model: "test".into(),
-        api_key: "test".into(),
+        model_config: ModelConfig::anthropic("test", "test", "test"),
+        provider_override: Some(Arc::new(provider) as Arc<dyn phi_core::provider::StreamProvider>),
         thinking_level: ThinkingLevel::Off,
         max_tokens: None,
         temperature: None,
-        model_config: None,
         convert_to_llm: None,
         transform_context: None,
         get_steering_messages: None,
@@ -2652,7 +2629,6 @@ async fn test_none_compaction_strategy_uses_default() {
         before_tool_execution_update: None,
         after_tool_execution_update: None,
         input_filters: vec![],
-        cost_config: None,
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
     };
@@ -2790,12 +2766,11 @@ async fn test_continuation_kind_in_agent_start() {
 #[tokio::test]
 async fn test_agent_wrapper_independent_counters_per_config() {
     use phi_core::BasicAgent;
-    use phi_core::provider::MockProvider;
 
-    let mut agent = BasicAgent::new(MockProvider::texts(vec!["first", "second"]));
+    let mut agent = BasicAgent::new(ModelConfig::anthropic("mock-a", "mock-a", "test"))
+        .with_provider_override(Arc::new(MockProvider::texts(vec!["first", "second"])));
 
-    // First loop with model "mock-a"
-    agent.model = "mock-a".into();
+    // First loop with model "mock-a" (already set above)
     let rx1 = agent.prompt("hello").await;
     let events1: Vec<_> = {
         let mut v = Vec::new();
@@ -2815,7 +2790,7 @@ async fn test_agent_wrapper_independent_counters_per_config() {
     });
 
     // Second loop with a different model "mock-b" — gets its own counter starting at .1
-    agent.model = "mock-b".into();
+    agent.model_config = ModelConfig::anthropic("mock-b", "mock-b", "test");
     let rx2 = agent.prompt("world").await;
     let events2: Vec<_> = {
         let mut v = Vec::new();

@@ -5,18 +5,22 @@ phi-core supports saving and restoring agent conversation state, enabling pause/
 ## Save and Restore
 
 ```rust
-use phi-core::agent::Agent;
+use phi_core::BasicAgent;
+use phi_core::provider::ModelConfig;
 
 // After running some conversation turns...
-let json = agent.save_messages()?;
+let json = agent.save_messages();
 std::fs::write("conversation.json", &json)?;
 
 // Later, in a new process:
 let json = std::fs::read_to_string("conversation.json")?;
-let mut agent = Agent::new(provider)
-    .with_system_prompt("You are helpful.")
-    .with_model("claude-sonnet-4-20250514")
-    .with_api_key(api_key);
+let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
+let mut agent = BasicAgent::new(ModelConfig::anthropic(
+    "claude-sonnet-4-20250514",
+    "Claude Sonnet 4",
+    &api_key,
+))
+.with_system_prompt("You are helpful.");
 
 agent.restore_messages(&json)?;
 
@@ -29,11 +33,14 @@ let rx = agent.prompt("Follow up question").await;
 For constructing an agent with pre-existing history:
 
 ```rust
+use phi_core::BasicAgent;
+use phi_core::provider::ModelConfig;
+
 let saved: Vec<AgentMessage> = serde_json::from_str(&json)?;
-let agent = Agent::new(provider)
+let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
+let agent = BasicAgent::new(ModelConfig::anthropic("claude-sonnet-4-20250514", "Claude Sonnet 4", &api_key))
     .with_messages(saved)
-    .with_system_prompt("...")
-    .with_model("...");
+    .with_system_prompt("...");
 ```
 
 ## JSON Format

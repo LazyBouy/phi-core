@@ -66,24 +66,7 @@ impl StreamProvider for OpenAiCompatProvider {
         tx: mpsc::UnboundedSender<StreamEvent>, // OBSERVER — receives SSE events ([DONE] terminates the stream)
         cancel: tokio_util::sync::CancellationToken, // ABORT — races against SSE stream
     ) -> Result<Message, ProviderError> {
-        /*
-        RUST QUIRK: `.as_ref().ok_or_else(|| ...)` — extracting from Option with a fallback error
-
-        `config.model_config` is `Option<ModelConfig>`.
-        `.as_ref()` → `Option<&ModelConfig>` (borrow, don't move)
-        `.ok_or_else(|| ProviderError::Other("..."))` → `Result<&ModelConfig, ProviderError>`
-          `None` → `Err(ProviderError::Other(...))`
-          `Some(r)` → `Ok(r)`
-        `?` → early return if Err, otherwise bind to `model_config`
-
-        Python analogy:
-          if config.model_config is None:
-              raise ProviderError("ModelConfig required for OpenAI provider")
-          model_config = config.model_config
-        */
-        let model_config = config.model_config.as_ref().ok_or_else(|| {
-            ProviderError::Other("ModelConfig required for OpenAI provider".into())
-        })?;
+        let model_config = &config.model_config;
         /*
         RUST QUIRK: `.as_ref().cloned().unwrap_or_default()`
         `model_config.compat` is `Option<OpenAiCompat>`.
@@ -100,13 +83,13 @@ impl StreamProvider for OpenAiCompatProvider {
         let url = format!("{}/chat/completions", base_url);
 
         let body = build_request_body(&config, model_config, &compat);
-        debug!("OpenAI compat request: model={} url={}", config.model, url);
+        debug!("OpenAI compat request: model={} url={}", config.model_config.id, url);
 
         let client = reqwest::Client::new();
         let mut request = client
             .post(&url)
             .header("content-type", "application/json")
-            .header("authorization", format!("Bearer {}", config.api_key));
+            .header("authorization", format!("Bearer {}", config.model_config.api_key));
 
         // Add any extra headers from model config
         for (k, v) in &model_config.headers {
@@ -192,10 +175,13 @@ impl StreamProvider for OpenAiCompatProvider {
 
                                 Different providers use different field names for chain-of-thought:
                                   xAI (Grok):     `delta.reasoning`
+                                  OpenRouter:     `delta.reasoning_details` (array of {type, text})
                                   OpenAI/others:  `delta.reasoning_content`
 
-                                `ThinkingFormat::Xai` → read from `delta.reasoning`
-                                all others            → read from `delta.reasoning_content`
+                                `ThinkingFormat::Xai`        → read from `delta.reasoning`
+                                `ThinkingFormat::OpenRouter` → collect `delta.reasoning_details`
+                                                               entries where type == "thinking"
+                                all others                   → read from `delta.reasoning_content`
 
                                 RUST QUIRK: `.as_deref()` on `Option<String>` → `Option<&str>`
                                   `delta.reasoning` is `Option<String>`.
@@ -203,8 +189,24 @@ impl StreamProvider for OpenAiCompatProvider {
                                   Result: `Option<&str>` — `None` if the field was absent,
                                   `Some("thinking text")` if it had content.
                                 */
+                                // Owned string is needed for OpenRouter (assembled from array);
+                                // other formats borrow directly from delta fields.
+                                // `reasoning_owned` anchors the String so `reasoning` (&str) can borrow it.
+                                let reasoning_owned = match compat.thinking_format {
+                                    ThinkingFormat::OpenRouter => {
+                                        delta.reasoning_details.as_ref().map(|details| {
+                                            details
+                                                .iter()
+                                                .filter(|d| d.detail_type == "thinking")
+                                                .filter_map(|d| d.text.as_deref())
+                                                .collect::<String>()
+                                        })
+                                    }
+                                    _ => None,
+                                };
                                 let reasoning = match compat.thinking_format {
                                     ThinkingFormat::Xai => delta.reasoning.as_deref(),
+                                    ThinkingFormat::OpenRouter => reasoning_owned.as_deref(),
                                     _ => delta.reasoning_content.as_deref(),
                                 };
                                 if let Some(reasoning_text) = reasoning {
@@ -311,7 +313,7 @@ impl StreamProvider for OpenAiCompatProvider {
                             let err_msg = Message::Assistant {
                                 content: vec![Content::Text { text: String::new() }],
                                 stop_reason: StopReason::Error,
-                                model: config.model.clone(),
+                                model: config.model_config.id.clone(),
                                 provider: model_config.provider.clone(),
                                 usage: usage.clone(),
                                 timestamp: now_ms(),
@@ -360,7 +362,7 @@ impl StreamProvider for OpenAiCompatProvider {
         let message = Message::Assistant {
             content,
             stop_reason,
-            model: config.model.clone(),
+            model: config.model_config.id.clone(),
             provider: model_config.provider.clone(),
             usage,
             timestamp: now_ms(),
@@ -503,7 +505,7 @@ fn build_request_body(
 
     let max_tokens_val = config.max_tokens.unwrap_or(model_config.max_tokens);
     let mut body = serde_json::json!({
-        "model": config.model,
+        "model": config.model_config.id,
         "stream": true,
         "stream_options": {"include_usage": true},
         "messages": messages,
@@ -636,6 +638,15 @@ struct OpenAiChoice {
     finish_reason: Option<String>,
 }
 
+/// A single entry in OpenRouter's `reasoning_details` array.
+#[derive(Deserialize)]
+struct OpenRouterReasoningDetail {
+    #[serde(rename = "type")]
+    detail_type: String,
+    #[serde(default)]
+    text: Option<String>,
+}
+
 #[derive(Deserialize, Default)]
 struct OpenAiDelta {
     #[serde(default)]
@@ -644,6 +655,9 @@ struct OpenAiDelta {
     reasoning_content: Option<String>,
     #[serde(default)]
     reasoning: Option<String>,
+    /// OpenRouter extended thinking: array of `{type, text}` objects.
+    #[serde(default)]
+    reasoning_details: Option<Vec<OpenRouterReasoningDetail>>,
     #[serde(default)]
     tool_calls: Option<Vec<OpenAiToolCallDelta>>,
 }
@@ -699,17 +713,15 @@ mod tests {
 
     #[test]
     fn test_build_request_body_basic() {
-        let model_config = ModelConfig::openai("gpt-4o", "GPT-4o");
+        let model_config = ModelConfig::openai("gpt-4o", "GPT-4o", "test");
         let config = StreamConfig {
-            model: "gpt-4o".into(),
+            model_config: model_config.clone(),
             system_prompt: "You are helpful.".into(),
             messages: vec![Message::user("Hello")],
             tools: vec![],
             thinking_level: ThinkingLevel::Off,
-            api_key: "test".into(),
             max_tokens: None,
             temperature: None,
-            model_config: Some(model_config.clone()),
             cache_config: CacheConfig::default(),
         };
 
@@ -725,10 +737,10 @@ mod tests {
 
     #[test]
     fn test_build_request_body_with_tools() {
-        let model_config = ModelConfig::openai("gpt-4o", "GPT-4o");
+        let model_config = ModelConfig::openai("gpt-4o", "GPT-4o", "test");
         let compat = OpenAiCompat::openai();
         let config = StreamConfig {
-            model: "gpt-4o".into(),
+            model_config: model_config.clone(),
             system_prompt: String::new(),
             messages: vec![Message::user("List files")],
             tools: vec![ToolDefinition {
@@ -737,10 +749,8 @@ mod tests {
                 parameters: serde_json::json!({"type": "object"}),
             }],
             thinking_level: ThinkingLevel::Off,
-            api_key: "test".into(),
             max_tokens: Some(1024),
             temperature: Some(0.5),
-            model_config: Some(model_config.clone()),
             cache_config: CacheConfig::default(),
         };
 
@@ -778,10 +788,10 @@ mod tests {
 
     #[test]
     fn test_tool_result_with_image() {
-        let model_config = ModelConfig::openai("gpt-4o", "GPT-4o");
+        let model_config = ModelConfig::openai("gpt-4o", "GPT-4o", "test");
         let compat = OpenAiCompat::openai();
         let config = StreamConfig {
-            model: "gpt-4o".into(),
+            model_config: model_config.clone(),
             system_prompt: String::new(),
             messages: vec![
                 Message::Assistant {
@@ -810,10 +820,8 @@ mod tests {
             ],
             tools: vec![],
             thinking_level: ThinkingLevel::Off,
-            api_key: "test".into(),
             max_tokens: None,
             temperature: None,
-            model_config: Some(model_config.clone()),
             cache_config: CacheConfig::default(),
         };
 
@@ -833,10 +841,10 @@ mod tests {
 
     #[test]
     fn test_tool_result_text_only_uses_string() {
-        let model_config = ModelConfig::openai("gpt-4o", "GPT-4o");
+        let model_config = ModelConfig::openai("gpt-4o", "GPT-4o", "test");
         let compat = OpenAiCompat::openai();
         let config = StreamConfig {
-            model: "gpt-4o".into(),
+            model_config: model_config.clone(),
             system_prompt: String::new(),
             messages: vec![Message::ToolResult {
                 tool_call_id: "call-1".into(),
@@ -849,10 +857,8 @@ mod tests {
             }],
             tools: vec![],
             thinking_level: ThinkingLevel::Off,
-            api_key: "test".into(),
             max_tokens: None,
             temperature: None,
-            model_config: Some(model_config.clone()),
             cache_config: CacheConfig::default(),
         };
 

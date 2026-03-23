@@ -5,15 +5,16 @@
 The main configuration for the agent loop:
 
 ```rust
-pub struct AgentLoopConfig<'a> {
-    pub provider: &'a dyn StreamProvider,
-    pub model: String,
-    pub api_key: String,
+pub struct AgentLoopConfig {
+    /// REQUIRED — Complete provider identity: model id, api_key, base_url, protocol, compat flags, cost rates.
+    /// Provider is resolved from model_config.api via ProviderRegistry.
+    pub model_config: ModelConfig,
+    /// Custom provider override. When Some, bypasses ProviderRegistry. Use for MockProvider in tests.
+    pub provider_override: Option<Arc<dyn StreamProvider>>,
     pub config_id: Option<String>,
     pub thinking_level: ThinkingLevel,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
-    pub model_config: Option<ModelConfig>,
     pub convert_to_llm: Option<ConvertToLlmFn>,
     pub transform_context: Option<TransformContextFn>,
     pub get_steering_messages: Option<GetMessagesFn>,
@@ -34,24 +35,24 @@ pub struct AgentLoopConfig<'a> {
     pub before_tool_execution_update: Option<BeforeToolExecutionUpdateFn>,
     pub after_tool_execution_update: Option<AfterToolExecutionUpdateFn>,
     pub input_filters: Vec<Arc<dyn InputFilter>>,
+    pub first_turn_trigger: TurnTrigger,
 }
 ```
 
 ## StreamConfig
 
-Passed to `StreamProvider::stream()`:
+Internal config passed to `StreamProvider::stream()`. All provider identity comes from `model_config`:
 
 ```rust
 pub struct StreamConfig {
-    pub model: String,
+    /// REQUIRED — full provider identity: id, api_key, base_url, compat, cost.
+    pub model_config: ModelConfig,
     pub system_prompt: String,
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDefinition>,
     pub thinking_level: ThinkingLevel,
-    pub api_key: String,
-    pub max_tokens: Option<u32>,
+    pub max_tokens: Option<u32>,  // overrides model_config.max_tokens when Some
     pub temperature: Option<f32>,
-    pub model_config: Option<ModelConfig>,
     pub cache_config: CacheConfig,
 }
 ```
