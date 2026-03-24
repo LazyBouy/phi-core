@@ -26,7 +26,7 @@
 | Loop-level hooks: setup/teardown around each complete agent run | `src/agent_loop.rs` (`BeforeLoopFn`, `AfterLoopFn`) |
 | Tool-level hooks: intercept each tool execution and streaming update | `src/agent_loop.rs` (`BeforeToolExecutionFn`, `AfterToolExecutionFn`, `BeforeToolExecutionUpdateFn`, `AfterToolExecutionUpdateFn`) |
 | Agent identity: stable `agent_id` / `session_id` / `loop_id` for cross-loop traceability | `src/agents/basic_agent.rs`, `src/types.rs` |
-| Evaluational parallelism: multiple independent loops grouped under one `session_id` | `src/agents/basic_agent.rs` (`BasicAgent::prompt` / `continue_loop_with_sender`) |
+| Evaluational parallelism foundation: `session_id` groups related loops; `loop_id` hierarchy (`{session_id}.{config_id}.{N}`), `ContinuationKind` (`Rerun`/`Branch`), and `parent_loop_id` are implemented. Concurrent multi-model dispatch requires manual wiring via the low-level `agent_loop()` free function with cloned `AgentContext`s — no first-class `BasicAgent` API yet (roadmap). | `src/types.rs` (`AgentContext`), `src/agent_loop.rs` |
 | Continuation kinds: `Rerun` and `Branch` variants for retry vs. explore semantics | `src/types.rs` (`ContinuationKind`), `src/agent_loop.rs` |
 | Input filtering: moderation, PII redaction, injection detection | `src/types.rs` (`InputFilter`) |
 | User steering mid-run: inject messages between tool calls | `src/agents/basic_agent.rs` (steering queue), `src/agent_loop.rs` |
