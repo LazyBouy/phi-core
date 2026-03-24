@@ -110,7 +110,7 @@ pub struct StreamConfig {
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDefinition>,
     pub thinking_level: ThinkingLevel,
-    pub max_tokens: Option<u32>,   // overrides model_config.max_tokens when Some
+    pub max_tokens: Option<u32>, // overrides model_config.max_tokens when Some
     pub temperature: Option<f32>,
     /// Prompt caching configuration. Default: enabled with auto strategy.
     pub cache_config: CacheConfig,

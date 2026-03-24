@@ -8,10 +8,10 @@
 //! Uses MockProvider so no API key is needed.
 //!   cargo run --example callbacks
 
-use phi_core::BasicAgent;
 use phi_core::provider::mock::*;
-use phi_core::provider::{ModelConfig, MockProvider};
+use phi_core::provider::{MockProvider, ModelConfig};
 use phi_core::types::*;
+use phi_core::BasicAgent;
 use std::sync::{Arc, Mutex};
 
 #[tokio::main]
@@ -73,7 +73,7 @@ async fn main() {
     let mut agent = BasicAgent::new(ModelConfig::anthropic("mock", "mock", "test"))
         .with_provider_override(Arc::new(provider))
         .with_system_prompt("You are helpful.")
-        .with_tools(vec![Box::new(GreetTool)])
+        .with_tools(vec![Arc::new(GreetTool)])
         // Limit to 5 turns (plenty for this example)
         .on_before_turn(|messages, turn| {
             println!("[before_turn] turn={}, messages={}", turn, messages.len());

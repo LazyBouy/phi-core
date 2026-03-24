@@ -64,7 +64,10 @@ impl StreamProvider for OpenAiResponsesProvider {
         let mut request = client
             .post(&url)
             .header("content-type", "application/json")
-            .header("authorization", format!("Bearer {}", config.model_config.api_key));
+            .header(
+                "authorization",
+                format!("Bearer {}", config.model_config.api_key),
+            );
 
         for (k, v) in &model_config.headers {
             request = request.header(k, v);

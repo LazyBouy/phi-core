@@ -7,7 +7,7 @@ ARCHITECTURE: McpToolAdapter — the adapter pattern between two interfaces
   Internal (agent side): `AgentTool::execute(params, ctx)` → `Result<ToolResult, ToolError>`
 
 By implementing `AgentTool`, each MCP tool becomes indistinguishable from a built-in tool
-to the agent loop. The agent loop sees `Box<dyn AgentTool>` and doesn't know whether
+to the agent loop. The agent loop sees `Arc<dyn AgentTool>` and doesn't know whether
 it's a BashTool or a remote MCP filesystem tool.
 
 This is the Adapter design pattern: converts one interface (`McpClient`) into another

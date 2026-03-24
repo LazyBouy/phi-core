@@ -844,6 +844,66 @@ boundaries. The system is configurable for production use.
   - Depends on: REQ-148, REQ-190
   - Definition of Done: A sub-agent tool configured with `with_parent_loop_id("parent.loop.1")` emits a child `AgentStart` event with `parent_loop_id: Some("parent.loop.1")`.
 
+---
+
+### Milestone 4.10 — Evaluational Parallelism
+
+- [x] **REQ-196:** Migrate `AgentContext.tools` from `Vec<Box<dyn AgentTool>>` to `Vec<Arc<dyn AgentTool>>`. Add `#[derive(Clone)]` to `AgentContext`. Update `Agent::set_tools`, `BasicAgent::with_tools`, `default_tools()` return type, and all push sites in `BasicAgent` (sub-agent, openapi, mcp). Remove `ArcToolWrapper` from `sub_agent.rs`. *(Implemented)*
+  - Depends on: REQ-028, REQ-046
+  - Definition of Done: `AgentContext: Clone`; all existing tests pass; `ArcToolWrapper` deleted.
+
+- [x] **REQ-197:** Add `Usage::combine(&self, other: &Usage) -> Usage` method for summing usage across branches. *(Implemented)*
+  - Depends on: —
+  - Definition of Done: `usage_a.combine(&usage_b)` returns a `Usage` with all fields summed.
+
+- [x] **REQ-198:** Add `ParallelLoopOutcome` and `ParallelLoopResult` structs to `types.rs`. Add `AgentEvent::ParallelLoopStart { session_id, loop_ids, timestamp }` and `AgentEvent::ParallelLoopEnd { session_id, selected_loop_id, selected_config_index, evaluation_usage, timestamp }` variants to `AgentEvent`. *(Implemented)*
+  - Depends on: REQ-190, REQ-197
+  - Definition of Done: Both structs construct and the enum variants match correctly.
+
+- [x] **REQ-199:** Define `EvaluationDecision` enum and `EvaluationStrategy` trait in `types.rs`. Trait method: `evaluate(prompts, outcomes, tx, cancel) -> (EvaluationDecision, Usage)`. Placed in `types.rs` (not `evaluation.rs`) to avoid a circular dependency with `agent_loop.rs`. *(Implemented)*
+  - Depends on: REQ-198
+  - Definition of Done: Custom implementations compile by importing from `crate::types` or `crate::evaluation`.
+
+- [x] **REQ-200:** Create `src/evaluation.rs` with five built-in `EvaluationStrategy` implementations: `TransparentEvaluation` (single-branch pass-through), `PickFirstEvaluation` (always index 0), `TokenEfficientEvaluation` (lowest `total_tokens`), `ElaborateEvaluation` (highest `total_tokens`), `LlmJudgeEvaluation { judge_config, system_prompt }`. *(Implemented)*
+  - Depends on: REQ-199
+  - Definition of Done: All five strategies implement `EvaluationStrategy`; unit tests pass for each.
+
+- [x] **REQ-201:** `LlmJudgeEvaluation` — judge prompt construction: extract original query text from user messages in `prompts` only; extract final assistant text from each branch's `new_messages` (strip tool calls, tool results, intermediate turns). Build numbered judge prompt; run `agent_loop` with `judge_config`; parse first integer from reply; inherit `session_id` from branches for traceability. *(Implemented)*
+  - Depends on: REQ-200
+  - Definition of Done: Judge receives clean final responses, not raw tool traces; judge `AgentStart` has same `session_id` as branches.
+
+- [x] **REQ-202:** `LlmJudgeEvaluation` — judge's comprehension criteria: all N branch final responses must fit in the judge model's context budget simultaneously. Apply iterative multi-tier compaction: tier 1 (last 80 lines), tier 2 (first+last paragraph), tier 3 (hard char limit derived from budget / N). Budget derives from `judge_config.context_config.max_context_tokens` (if set). Emit `AgentEvent::ProgressMessage` warning if criteria cannot be satisfied after tier 3. Selected winner always returns the original uncompacted messages. *(Implemented)*
+  - Depends on: REQ-201
+  - Definition of Done: With a tight `context_config.max_context_tokens`, compaction fires and a warning is emitted; selected output is the original branch content.
+
+- [x] **REQ-203:** Add `derive_config_segment(config: &AgentLoopConfig) -> String` helper (pub crate) and `run_parallel_branches(...)` internal async function to `agent_loop.rs`. Add `agent_loop_parallel(prompts, base_context, configs, strategy, tx, cancel) -> ParallelLoopResult` public async function. Uses `futures::future::join_all` for branch concurrency (avoids `'static` bound on `AgentLoopConfig` hooks). Per-branch forwarder task (`tokio::spawn`) captures usage from `AgentEnd`. *(Implemented)*
+  - Depends on: REQ-196, REQ-199
+  - Definition of Done: `agent_loop_parallel` with 2 configs runs both branches, emits `ParallelLoopStart`/`ParallelLoopEnd`, and returns correct `selected_index`.
+
+- [x] **REQ-204:** Export `evaluation` module from `lib.rs`; re-export `agent_loop_parallel` and all five evaluation strategies at crate root. *(Implemented)*
+  - Depends on: REQ-200, REQ-203
+  - Definition of Done: `use phi_core::{agent_loop_parallel, PickFirstEvaluation, LlmJudgeEvaluation}` compiles.
+
+- [x] **REQ-205:** `agent_loop_parallel` routes to `agent_loop_continue` when `prompts` is empty. *(Implemented)*
+  - Depends on: REQ-203
+  - Definition of Done: Calling `agent_loop_parallel(vec![], ctx_with_user_msg, ...)` dispatches each branch via `agent_loop_continue` and returns a valid `ParallelLoopResult`.
+
+- [x] **REQ-206:** Add `original_context_len: usize` to `ParallelLoopOutcome`. *(Implemented)*
+  - Depends on: REQ-198, REQ-205
+  - Definition of Done: `outcome.context.messages[..outcome.original_context_len]` is the shared base context; `[original_context_len..]` are branch-produced messages.
+
+- [x] **REQ-207:** `LlmJudgeEvaluation` extracts prior conversation context and query from `context.messages[..original_context_len]` in `agent_loop_continue` mode; includes formatted prior-context transcript in judge prompt. *(Implemented)*
+  - Depends on: REQ-201, REQ-206
+  - Definition of Done: When `prompts` is empty, the judge prompt contains `"Prior conversation context:"` and `"Original query:"` sections derived from the original context.
+
+- [x] **REQ-208:** Replace single-pass output compaction with 2-iteration `compact_for_judge`: Iteration 1 compacts prior context only (outputs intact); Iteration 2 compacts both independently. *(Implemented)*
+  - Depends on: REQ-202, REQ-207
+  - Definition of Done: Under a tight token budget, outputs remain uncompacted as long as prior-context compaction alone can satisfy the criteria.
+
+- [x] **REQ-209:** Updated `build_judge_user_message` includes optional prior context section before the query. *(Implemented)*
+  - Depends on: REQ-207
+  - Definition of Done: Judge prompt includes `"Prior conversation context:\n<transcript>"` when prior context is non-empty; omitted when empty (fresh-session case).
+
 ***
 
 ## Level 5 — Creative

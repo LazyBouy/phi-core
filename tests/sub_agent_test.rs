@@ -1,9 +1,9 @@
 //! Tests for SubAgentTool using MockProvider.
 
 use phi_core::agent_loop::{agent_loop, AgentLoopConfig};
-use phi_core::provider::mock::*;
-use phi_core::provider::{ModelConfig, MockProvider};
 use phi_core::agents::SubAgentTool;
+use phi_core::provider::mock::*;
+use phi_core::provider::{MockProvider, ModelConfig};
 use phi_core::*;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -183,8 +183,11 @@ async fn test_sub_agent_cancellation() {
     // Sub-agent provider returns text, but we cancel before execution
     let sub_provider = Arc::new(MockProvider::text("Should not appear"));
 
-    let sub_agent = SubAgentTool::new("cancelled_agent", ModelConfig::anthropic("mock", "mock", "test"))
-        .with_provider_override(sub_provider);
+    let sub_agent = SubAgentTool::new(
+        "cancelled_agent",
+        ModelConfig::anthropic("mock", "mock", "test"),
+    )
+    .with_provider_override(sub_provider);
 
     let cancel = CancellationToken::new();
     cancel.cancel(); // Cancel immediately
@@ -238,10 +241,13 @@ async fn test_sub_agent_max_turns() {
 
     let echo_tool: Arc<dyn AgentTool> = Arc::new(EchoTool);
 
-    let sub_agent = SubAgentTool::new("limited_agent", ModelConfig::anthropic("mock", "mock", "test"))
-        .with_provider_override(sub_provider)
-        .with_tools(vec![echo_tool])
-        .with_max_turns(1); // Only 1 turn allowed
+    let sub_agent = SubAgentTool::new(
+        "limited_agent",
+        ModelConfig::anthropic("mock", "mock", "test"),
+    )
+    .with_provider_override(sub_provider)
+    .with_tools(vec![echo_tool])
+    .with_max_turns(1); // Only 1 turn allowed
 
     let params = serde_json::json!({"task": "Keep going"});
 
@@ -321,23 +327,17 @@ async fn test_sub_agent_parallel() {
         }
     }
 
-    let sub_a = SubAgentTool::new(
-        "agent_a",
-        ModelConfig::anthropic("slow", "slow", "test"),
-    )
-    .with_provider_override(Arc::new(SlowProvider {
-        delay_ms: 50,
-        text: "Result A".into(),
-    }));
+    let sub_a = SubAgentTool::new("agent_a", ModelConfig::anthropic("slow", "slow", "test"))
+        .with_provider_override(Arc::new(SlowProvider {
+            delay_ms: 50,
+            text: "Result A".into(),
+        }));
 
-    let sub_b = SubAgentTool::new(
-        "agent_b",
-        ModelConfig::anthropic("slow", "slow", "test"),
-    )
-    .with_provider_override(Arc::new(SlowProvider {
-        delay_ms: 50,
-        text: "Result B".into(),
-    }));
+    let sub_b = SubAgentTool::new("agent_b", ModelConfig::anthropic("slow", "slow", "test"))
+        .with_provider_override(Arc::new(SlowProvider {
+            delay_ms: 50,
+            text: "Result B".into(),
+        }));
 
     // Parent provider: first call triggers both sub-agents, second returns final text
     let parent_provider = MockProvider::new(vec![
@@ -359,7 +359,7 @@ async fn test_sub_agent_parallel() {
     let mut context = AgentContext {
         system_prompt: "You are a coordinator.".into(),
         messages: Vec::new(),
-        tools: vec![Box::new(sub_a), Box::new(sub_b)],
+        tools: vec![Arc::new(sub_a), Arc::new(sub_b)],
         agent_id: None,
         session_id: None,
         loop_id: None,
@@ -400,8 +400,11 @@ async fn test_sub_agent_parallel() {
 async fn test_sub_agent_event_forwarding() {
     let sub_provider = Arc::new(MockProvider::text("Sub-agent done"));
 
-    let sub_agent = SubAgentTool::new("streaming_agent", ModelConfig::anthropic("mock", "mock", "test"))
-        .with_provider_override(sub_provider);
+    let sub_agent = SubAgentTool::new(
+        "streaming_agent",
+        ModelConfig::anthropic("mock", "mock", "test"),
+    )
+    .with_provider_override(sub_provider);
 
     let params = serde_json::json!({"task": "Do work"});
 
@@ -508,7 +511,7 @@ async fn test_sub_agent_in_parent_loop() {
     let mut context = AgentContext {
         system_prompt: "You are a coordinator.".into(),
         messages: Vec::new(),
-        tools: vec![Box::new(sub_agent)],
+        tools: vec![Arc::new(sub_agent)],
         agent_id: None,
         session_id: None,
         loop_id: None,

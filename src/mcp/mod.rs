@@ -34,7 +34,7 @@ The MCP client in this module:
   5. Wraps each MCP tool as an `McpToolAdapter` implementing `AgentTool`
 
 This means the agent loop is completely unaware it's using MCP — it sees
-`Box<dyn AgentTool>` objects, same as built-in tools.
+`Arc<dyn AgentTool>` objects, same as built-in tools.
 
 Module layout:
   `types.rs`        — JSON-RPC 2.0 types + MCP protocol types

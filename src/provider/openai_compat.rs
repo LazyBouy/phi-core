@@ -83,13 +83,19 @@ impl StreamProvider for OpenAiCompatProvider {
         let url = format!("{}/chat/completions", base_url);
 
         let body = build_request_body(&config, model_config, &compat);
-        debug!("OpenAI compat request: model={} url={}", config.model_config.id, url);
+        debug!(
+            "OpenAI compat request: model={} url={}",
+            config.model_config.id, url
+        );
 
         let client = reqwest::Client::new();
         let mut request = client
             .post(&url)
             .header("content-type", "application/json")
-            .header("authorization", format!("Bearer {}", config.model_config.api_key));
+            .header(
+                "authorization",
+                format!("Bearer {}", config.model_config.api_key),
+            );
 
         // Add any extra headers from model config
         for (k, v) in &model_config.headers {

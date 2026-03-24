@@ -6,9 +6,9 @@
 //! - Restoring into a fresh agent
 //! - Continuing the conversation from saved state
 
-use phi_core::{Agent, BasicAgent};
-use phi_core::provider::{ModelConfig, MockProvider};
+use phi_core::provider::{MockProvider, ModelConfig};
 use phi_core::types::*;
+use phi_core::{Agent, BasicAgent};
 
 #[tokio::main]
 async fn main() {

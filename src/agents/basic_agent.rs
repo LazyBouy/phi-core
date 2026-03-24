@@ -25,7 +25,7 @@ inputs as parameters and return outputs. They have no hidden state.
 
 The BasicAgent struct is an OPTIONAL stateful wrapper that owns:
   - Message history (Vec<AgentMessage>) — the conversation so far
-  - Tools (Vec<Box<dyn AgentTool>>) — registered capabilities
+  - Tools (Vec<Arc<dyn AgentTool>>) — registered capabilities
   - ModelConfig — complete provider identity: id, api_key, base_url, api protocol, cost rates
   - Steering/follow-up queues (Arc<Mutex<>>) — for mid-run interrupts
 
@@ -63,23 +63,21 @@ pub struct BasicAgent {
     messages: Vec<AgentMessage>, // full conversation history
 
     /*
-    RUST QUIRK: `Box<dyn Trait>` — owned trait objects
+    RUST QUIRK: `Arc<dyn Trait>` — shared trait objects
 
-    `Box<dyn AgentTool>` means: "I own a heap-allocated value of some type that
-    implements AgentTool, but I don't know which type at compile time."
+    `Arc<dyn AgentTool>` means: "I have shared (reference-counted) ownership of a
+    heap-allocated value of some type that implements AgentTool."
 
-    This is Rust's dynamic dispatch mechanism. The compiler inserts a vtable pointer
-    (a fat pointer: data + vtable), and method calls go through the vtable at runtime.
+    Why Arc instead of Box?
+    Arc allows the same tool to be shared across parallel agent branches without copying.
+    `AgentContext` clones (used for evaluational parallelism) increment each Arc's
+    reference count — zero-cost for tools. Tools are immutable during execution
+    (execute takes &self), so Arc sharing is semantically correct.
 
-    Why `Box` and not just `dyn AgentTool`?
-    Because Rust must know the SIZE of every variable at compile time.
-    `dyn AgentTool` has unknown size (different tool structs have different layouts).
-    `Box<dyn AgentTool>` has fixed size: one pointer (8 bytes on 64-bit).
-
-    Python analogy: tools are just a list of objects implementing a protocol — Python
-    doesn't need explicit boxing because all objects are already heap-allocated.
+    Python analogy: tools are shared objects — multiple agents can reference the same
+    tool instance without transferring ownership.
     */
-    tools: Vec<Box<dyn AgentTool>>,
+    tools: Vec<Arc<dyn AgentTool>>,
 
     /*
     RUST QUIRK: `Arc<Mutex<Vec<AgentMessage>>>` — shared mutable state across threads
@@ -225,7 +223,7 @@ impl BasicAgent {
         self
     }
 
-    pub fn with_tools(mut self, tools: Vec<Box<dyn AgentTool>>) -> Self {
+    pub fn with_tools(mut self, tools: Vec<Arc<dyn AgentTool>>) -> Self {
         self.tools = tools;
         self
     }
@@ -345,7 +343,7 @@ impl BasicAgent {
 
     /// Add a sub-agent tool. The sub-agent runs its own `agent_loop()` when invoked.
     pub fn with_sub_agent(mut self, sub: crate::agents::SubAgentTool) -> Self {
-        self.tools.push(Box::new(sub));
+        self.tools.push(Arc::new(sub));
         self
     }
 
@@ -368,7 +366,7 @@ impl BasicAgent {
     ) -> Result<Self, crate::openapi::OpenApiError> {
         let adapters = crate::openapi::OpenApiToolAdapter::from_file(path, config, filter).await?;
         for adapter in adapters {
-            self.tools.push(Box::new(adapter));
+            self.tools.push(Arc::new(adapter));
         }
         Ok(self)
     }
@@ -383,7 +381,7 @@ impl BasicAgent {
     ) -> Result<Self, crate::openapi::OpenApiError> {
         let adapters = crate::openapi::OpenApiToolAdapter::from_url(url, config, filter).await?;
         for adapter in adapters {
-            self.tools.push(Box::new(adapter));
+            self.tools.push(Arc::new(adapter));
         }
         Ok(self)
     }
@@ -398,7 +396,7 @@ impl BasicAgent {
     ) -> Result<Self, crate::openapi::OpenApiError> {
         let adapters = crate::openapi::OpenApiToolAdapter::from_str(spec_str, config, filter)?;
         for adapter in adapters {
-            self.tools.push(Box::new(adapter));
+            self.tools.push(Arc::new(adapter));
         }
         Ok(self)
     }
@@ -416,7 +414,7 @@ impl BasicAgent {
         let client = Arc::new(tokio::sync::Mutex::new(client));
         let adapters = McpToolAdapter::from_client(client).await?;
         for adapter in adapters {
-            self.tools.push(Box::new(adapter));
+            self.tools.push(Arc::new(adapter));
         }
         Ok(self)
     }
@@ -427,7 +425,7 @@ impl BasicAgent {
         let client = Arc::new(tokio::sync::Mutex::new(client));
         let adapters = McpToolAdapter::from_client(client).await?;
         for adapter in adapters {
-            self.tools.push(Box::new(adapter));
+            self.tools.push(Arc::new(adapter));
         }
         Ok(self)
     }
@@ -442,10 +440,7 @@ impl BasicAgent {
     ///
     /// Accepts `impl Into<String>` (e.g. `&str`). The trait's [`Agent::prompt`] default
     /// requires an owned `String`; use this inherent method to pass `&str` without `.to_string()`.
-    pub async fn prompt(
-        &mut self,
-        text: impl Into<String>,
-    ) -> mpsc::UnboundedReceiver<AgentEvent> {
+    pub async fn prompt(&mut self, text: impl Into<String>) -> mpsc::UnboundedReceiver<AgentEvent> {
         let (tx, rx) = mpsc::unbounded_channel();
         let msg = AgentMessage::Llm(Message::user(text));
         self.prompt_messages_with_sender(vec![msg], tx).await;
@@ -646,7 +641,9 @@ impl Agent for BasicAgent {
         the original. For Vec, Default is an empty Vec (no allocation).
 
         Why not `self.tools.clone()`?
-        Clone would copy every Box<dyn AgentTool> — expensive and unnecessary.
+        For single-loop execution we MOVE the tools into the context (zero allocation).
+        Arc::clone is cheap (just a reference-count increment), but we still prefer
+        a move here since BasicAgent temporarily relinquishes the tools anyway.
         We want to MOVE the tools into the context, not copy them.
 
         Why not just `self.tools` (move out)?
@@ -782,7 +779,7 @@ impl Agent for BasicAgent {
         Ok(())
     }
 
-    fn set_tools(&mut self, tools: Vec<Box<dyn AgentTool>>) {
+    fn set_tools(&mut self, tools: Vec<Arc<dyn AgentTool>>) {
         self.tools = tools;
     }
 

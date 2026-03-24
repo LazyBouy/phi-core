@@ -76,7 +76,10 @@ impl StreamProvider for AzureOpenAiProvider {
         );
 
         let body = build_azure_request_body(&config);
-        debug!("Azure OpenAI request: model={} url={}", config.model_config.id, url);
+        debug!(
+            "Azure OpenAI request: model={} url={}",
+            config.model_config.id, url
+        );
 
         let client = reqwest::Client::new();
         let mut request = client

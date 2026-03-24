@@ -19,10 +19,10 @@
 //!   /clear          Clear conversation history
 //!   /model <name>   Switch model mid-session
 
-use phi_core::BasicAgent;
 use phi_core::provider::ModelConfig;
 use phi_core::skills::SkillSet;
 use phi_core::tools::default_tools;
+use phi_core::BasicAgent;
 use phi_core::*;
 use std::io::{self, BufRead, Write};
 

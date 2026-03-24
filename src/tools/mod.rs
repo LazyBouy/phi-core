@@ -11,7 +11,7 @@ of a coding agent:
   `ListFilesTool`  — list directory contents
   `SearchTool`     — grep / content search across files
 
-`default_tools()` returns all six in a `Vec<Box<dyn AgentTool>>` — the canonical
+`default_tools()` returns all six in a `Vec<Arc<dyn AgentTool>>` — the canonical
 "batteries included" tool set. Callers that want a subset can build their own Vec.
 
 RUST QUIRK: `pub mod` vs `pub use`
@@ -23,15 +23,15 @@ RUST QUIRK: `pub mod` vs `pub use`
   Without this re-export, callers would write `tools::bash::BashTool`.
   With it, they write `tools::BashTool` — cleaner public API.
 
-RUST QUIRK: `Vec<Box<dyn AgentTool>>` — heterogeneous tool collection
+RUST QUIRK: `Vec<Arc<dyn AgentTool>>` — shared heterogeneous tool collection
 
 All 6 tools are different concrete types, but they share the `AgentTool` trait.
 To put different types in one `Vec`, we need "type erasure" via trait objects:
-  `Box<dyn AgentTool>` — heap-allocated, vtable-dispatched, concrete type erased
+  `Arc<dyn AgentTool>` — reference-counted, vtable-dispatched, concrete type erased
 
-`Box::new(BashTool::default())` — allocates `BashTool` on the heap and widens
-the concrete type to `Box<dyn AgentTool>`. Rust does this coercion automatically
-because `BashTool: AgentTool`.
+`Arc::new(BashTool::default())` — allocates `BashTool` on the heap behind an Arc.
+Arc allows tools to be shared across parallel agent branches (evaluational parallelism)
+without copying — each branch gets a cheap reference-count increment.
 Python analogy: a list of objects that all implement an abstract base class.
 */
 
@@ -48,18 +48,20 @@ pub use list::ListFilesTool;
 pub use search::SearchTool;
 
 use crate::types::AgentTool;
+use std::sync::Arc;
 
 /// Get the standard set of coding agent tools.
 ///
 /// Returns all 6 built-in tools ready for use with `Agent::with_tools()` or
-/// `AgentLoopConfig`. Each tool is heap-allocated as a `Box<dyn AgentTool>`.
-pub fn default_tools() -> Vec<Box<dyn AgentTool>> {
+/// `AgentLoopConfig`. Each tool is heap-allocated behind an `Arc<dyn AgentTool>`,
+/// which allows them to be shared across parallel agent branches at zero copy cost.
+pub fn default_tools() -> Vec<Arc<dyn AgentTool>> {
     vec![
-        Box::new(BashTool::default()),
-        Box::new(ReadFileTool::default()),
-        Box::new(WriteFileTool::new()),
-        Box::new(EditFileTool::new()),
-        Box::new(ListFilesTool::default()),
-        Box::new(SearchTool::default()),
+        Arc::new(BashTool::default()),
+        Arc::new(ReadFileTool::default()),
+        Arc::new(WriteFileTool::new()),
+        Arc::new(EditFileTool::new()),
+        Arc::new(ListFilesTool::default()),
+        Arc::new(SearchTool::default()),
     ]
 }

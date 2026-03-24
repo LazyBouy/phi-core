@@ -1,8 +1,8 @@
 //! Tests for the Agent struct (stateful wrapper).
 
-use phi_core::BasicAgent;
 use phi_core::provider::mock::*;
-use phi_core::provider::{ModelConfig, MockProvider};
+use phi_core::provider::{MockProvider, ModelConfig};
+use phi_core::BasicAgent;
 use phi_core::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -86,7 +86,7 @@ async fn test_agent_with_tools() {
     let mut agent = BasicAgent::new(ModelConfig::anthropic("mock", "mock", "test"))
         .with_provider_override(Arc::new(provider))
         .with_system_prompt("test")
-        .with_tools(vec![Box::new(EchoTool)]);
+        .with_tools(vec![Arc::new(EchoTool)]);
 
     let _ = agent.prompt("Echo hello").await;
 
@@ -347,7 +347,7 @@ async fn test_prompt_with_sender_tools_restored() {
     let mut agent = BasicAgent::new(ModelConfig::anthropic("mock", "mock", "test"))
         .with_provider_override(Arc::new(provider))
         .with_system_prompt("test")
-        .with_tools(vec![Box::new(DummyTool)]);
+        .with_tools(vec![Arc::new(DummyTool)]);
 
     let (tx, mut rx) = mpsc::unbounded_channel();
     let consumer = tokio::spawn(async move { while rx.recv().await.is_some() {} });

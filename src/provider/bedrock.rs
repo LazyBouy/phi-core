@@ -71,10 +71,16 @@ impl StreamProvider for BedrockProvider {
         let model_config = &config.model_config;
 
         let base_url = &model_config.base_url;
-        let url = format!("{}/model/{}/converse-stream", base_url, config.model_config.id);
+        let url = format!(
+            "{}/model/{}/converse-stream",
+            base_url, config.model_config.id
+        );
 
         let body = build_bedrock_body(&config);
-        debug!("Bedrock request: model={} url={}", config.model_config.id, url);
+        debug!(
+            "Bedrock request: model={} url={}",
+            config.model_config.id, url
+        );
 
         /*
         RUST QUIRK: `config.model_config.api_key.splitn(3, ':').collect::<Vec<&str>>()`
@@ -105,7 +111,10 @@ impl StreamProvider for BedrockProvider {
         // If no auth headers provided, try basic Bearer auth as fallback
         // (works with some Bedrock proxy configurations)
         if !model_config.headers.contains_key("authorization") {
-            request = request.header("authorization", format!("Bearer {}", config.model_config.api_key));
+            request = request.header(
+                "authorization",
+                format!("Bearer {}", config.model_config.api_key),
+            );
         }
 
         let response = request

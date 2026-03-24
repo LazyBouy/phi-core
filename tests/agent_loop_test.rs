@@ -1,8 +1,11 @@
 //! Tests for the core agent loop using MockProvider.
 
-use phi_core::agent_loop::{agent_loop, agent_loop_continue, AgentLoopConfig};
+use phi_core::agent_loop::{agent_loop, agent_loop_continue, agent_loop_parallel, AgentLoopConfig};
+use phi_core::evaluation::{
+    ElaborateEvaluation, PickFirstEvaluation, TokenEfficientEvaluation, TransparentEvaluation,
+};
 use phi_core::provider::mock::*;
-use phi_core::provider::{ModelConfig, MockProvider};
+use phi_core::provider::{MockProvider, ModelConfig};
 use phi_core::*;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -89,6 +92,8 @@ async fn test_simple_text_response() {
             AgentEvent::ToolExecutionEnd { .. } => "ToolExecEnd",
             AgentEvent::ProgressMessage { .. } => "ProgressMessage",
             AgentEvent::InputRejected { .. } => "InputRejected",
+            AgentEvent::ParallelLoopStart { .. } => "ParallelLoopStart",
+            AgentEvent::ParallelLoopEnd { .. } => "ParallelLoopEnd",
         })
         .collect();
 
@@ -159,7 +164,7 @@ async fn test_tool_call_and_response() {
     let mut context = AgentContext {
         system_prompt: "You are helpful.".into(),
         messages: Vec::new(),
-        tools: vec![Box::new(ReadFileTool)],
+        tools: vec![Arc::new(ReadFileTool)],
         agent_id: None,
         session_id: None,
         loop_id: None,
@@ -190,6 +195,8 @@ async fn test_tool_call_and_response() {
             AgentEvent::ToolExecutionEnd { .. } => "ToolExecEnd",
             AgentEvent::ProgressMessage { .. } => "ProgressMessage",
             AgentEvent::InputRejected { .. } => "InputRejected",
+            AgentEvent::ParallelLoopStart { .. } => "ParallelLoopStart",
+            AgentEvent::ParallelLoopEnd { .. } => "ParallelLoopEnd",
         })
         .collect();
 
@@ -312,7 +319,7 @@ async fn test_tool_error_is_reported() {
     let mut context = AgentContext {
         system_prompt: "test".into(),
         messages: Vec::new(),
-        tools: vec![Box::new(FailingTool)],
+        tools: vec![Arc::new(FailingTool)],
         agent_id: None,
         session_id: None,
         loop_id: None,
@@ -443,15 +450,15 @@ async fn test_parallel_tool_execution_faster_than_sequential() {
         system_prompt: "test".into(),
         messages: Vec::new(),
         tools: vec![
-            Box::new(TimedTool {
+            Arc::new(TimedTool {
                 name: "tool_a".into(),
                 delay_ms: 50,
             }),
-            Box::new(TimedTool {
+            Arc::new(TimedTool {
                 name: "tool_b".into(),
                 delay_ms: 50,
             }),
-            Box::new(TimedTool {
+            Arc::new(TimedTool {
                 name: "tool_c".into(),
                 delay_ms: 50,
             }),
@@ -523,11 +530,11 @@ async fn test_sequential_tool_execution_is_slower() {
         system_prompt: "test".into(),
         messages: Vec::new(),
         tools: vec![
-            Box::new(TimedTool {
+            Arc::new(TimedTool {
                 name: "tool_a".into(),
                 delay_ms: 50,
             }),
-            Box::new(TimedTool {
+            Arc::new(TimedTool {
                 name: "tool_b".into(),
                 delay_ms: 50,
             }),
@@ -587,19 +594,19 @@ async fn test_batched_tool_execution() {
         system_prompt: "test".into(),
         messages: Vec::new(),
         tools: vec![
-            Box::new(TimedTool {
+            Arc::new(TimedTool {
                 name: "tool_a".into(),
                 delay_ms: 50,
             }),
-            Box::new(TimedTool {
+            Arc::new(TimedTool {
                 name: "tool_b".into(),
                 delay_ms: 50,
             }),
-            Box::new(TimedTool {
+            Arc::new(TimedTool {
                 name: "tool_c".into(),
                 delay_ms: 50,
             }),
-            Box::new(TimedTool {
+            Arc::new(TimedTool {
                 name: "tool_d".into(),
                 delay_ms: 50,
             }),
@@ -699,7 +706,7 @@ async fn test_tool_execution_update_events_emitted() {
     let mut context = AgentContext {
         system_prompt: "test".into(),
         messages: Vec::new(),
-        tools: vec![Box::new(ProgressTool)],
+        tools: vec![Arc::new(ProgressTool)],
         agent_id: None,
         session_id: None,
         loop_id: None,
@@ -787,7 +794,9 @@ async fn test_retry_on_rate_limit_succeeds() {
 
     let config = AgentLoopConfig {
         model_config: ModelConfig::anthropic("mock", "mock", "test"),
-        provider_override: Some(Arc::clone(&provider) as Arc<dyn phi_core::provider::StreamProvider>),
+        provider_override: Some(
+            Arc::clone(&provider) as Arc<dyn phi_core::provider::StreamProvider>
+        ),
         thinking_level: ThinkingLevel::Off,
         max_tokens: None,
         temperature: None,
@@ -864,7 +873,9 @@ async fn test_retry_exhausted_returns_error() {
 
     let config = AgentLoopConfig {
         model_config: ModelConfig::anthropic("mock", "mock", "test"),
-        provider_override: Some(Arc::clone(&provider) as Arc<dyn phi_core::provider::StreamProvider>),
+        provider_override: Some(
+            Arc::clone(&provider) as Arc<dyn phi_core::provider::StreamProvider>
+        ),
         thinking_level: ThinkingLevel::Off,
         max_tokens: None,
         temperature: None,
@@ -948,7 +959,9 @@ async fn test_no_retry_on_auth_error() {
 
     let config = AgentLoopConfig {
         model_config: ModelConfig::anthropic("mock", "mock", "test"),
-        provider_override: Some(Arc::clone(&provider) as Arc<dyn phi_core::provider::StreamProvider>),
+        provider_override: Some(
+            Arc::clone(&provider) as Arc<dyn phi_core::provider::StreamProvider>
+        ),
         thinking_level: ThinkingLevel::Off,
         max_tokens: None,
         temperature: None,
@@ -1015,7 +1028,9 @@ async fn test_retry_none_disables_retries() {
 
     let config = AgentLoopConfig {
         model_config: ModelConfig::anthropic("mock", "mock", "test"),
-        provider_override: Some(Arc::clone(&provider) as Arc<dyn phi_core::provider::StreamProvider>),
+        provider_override: Some(
+            Arc::clone(&provider) as Arc<dyn phi_core::provider::StreamProvider>
+        ),
         thinking_level: ThinkingLevel::Off,
         max_tokens: None,
         temperature: None,
@@ -1187,7 +1202,7 @@ async fn test_before_turn_can_abort() {
     let mut context = AgentContext {
         system_prompt: "test".into(),
         messages: Vec::new(),
-        tools: vec![Box::new(ProgressTool)],
+        tools: vec![Arc::new(ProgressTool)],
         agent_id: None,
         session_id: None,
         loop_id: None,
@@ -1234,7 +1249,7 @@ async fn test_after_turn_receives_messages() {
     let mut context = AgentContext {
         system_prompt: "test".into(),
         messages: Vec::new(),
-        tools: vec![Box::new(ProgressTool)],
+        tools: vec![Arc::new(ProgressTool)],
         agent_id: None,
         session_id: None,
         loop_id: None,
@@ -1270,7 +1285,9 @@ async fn test_on_error_fires_on_provider_error() {
 
     let config = AgentLoopConfig {
         model_config: ModelConfig::anthropic("mock", "mock", "test"),
-        provider_override: Some(Arc::clone(&provider) as Arc<dyn phi_core::provider::StreamProvider>),
+        provider_override: Some(
+            Arc::clone(&provider) as Arc<dyn phi_core::provider::StreamProvider>
+        ),
         thinking_level: ThinkingLevel::Off,
         max_tokens: None,
         temperature: None,
@@ -1406,7 +1423,7 @@ async fn test_progress_message_event_emitted() {
     let mut context = AgentContext {
         system_prompt: "test".into(),
         messages: Vec::new(),
-        tools: vec![Box::new(ProgressMessageTool)],
+        tools: vec![Arc::new(ProgressMessageTool)],
         agent_id: None,
         session_id: None,
         loop_id: None,
@@ -1485,7 +1502,7 @@ async fn test_tool_ignoring_progress_no_panic() {
     let mut context = AgentContext {
         system_prompt: "test".into(),
         messages: Vec::new(),
-        tools: vec![Box::new(SilentTool)],
+        tools: vec![Arc::new(SilentTool)],
         agent_id: None,
         session_id: None,
         loop_id: None,
@@ -1566,10 +1583,10 @@ async fn test_parallel_tools_progress_distinguishable() {
         system_prompt: "test".into(),
         messages: Vec::new(),
         tools: vec![
-            Box::new(NamedProgressTool {
+            Arc::new(NamedProgressTool {
                 tool_name: "pa".into(),
             }),
-            Box::new(NamedProgressTool {
+            Arc::new(NamedProgressTool {
                 tool_name: "pb".into(),
             }),
         ],
@@ -1618,7 +1635,7 @@ async fn test_on_update_still_works_after_refactor() {
     let mut context = AgentContext {
         system_prompt: "test".into(),
         messages: Vec::new(),
-        tools: vec![Box::new(ProgressTool)],
+        tools: vec![Arc::new(ProgressTool)],
         agent_id: None,
         session_id: None,
         loop_id: None,
@@ -2034,17 +2051,29 @@ async fn test_filter_rejects_steering_message() {
 
     let (tx, rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
-    agent_loop(vec![AgentMessage::Llm(Message::user("hello"))], &mut context, &config, tx, cancel).await;
+    agent_loop(
+        vec![AgentMessage::Llm(Message::user("hello"))],
+        &mut context,
+        &config,
+        tx,
+        cancel,
+    )
+    .await;
     let events = collect_events(rx);
 
     // InputRejected must have fired
     assert!(
-        events.iter().any(|e| matches!(e, AgentEvent::InputRejected { reason } if reason.contains("SECRET"))),
-        "expected InputRejected; got: {:?}", events
+        events.iter().any(
+            |e| matches!(e, AgentEvent::InputRejected { reason } if reason.contains("SECRET"))
+        ),
+        "expected InputRejected; got: {:?}",
+        events
     );
     // No LLM turn should have started
     assert!(
-        !events.iter().any(|e| matches!(e, AgentEvent::TurnStart { .. })),
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TurnStart { .. })),
         "unexpected TurnStart; steering was rejected before any turn"
     );
 }
@@ -2085,25 +2114,39 @@ async fn test_filter_warns_steering_message() {
 
     let (tx, _rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
-    agent_loop(vec![AgentMessage::Llm(Message::user("hello"))], &mut context, &config, tx, cancel).await;
+    agent_loop(
+        vec![AgentMessage::Llm(Message::user("hello"))],
+        &mut context,
+        &config,
+        tx,
+        cancel,
+    )
+    .await;
 
     // The steering message should be in context with the warning appended
     let steering_msg = context.messages.iter().find(|m| {
         if let AgentMessage::Llm(Message::User { content, .. }) = m {
-            content.iter().any(|c| {
-                matches!(c, Content::Text { text } if text.contains("FLAGGED"))
-            })
+            content
+                .iter()
+                .any(|c| matches!(c, Content::Text { text } if text.contains("FLAGGED")))
         } else {
             false
         }
     });
-    assert!(steering_msg.is_some(), "steering message not found in context");
+    assert!(
+        steering_msg.is_some(),
+        "steering message not found in context"
+    );
 
     if let Some(AgentMessage::Llm(Message::User { content, .. })) = steering_msg {
-        let has_warning = content.iter().any(|c| {
-            matches!(c, Content::Text { text } if text.contains("[Warning: steer-warn]"))
-        });
-        assert!(has_warning, "warning not appended to steering message; content: {:?}", content);
+        let has_warning = content
+            .iter()
+            .any(|c| matches!(c, Content::Text { text } if text.contains("[Warning: steer-warn]")));
+        assert!(
+            has_warning,
+            "warning not appended to steering message; content: {:?}",
+            content
+        );
     }
 }
 
@@ -2142,12 +2185,21 @@ async fn test_filter_rejects_follow_up_message() {
 
     let (tx, rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
-    agent_loop(vec![AgentMessage::Llm(Message::user("hello"))], &mut context, &config, tx, cancel).await;
+    agent_loop(
+        vec![AgentMessage::Llm(Message::user("hello"))],
+        &mut context,
+        &config,
+        tx,
+        cancel,
+    )
+    .await;
     let events = collect_events(rx);
 
     // First turn completed normally
     assert!(
-        events.iter().any(|e| matches!(e, AgentEvent::TurnEnd { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TurnEnd { .. })),
         "expected at least one TurnEnd"
     );
     // Follow-up was rejected
@@ -2157,12 +2209,20 @@ async fn test_filter_rejects_follow_up_message() {
     );
     // AgentEnd still fires (run closes cleanly)
     assert!(
-        events.iter().any(|e| matches!(e, AgentEvent::AgentEnd { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::AgentEnd { .. })),
         "expected AgentEnd"
     );
     // Only one TurnStart: the second turn (follow-up) never started
-    let turn_starts = events.iter().filter(|e| matches!(e, AgentEvent::TurnStart { .. })).count();
-    assert_eq!(turn_starts, 1, "expected exactly 1 TurnStart; follow-up turn was rejected");
+    let turn_starts = events
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::TurnStart { .. }))
+        .count();
+    assert_eq!(
+        turn_starts, 1,
+        "expected exactly 1 TurnStart; follow-up turn was rejected"
+    );
 }
 
 #[tokio::test]
@@ -2200,28 +2260,49 @@ async fn test_filter_warns_follow_up_message() {
 
     let (tx, _rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
-    agent_loop(vec![AgentMessage::Llm(Message::user("hello"))], &mut context, &config, tx, cancel).await;
+    agent_loop(
+        vec![AgentMessage::Llm(Message::user("hello"))],
+        &mut context,
+        &config,
+        tx,
+        cancel,
+    )
+    .await;
 
     // The follow-up message should be in context with the warning appended
     let followup_msg = context.messages.iter().find(|m| {
         if let AgentMessage::Llm(Message::User { content, .. }) = m {
-            content.iter().any(|c| {
-                matches!(c, Content::Text { text } if text.contains("WARN_FOLLOWUP"))
-            })
+            content
+                .iter()
+                .any(|c| matches!(c, Content::Text { text } if text.contains("WARN_FOLLOWUP")))
         } else {
             false
         }
     });
-    assert!(followup_msg.is_some(), "follow-up message not found in context");
+    assert!(
+        followup_msg.is_some(),
+        "follow-up message not found in context"
+    );
 
     if let Some(AgentMessage::Llm(Message::User { content, .. })) = followup_msg {
-        let has_warning = content.iter().any(|c| {
-            matches!(c, Content::Text { text } if text.contains("[Warning: follow-warn]"))
-        });
-        assert!(has_warning, "warning not appended to follow-up message; content: {:?}", content);
+        let has_warning = content.iter().any(
+            |c| matches!(c, Content::Text { text } if text.contains("[Warning: follow-warn]")),
+        );
+        assert!(
+            has_warning,
+            "warning not appended to follow-up message; content: {:?}",
+            content
+        );
     }
     // Both turns ran
-    assert_eq!(context.messages.iter().filter(|m| matches!(m, AgentMessage::Llm(Message::Assistant { .. }))).count(), 2);
+    assert_eq!(
+        context
+            .messages
+            .iter()
+            .filter(|m| matches!(m, AgentMessage::Llm(Message::Assistant { .. })))
+            .count(),
+        2
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2315,7 +2396,9 @@ async fn test_agent_end_carries_accumulated_usage() {
         move || {
             if !called.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 vec![AgentMessage::Llm(Message::User {
-                    content: vec![Content::Text { text: "follow up".into() }],
+                    content: vec![Content::Text {
+                        text: "follow up".into(),
+                    }],
                     timestamp: 0,
                 })]
             } else {
@@ -2331,7 +2414,9 @@ async fn test_agent_end_carries_accumulated_usage() {
     };
     let (tx, rx) = mpsc::unbounded_channel();
     let prompts = vec![AgentMessage::Llm(Message::User {
-        content: vec![Content::Text { text: "start".into() }],
+        content: vec![Content::Text {
+            text: "start".into(),
+        }],
         timestamp: 0,
     })];
     agent_loop(prompts, &mut context, &config, tx, CancellationToken::new()).await;
@@ -2373,7 +2458,9 @@ async fn test_reasoning_tokens_accumulated() {
     };
     let (tx, rx) = mpsc::unbounded_channel();
     let prompts = vec![AgentMessage::Llm(Message::User {
-        content: vec![Content::Text { text: "think hard".into() }],
+        content: vec![Content::Text {
+            text: "think hard".into(),
+        }],
         timestamp: 0,
     })];
     agent_loop(prompts, &mut context, &config, tx, CancellationToken::new()).await;
@@ -2435,11 +2522,20 @@ async fn test_budget_enforcement_stops_loop() {
     })];
     agent_loop(prompts, &mut context, &config, tx, CancellationToken::new()).await;
     let events = collect_events(rx);
-    let turn_starts = events.iter().filter(|e| matches!(e, AgentEvent::TurnStart { .. })).count();
+    let turn_starts = events
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::TurnStart { .. }))
+        .count();
     // First turn runs, cost check fires after it, loop stops before second turn
-    assert_eq!(turn_starts, 1, "expected 1 TurnStart before budget cut-off, got {}", turn_starts);
+    assert_eq!(
+        turn_starts, 1,
+        "expected 1 TurnStart before budget cut-off, got {}",
+        turn_starts
+    );
     // AgentEnd must always be emitted
-    assert!(events.iter().any(|e| matches!(e, AgentEvent::AgentEnd { .. })));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::AgentEnd { .. })));
 }
 
 // ---------------------------------------------------------------------------
@@ -2848,4 +2944,254 @@ async fn test_continue_panics_without_agent_id() {
     let (tx, _rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
     agent_loop_continue(&mut context, &config, tx, cancel).await;
+}
+
+// ── Evaluational parallelism tests ───────────────────────────────────────────
+
+fn make_base_context() -> AgentContext {
+    AgentContext {
+        system_prompt: String::new(),
+        messages: vec![],
+        tools: vec![],
+        agent_id: None,
+        session_id: None,
+        loop_id: None,
+        parent_loop_id: None,
+        continuation_kind: None,
+    }
+}
+
+/// Single config + TransparentEvaluation behaves identically to plain agent_loop.
+#[tokio::test]
+async fn test_parallel_transparent() {
+    let provider = MockProvider::text("transparent response");
+    let config = make_config(Arc::new(provider));
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    let result = agent_loop_parallel(
+        vec![AgentMessage::Llm(Message::user("hello"))],
+        make_base_context(),
+        vec![config],
+        Arc::new(TransparentEvaluation),
+        tx,
+        CancellationToken::new(),
+    )
+    .await;
+
+    assert_eq!(result.selected_index, 0);
+    assert!(result.all_outcomes.is_empty()); // selected removed from all_outcomes
+    assert!(!result.selected_messages.is_empty());
+
+    let events = collect_events(rx);
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::ParallelLoopStart { .. })));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::ParallelLoopEnd { .. })));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::AgentStart { .. })));
+}
+
+/// PickFirstEvaluation always selects index 0 regardless of other branches.
+#[tokio::test]
+async fn test_parallel_pick_first() {
+    let config_a = make_config(Arc::new(MockProvider::text("response from A")));
+    let config_b = make_config(Arc::new(MockProvider::text("response from B")));
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    let result = agent_loop_parallel(
+        vec![AgentMessage::Llm(Message::user("compare"))],
+        make_base_context(),
+        vec![config_a, config_b],
+        Arc::new(PickFirstEvaluation),
+        tx,
+        CancellationToken::new(),
+    )
+    .await;
+
+    assert_eq!(result.selected_index, 0);
+    // One branch was selected, one remains in all_outcomes.
+    assert_eq!(result.all_outcomes.len(), 1);
+
+    // Both branches' AgentStart events should appear (same session_id).
+    let events = collect_events(rx);
+    let agent_starts: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::AgentStart { .. }))
+        .collect();
+    assert_eq!(agent_starts.len(), 2);
+
+    // All AgentStart events share the same session_id.
+    let session_ids: Vec<_> = agent_starts
+        .iter()
+        .filter_map(|e| {
+            if let AgentEvent::AgentStart { session_id, .. } = e {
+                Some(session_id.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(session_ids.windows(2).all(|w| w[0] == w[1]));
+}
+
+/// TokenEfficientEvaluation selects the branch with the fewest output tokens.
+/// MockProvider reports usage proportional to response length via MockResponse.
+#[tokio::test]
+async fn test_parallel_token_efficient() {
+    // We can't control MockProvider's reported token counts directly, but we can verify
+    // the strategy is wired correctly: all 3 branches run, one is selected.
+    let config_a = make_config(Arc::new(MockProvider::text("a")));
+    let config_b = make_config(Arc::new(MockProvider::text("b")));
+    let config_c = make_config(Arc::new(MockProvider::text("c")));
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let result = agent_loop_parallel(
+        vec![AgentMessage::Llm(Message::user("query"))],
+        make_base_context(),
+        vec![config_a, config_b, config_c],
+        Arc::new(TokenEfficientEvaluation),
+        tx,
+        CancellationToken::new(),
+    )
+    .await;
+
+    // Whatever was selected, the index is in [0, 2].
+    assert!(result.selected_index <= 2);
+    // 2 non-selected branches remain.
+    assert_eq!(result.all_outcomes.len(), 2);
+    // ParallelLoopResult has a total_usage field — just verify it exists.
+    let _ = &result.total_usage;
+}
+
+/// ElaborateEvaluation selects the branch with the most output tokens.
+#[tokio::test]
+async fn test_parallel_elaborate() {
+    let config_a = make_config(Arc::new(MockProvider::text("x")));
+    let config_b = make_config(Arc::new(MockProvider::text("y")));
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let result = agent_loop_parallel(
+        vec![AgentMessage::Llm(Message::user("query"))],
+        make_base_context(),
+        vec![config_a, config_b],
+        Arc::new(ElaborateEvaluation),
+        tx,
+        CancellationToken::new(),
+    )
+    .await;
+
+    assert!(result.selected_index <= 1);
+    assert_eq!(result.all_outcomes.len(), 1);
+}
+
+/// LlmJudgeEvaluation: a third MockProvider acts as judge and returns "2",
+/// so branch index 1 is selected.
+#[tokio::test]
+async fn test_parallel_llm_judge() {
+    use phi_core::evaluation::LlmJudgeEvaluation;
+
+    let config_a = make_config(Arc::new(MockProvider::text("first branch answer")));
+    let config_b = make_config(Arc::new(MockProvider::text("second branch answer")));
+
+    // Judge mock replies "2" → selects index 1 (second branch, 0-based)
+    let judge_provider = Arc::new(MockProvider::text("2"));
+    let judge_config = make_config(judge_provider);
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    let result = agent_loop_parallel(
+        vec![AgentMessage::Llm(Message::user("which is better?"))],
+        make_base_context(),
+        vec![config_a, config_b],
+        Arc::new(LlmJudgeEvaluation {
+            judge_config,
+            system_prompt: None,
+        }),
+        tx,
+        CancellationToken::new(),
+    )
+    .await;
+
+    // Judge said "2" → selected_index == 1
+    assert_eq!(result.selected_index, 1);
+    assert_eq!(result.all_outcomes.len(), 1); // the non-selected branch
+
+    // The judge loop emits its own AgentStart — so we expect 3 AgentStart events
+    // (branch A + branch B + judge).
+    let events = collect_events(rx);
+    let agent_start_count = events
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::AgentStart { .. }))
+        .count();
+    assert_eq!(agent_start_count, 3);
+
+    // Judge's usage is part of total_usage.
+    let end_event = events
+        .iter()
+        .find(|e| matches!(e, AgentEvent::ParallelLoopEnd { .. }));
+    assert!(end_event.is_some());
+    if let Some(AgentEvent::ParallelLoopEnd {
+        selected_config_index,
+        ..
+    }) = end_event
+    {
+        assert_eq!(*selected_config_index, 1);
+    }
+}
+
+/// agent_loop_continue mode: prompts is empty, context already contains the user query.
+/// Both branches run via agent_loop_continue and the result is selected normally.
+#[tokio::test]
+async fn test_parallel_continue_mode() {
+    // Both branches respond with text; PickFirst selects branch 0.
+    let config_a = make_config(Arc::new(MockProvider::text("branch a response")));
+    let config_b = make_config(Arc::new(MockProvider::text("branch b response")));
+
+    // Pre-populate context with the user query (simulating an agent_loop_continue scenario).
+    let mut base_ctx = make_base_context();
+    base_ctx.agent_id = Some("test-agent".to_string());
+    base_ctx.session_id = Some("test-session".to_string());
+    base_ctx
+        .messages
+        .push(AgentMessage::Llm(Message::user("Which answer is better?")));
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    let result = agent_loop_parallel(
+        vec![], // empty prompts → agent_loop_continue mode
+        base_ctx,
+        vec![config_a, config_b],
+        Arc::new(PickFirstEvaluation),
+        tx,
+        CancellationToken::new(),
+    )
+    .await;
+
+    // PickFirst always selects index 0.
+    assert_eq!(result.selected_index, 0);
+
+    // The selected branch should have produced at least one assistant message.
+    assert!(!result.selected_messages.is_empty());
+
+    // original_context_len should be 1 (the user message we pre-populated).
+    // The non-selected outcome retains this information.
+    assert_eq!(result.all_outcomes.len(), 1);
+    assert_eq!(result.all_outcomes[0].original_context_len, 1);
+
+    // Both branches emitted AgentStart events.
+    let events = collect_events(rx);
+    let agent_start_count = events
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::AgentStart { .. }))
+        .count();
+    assert_eq!(agent_start_count, 2);
+
+    // ParallelLoopStart and ParallelLoopEnd bracket the execution.
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::ParallelLoopStart { .. })));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::ParallelLoopEnd { .. })));
 }

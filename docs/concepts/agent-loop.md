@@ -311,3 +311,26 @@ impl CompactionStrategy for PriorityPreservingCompaction {
     }
 }
 ```
+
+## Evaluational Parallelism
+
+`agent_loop_parallel` runs the same prompt through multiple `AgentLoopConfig`s concurrently, evaluates the results with a pluggable `EvaluationStrategy`, and returns the winning branch. This is useful for multi-model comparison, A/B prompt testing, and selecting the best response among different reasoning approaches.
+
+```rust
+use phi_core::{agent_loop_parallel, PickFirstEvaluation, AgentContext, AgentLoopConfig};
+use std::sync::Arc;
+
+let result = agent_loop_parallel(
+    prompts,
+    base_context,           // cloned per branch; Arc tools shared
+    vec![config_a, config_b],
+    Arc::new(PickFirstEvaluation),
+    tx,
+    cancel,
+).await;
+
+// result.selected_context feeds directly into agent_loop_continue()
+// result.selected_messages is the winning branch's output
+```
+
+See [Evaluational Parallelism](./evaluational-parallelism.md) for the full guide including built-in strategies, the LLM judge, and session continuity.

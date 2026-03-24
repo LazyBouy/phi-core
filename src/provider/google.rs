@@ -415,7 +415,11 @@ mod tests {
     #[test]
     fn test_build_google_request() {
         let config = StreamConfig {
-            model_config: crate::provider::ModelConfig::google("gemini-2.0-flash", "Gemini Flash", "test"),
+            model_config: crate::provider::ModelConfig::google(
+                "gemini-2.0-flash",
+                "Gemini Flash",
+                "test",
+            ),
             system_prompt: "Be helpful".into(),
             messages: vec![Message::user("Hello")],
             tools: vec![],

@@ -1,4 +1,5 @@
 use crate::provider::CostConfig;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
@@ -515,6 +516,18 @@ impl Usage {
             + (self.output as f64 / 1_000_000.0) * cost.output_per_million
             + (self.cache_read as f64 / 1_000_000.0) * cost.cache_read_per_million
             + (self.cache_write as f64 / 1_000_000.0) * cost.cache_write_per_million
+    }
+
+    /// Add two `Usage` values together (e.g., sum across parallel branches or multi-step loops).
+    pub fn combine(&self, other: &Usage) -> Usage {
+        Usage {
+            input: self.input + other.input,
+            output: self.output + other.output,
+            reasoning: self.reasoning + other.reasoning,
+            cache_read: self.cache_read + other.cache_read,
+            cache_write: self.cache_write + other.cache_write,
+            total_tokens: self.total_tokens + other.total_tokens,
+        }
     }
 
     /// Fraction of input tokens served from cache (0.0–1.0).
@@ -1162,6 +1175,26 @@ pub enum AgentEvent {
     /// The agent loop returns immediately after emitting this — no LLM call is made.
     /// UI use: show an error banner; do NOT bubble this up as a normal message.
     InputRejected { reason: String },
+
+    /// Emitted by `agent_loop_parallel` before any branch is dispatched.
+    /// `loop_ids` lists the assigned loop_id for each branch, in config order.
+    /// UI use: show a "running N parallel branches" status indicator.
+    ParallelLoopStart {
+        session_id: String,
+        loop_ids: Vec<String>,
+        timestamp: DateTime<Utc>,
+    },
+
+    /// Emitted by `agent_loop_parallel` after evaluation selects a winning branch.
+    /// `evaluation_usage` is the judge LLM's usage (zero if no judge was used).
+    /// UI use: show which branch was selected; hide or collapse the non-selected branches.
+    ParallelLoopEnd {
+        session_id: String,
+        selected_loop_id: String,
+        selected_config_index: usize,
+        evaluation_usage: Usage,
+        timestamp: DateTime<Utc>,
+    },
 }
 
 /*
@@ -1197,7 +1230,7 @@ pub enum StreamDelta {
 // Agent context (passed to the loop)
 // ---------------------------------------------------------------------------
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct AgentContext {
     /*
     AgentContext vs Agent Session
@@ -1212,12 +1245,11 @@ pub struct AgentContext {
     pub system_prompt: String, // PROMPT — injected at the top of every LLM call (role="system")
     pub messages: Vec<AgentMessage>, // HISTORY — full conversation; grows each turn; includes Extension messages
 
-    // dyn: "I don't know the concrete type at compile time, but it implements the AgentTool trait"
-    // Box: "I want to store this on the heap because it might be a large or complex type,
-    // and I want to use dynamic dispatch to call its methods". In plain terms, Box is a heap-allocated pointer wrapper
-    // — because Rust needs to know the size of everything at compile time, and different tool structs have different sizes,
-    // so you box them to a fixed-size pointer.
-    pub tools: Vec<Box<dyn AgentTool>>, // REGISTRY — available tool implementations; converted to ToolDefinition for LLM
+    // Arc<dyn AgentTool>: shared ownership of type-erased tools. Arc (atomic reference-counted
+    // pointer) allows AgentContext to be Clone — cloning a context for parallel branches is a
+    // cheap reference-count increment on each tool, not a deep copy. Tools are immutable during
+    // execution (execute takes &self), so sharing via Arc is semantically correct.
+    pub tools: Vec<Arc<dyn AgentTool>>, // REGISTRY — available tool implementations; converted to ToolDefinition for LLM
 
     // ── Identity ─────────────────────────────────────────────────────────────
     // Set by callers (e.g. Agent wrapper) before each loop call.
@@ -1244,6 +1276,54 @@ pub struct AgentContext {
     /// How this loop relates to prior loops. None for origin calls.
     /// Some(Default|Rerun|Branch) for agent_loop_continue() calls.
     pub continuation_kind: Option<ContinuationKind>,
+}
+
+// ---------------------------------------------------------------------------
+// Evaluational parallelism result types
+// ---------------------------------------------------------------------------
+
+/// One branch's outcome from `agent_loop_parallel`.
+///
+/// Contains the complete context after the branch loop, the new messages it
+/// produced, its token usage, and the identifiers linking it back to its config.
+pub struct ParallelLoopOutcome {
+    /// Position in the input `configs` vec (0-based).
+    pub config_index: usize,
+    /// The `loop_id` assigned to this branch: `"{session_id}.{config_segment}.{N}"`.
+    pub loop_id: String,
+    /// Full `AgentContext` after the branch loop completed.
+    pub context: AgentContext,
+    /// Only the messages produced by this branch's loop (not prior history).
+    pub new_messages: Vec<AgentMessage>,
+    /// Token usage accumulated across all turns of this branch.
+    pub usage: Usage,
+    /// Number of messages in the cloned context at the moment the branch was
+    /// dispatched. `context.messages[..original_context_len]` is the shared base
+    /// context all branches started from; messages at `[original_context_len..]`
+    /// are new messages produced by this branch.
+    ///
+    /// Evaluation strategies use this to extract the original user query and
+    /// prior conversation history without separate bookkeeping.
+    pub original_context_len: usize,
+}
+
+/// Return type of `agent_loop_parallel`.
+///
+/// Contains the evaluation winner's context and messages, plus all branch
+/// outcomes for inspection. Feed `selected_context` into `agent_loop_continue()`
+/// to resume the session normally after a parallel evaluation call.
+pub struct ParallelLoopResult {
+    /// Full context of the selected (winning) branch.
+    pub selected_context: AgentContext,
+    /// New messages from the selected branch (the agent's delivered response).
+    pub selected_messages: Vec<AgentMessage>,
+    /// 0-based index into the original `configs` slice identifying the winning branch.
+    pub selected_index: usize,
+    /// Remaining (non-selected) branch outcomes. The selected branch's context and messages
+    /// are available via `selected_context` / `selected_messages`.
+    pub all_outcomes: Vec<ParallelLoopOutcome>,
+    /// Combined token usage: all branch usages + evaluation (judge) usage.
+    pub total_usage: Usage,
 }
 
 // ---------------------------------------------------------------------------
@@ -1292,6 +1372,46 @@ Python analogy: an abstract base class with one required method:
 */
 pub trait InputFilter: Send + Sync {
     fn filter(&self, text: &str) -> FilterResult;
+}
+
+// ---------------------------------------------------------------------------
+// Evaluation strategy (trait + decision type)
+// ---------------------------------------------------------------------------
+//
+// Defined here (not in evaluation.rs) so that `agent_loop_parallel` can accept
+// `Arc<dyn EvaluationStrategy>` without creating a circular dependency:
+//   agent_loop.rs → types.rs  ✓
+//   evaluation.rs → agent_loop.rs + types.rs  ✓  (no cycle)
+
+/// The decision returned by an [`EvaluationStrategy`] after reviewing all branch outcomes.
+pub enum EvaluationDecision {
+    /// Use the outcome at this 0-based index from the outcomes slice.
+    Select(usize),
+}
+
+/// Pluggable strategy that selects the best result from a set of parallel branch outcomes.
+///
+/// Implementations receive all branch outcomes plus the original prompts, then
+/// return an [`EvaluationDecision`] and any [`Usage`] incurred during evaluation
+/// (e.g., a judge LLM call). The usage is added to [`ParallelLoopResult::total_usage`].
+///
+/// # Contract
+///
+/// - `prompts` and `outcomes` are guaranteed non-empty by `agent_loop_parallel`.
+/// - The returned index must be `< outcomes.len()`; `agent_loop_parallel` clamps it.
+/// - Events may be forwarded to `tx` (e.g., for a judge agent loop); none are required.
+///
+/// Built-in implementations live in [`crate::evaluation`].
+#[async_trait::async_trait]
+pub trait EvaluationStrategy: Send + Sync {
+    /// Evaluate all branch outcomes and select the best one.
+    async fn evaluate(
+        &self,
+        prompts: &[AgentMessage],
+        outcomes: &[ParallelLoopOutcome],
+        tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> (EvaluationDecision, Usage);
 }
 
 // ---------------------------------------------------------------------------

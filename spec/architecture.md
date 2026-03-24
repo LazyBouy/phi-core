@@ -28,6 +28,20 @@
 **Public interface:**
 - `agent_loop(prompts, context, config, tx, cancel)` — Start an agent run from new prompt messages, applying input filters, emitting lifecycle events, and returning all new messages produced.
 - `agent_loop_continue(context, config, tx, cancel)` — Resume from existing context (no new prompts); used for retries after errors or mid-conversation continuation.
+- `agent_loop_parallel(prompts, base_context, configs, strategy, tx, cancel) -> ParallelLoopResult` — Run N `AgentLoopConfig`s concurrently and evaluate results via `EvaluationStrategy`. When `prompts` is non-empty, each branch uses `agent_loop`; when `prompts` is empty, each branch uses `agent_loop_continue` (the user query is already the last message in `base_context`). `base_context` is cloned per branch (tools `Arc`-shared; message history deep-copied). All branches share the same `session_id`; each gets a distinct `loop_id`. `ParallelLoopOutcome.original_context_len` marks the base/branch message boundary. Emits `ParallelLoopStart`/`ParallelLoopEnd` events. `selected_context` feeds into `agent_loop_continue()` for normal session resumption.
+- `derive_config_segment(config) -> String` *(pub crate)* — Derives the stable `{config_segment}` portion of a `loop_id` from `config.config_id` or provider/model/thinking fields.
+
+### EvaluationLoop (`src/evaluation.rs`)
+**Responsibility:** Pluggable strategy for selecting among parallel loop outcomes. Decoupled from `agent_loop.rs` to allow custom implementations without a circular dependency (trait is defined in `types.rs`; implementations live here).
+**Public interface:**
+- `EvaluationStrategy` *(trait, defined in `types.rs`)* — `evaluate(prompts, outcomes, tx, cancel) -> (EvaluationDecision, Usage)`
+- `EvaluationDecision` *(enum, defined in `types.rs`)* — `Select(usize)` — 0-based index of the winning outcome.
+- `ParallelLoopOutcome.original_context_len: usize` — Number of messages in the cloned context at dispatch time. Allows strategies to split "original context" from "new branch output" messages without separate bookkeeping. Identical across all outcomes (same base context); `outcomes[0]` is the idiomatic source.
+- `TransparentEvaluation` — Single-branch pass-through; panics if `> 1` outcome.
+- `PickFirstEvaluation` — Always selects index 0. Useful for testing.
+- `TokenEfficientEvaluation` — Selects the outcome with the lowest total token usage.
+- `ElaborateEvaluation` — Selects the outcome with the highest total token usage.
+- `LlmJudgeEvaluation { judge_config, system_prompt }` — Runs a separate LLM call to select the best branch. Supports both `agent_loop` mode (query from `prompts`) and `agent_loop_continue` mode (query extracted from last `Message::User` in `context.messages[..original_context_len]`). Includes prior conversation context in the judge prompt. Applies **2-iteration compaction**: Iteration 1 compacts only prior context (3 tiers: tail-truncate → paragraph-summary → hard char limit), keeping outputs intact; Iteration 2 (if needed) compacts both context and outputs independently through the same tier pipeline. Budget derived from `judge_config.context_config.max_context_tokens`. Emits a `ProgressMessage` warning if comprehension criteria cannot be satisfied after iteration 2.
 
 ### ContextManager (`src/context.rs`)
 **Responsibility:** Token estimation, tiered context compaction, and execution limit tracking.

@@ -35,7 +35,9 @@ use crate::context::{
     CompactionStrategy, ContextConfig, DefaultCompaction, ExecutionLimits, ExecutionTracker,
 };
 
-use crate::provider::{ModelConfig, ProviderRegistry, StreamConfig, StreamEvent, StreamProvider, ToolDefinition};
+use crate::provider::{
+    ModelConfig, ProviderRegistry, StreamConfig, StreamEvent, StreamProvider, ToolDefinition,
+};
 use crate::types::*;
 use std::sync::Arc;
 
@@ -103,6 +105,7 @@ pub type AfterToolExecutionUpdateFn = Arc<dyn Fn(&str, &str, &str) + Send + Sync
 
 /// Called when the LLM returns `StopReason::Error`. Argument: the error message string.
 pub type OnErrorFn = Arc<dyn Fn(&str) + Send + Sync>;
+use chrono::Utc;
 use tokio::sync::mpsc;
 use tracing::warn;
 
@@ -885,7 +888,9 @@ async fn stream_assistant_response(
             Some(p) => p,
             None => {
                 return Message::Assistant {
-                    content: vec![Content::Text { text: String::new() }],
+                    content: vec![Content::Text {
+                        text: String::new(),
+                    }],
                     stop_reason: StopReason::Error,
                     model: config.model_config.id.clone(),
                     provider: String::new(),
@@ -1090,11 +1095,11 @@ struct ToolExecutionResult {
 /*
 execute_tool_calls — dispatches to the right execution strategy.
 
-RUST QUIRK: `&[Box<dyn AgentTool>]` — a slice of trait objects
+RUST QUIRK: `&[Arc<dyn AgentTool>]` — a slice of shared trait objects
 
-  Box<dyn AgentTool>  — a heap-allocated tool of unknown concrete type
-  Vec<Box<dyn AgentTool>> — owned collection of tools
-  &[Box<dyn AgentTool>]  — borrowed slice view into that collection
+  Arc<dyn AgentTool>  — a reference-counted tool of unknown concrete type
+  Vec<Arc<dyn AgentTool>> — owned collection of Arc-wrapped tools
+  &[Arc<dyn AgentTool>]  — borrowed slice view into that collection
 
 We take `&[...]` (a slice) not `&Vec<...>` because slices are more general:
 any contiguous collection (Vec, array, etc.) can be viewed as a slice.
@@ -1121,7 +1126,7 @@ One registry entry → many call-site invocations. They can never be the same st
 The LLM can also hallucinate tool names; `tools` lookup can fail, producing is_error=true.
 */
 async fn execute_tool_calls(
-    tools: &[Box<dyn AgentTool>], // REGISTRY — available implementations (unchanged per-turn)
+    tools: &[Arc<dyn AgentTool>], // REGISTRY — available implementations (unchanged per-turn)
     tool_calls: &[(String, String, serde_json::Value)], // INVOCATIONS — (id, name, args) tuples from the LLM
     tx: &mpsc::UnboundedSender<AgentEvent>,             // OBSERVER — events forwarded to callers
     cancel: &tokio_util::sync::CancellationToken, // ABORT — checked; child tokens for each tool
@@ -1188,7 +1193,7 @@ async fn execute_tool_calls(
 
 /// Execute tool calls one at a time, checking for steering interrupts between each call.
 async fn execute_sequential(
-    tools: &[Box<dyn AgentTool>], // REGISTRY — look up implementations by name
+    tools: &[Arc<dyn AgentTool>], // REGISTRY — look up implementations by name
     tool_calls: &[(String, String, serde_json::Value)], // INVOCATIONS — (id, name, args); processed in order
     tx: &mpsc::UnboundedSender<AgentEvent>, // OBSERVER — forwarded to execute_single_tool
     cancel: &tokio_util::sync::CancellationToken, // ABORT — forwarded to execute_single_tool
@@ -1227,7 +1232,7 @@ async fn execute_sequential(
 /// Steering is only checked *after the whole batch completes*, not between individual calls.
 /// Use [`execute_sequential`] if you need per-call interrupt checking.
 async fn execute_batch(
-    tools: &[Box<dyn AgentTool>], // REGISTRY — shared across all concurrent executions
+    tools: &[Arc<dyn AgentTool>], // REGISTRY — shared across all concurrent executions
     tool_calls: &[(String, String, serde_json::Value)], // INVOCATIONS — all run concurrently (or as a sub-batch)
     tx: &mpsc::UnboundedSender<AgentEvent>, // OBSERVER — shared (UnboundedSender is Clone + cheap)
     cancel: &tokio_util::sync::CancellationToken, // ABORT — each task gets a child token
@@ -1283,7 +1288,7 @@ Why `id` AND `name` as separate params?
 /// Returns `(Message::ToolResult, is_error)`. The message is appended to the LLM context by
 /// the caller; `is_error` is forwarded to the `ToolExecutionEnd` event and `after_tool_execution` hook.
 async fn execute_single_tool(
-    tools: &[Box<dyn AgentTool>], // REGISTRY — searched by `name` to find the implementation
+    tools: &[Arc<dyn AgentTool>], // REGISTRY — searched by `name` to find the implementation
     id: &str,   // INSTANCE ID — unique per call; correlates Start/Update/End events
     name: &str, // SELECTOR — which registry entry to invoke (unknown name → is_error)
     args: &serde_json::Value, // INPUT — LLM-chosen arguments (dynamic JSON per invocation)
@@ -1292,7 +1297,7 @@ async fn execute_single_tool(
     config: &AgentLoopConfig, // HOOKS — before/after_tool_execution and update variants
 ) -> (Message, bool) {
     // (Message::ToolResult for LLM context, is_error for ToolExecutionEnd event)
-    // Find the tool by name. `find` returns Option<&&Box<dyn AgentTool>>.
+    // Find the tool by name. `find` returns Option<&&Arc<dyn AgentTool>>.
     // We use it directly — if None, we return a "tool not found" error result below.
     let tool = tools.iter().find(|t| t.name() == name);
 
@@ -1634,4 +1639,253 @@ fn skip_tool_call(
     .ok();
 
     msg
+}
+
+// ── Evaluational parallelism ──────────────────────────────────────────────────
+
+/// Derive a stable config segment string from an [`AgentLoopConfig`].
+///
+/// Used as the middle segment of each branch's `loop_id`:
+///   `"{session_id}.{config_segment}.{N}"`
+///
+/// When `config.config_id` is set, that value is returned as-is. Otherwise the
+/// segment is derived from the provider, model slug, and thinking level — the same
+/// logic used by `BasicAgent::next_loop_id`.
+pub(crate) fn derive_config_segment(config: &AgentLoopConfig) -> String {
+    if let Some(ref id) = config.config_id {
+        return id.clone();
+    }
+    let slugify = |s: &str| -> String {
+        s.chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect()
+    };
+    let thinking_part = if config.thinking_level != ThinkingLevel::Off {
+        ".thinking"
+    } else {
+        ""
+    };
+    format!(
+        "{}.{}{}",
+        config.model_config.provider,
+        slugify(&config.model_config.id),
+        thinking_part
+    )
+}
+
+/// Internal: run N agent loop branches concurrently and collect their outcomes.
+///
+/// Uses `futures::future::join_all` (not `tokio::spawn`) for the branch futures so
+/// the `'static` bound is not imposed on `AgentLoopConfig` hook fields. Each branch
+/// gets its own forwarding task (`tokio::spawn`) that intercepts `AgentEnd.usage`
+/// and forwards all events to the shared `tx`.
+async fn run_parallel_branches(
+    prompts: Vec<AgentMessage>,
+    contexts: Vec<AgentContext>,
+    configs: Vec<AgentLoopConfig>,
+    tx: &mpsc::UnboundedSender<AgentEvent>,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Vec<ParallelLoopOutcome> {
+    use futures::future::join_all;
+
+    let branch_futures: Vec<_> = contexts
+        .into_iter()
+        .zip(configs.into_iter())
+        .enumerate()
+        .map(|(i, (mut ctx, config))| {
+            let loop_id = ctx.loop_id.clone().unwrap_or_default();
+            let prompts = prompts.clone();
+            let main_tx = tx.clone();
+            let cancel = cancel.clone();
+
+            async move {
+                let (branch_tx, branch_rx) = mpsc::unbounded_channel::<AgentEvent>();
+                let (usage_tx, usage_rx) = tokio::sync::oneshot::channel::<Usage>();
+
+                // Record context size BEFORE the branch mutates it.
+                let original_context_len = ctx.messages.len();
+
+                // Forwarder: intercepts AgentEnd for usage, forwards all events to main_tx.
+                // tokio::spawn is valid here: branch_rx, cloned main_tx, and usage_tx are all
+                // owned Send + 'static values.
+                tokio::spawn(async move {
+                    let mut branch_rx = branch_rx;
+                    let mut last_usage = Usage::default();
+                    while let Some(event) = branch_rx.recv().await {
+                        if let AgentEvent::AgentEnd { ref usage, .. } = event {
+                            last_usage = usage.clone();
+                        }
+                        main_tx.send(event).ok();
+                    }
+                    // branch_tx is dropped when agent_loop returns → recv() yields None →
+                    // send usage back, unblocking usage_rx.await below.
+                    usage_tx.send(last_usage).ok();
+                });
+
+                // Route to agent_loop_continue when prompts is empty: the user query
+                // is already in the context (agent_loop_continue mode). Preconditions
+                // (non-empty context, not ending on assistant) are asserted by
+                // agent_loop_parallel before dispatch.
+                let new_messages = if prompts.is_empty() {
+                    agent_loop_continue(&mut ctx, &config, branch_tx, cancel).await
+                } else {
+                    agent_loop(prompts, &mut ctx, &config, branch_tx, cancel).await
+                };
+                let usage = usage_rx.await.unwrap_or_default();
+
+                ParallelLoopOutcome {
+                    config_index: i,
+                    loop_id,
+                    context: ctx,
+                    new_messages,
+                    usage,
+                    original_context_len,
+                }
+            }
+        })
+        .collect();
+
+    join_all(branch_futures).await
+}
+
+/// Run multiple agent loop configurations concurrently from a shared base context,
+/// evaluate the results with the supplied strategy, and return the selected outcome.
+///
+/// This is the foundation for evaluational parallelism. The standard single-loop case
+/// is a transparent special case: one config + [`crate::evaluation::TransparentEvaluation`].
+///
+/// # Branch cloning
+///
+/// `base_context` is cloned once per config entry. Tools are `Arc`-shared (zero copy);
+/// the message history is deep-cloned so branches start from identical state but diverge
+/// independently. All branches inherit the same `session_id` for traceability.
+///
+/// # Loop IDs
+///
+/// Each branch receives a distinct `loop_id`:
+/// ```text
+/// "{session_id}.{config_segment}.{N}"
+/// ```
+/// where `config_segment` is derived from `config.config_id` or auto-derived from
+/// provider + model + thinking level via [`derive_config_segment`].
+///
+/// # Events
+///
+/// Events from all branches are forwarded to `tx` interleaved. Each branch's
+/// `AgentStart` carries a distinct `loop_id` for demultiplexing. A
+/// [`AgentEvent::ParallelLoopStart`] / [`AgentEvent::ParallelLoopEnd`] pair
+/// brackets the entire parallel execution.
+///
+/// # Session continuity
+///
+/// Feed `selected_context` into [`agent_loop_continue`] to resume the session
+/// normally after the parallel evaluation — this is a single-loop operation,
+/// not a special session mode.
+///
+/// # `agent_loop_continue` mode
+///
+/// When `prompts` is empty, each branch is dispatched via [`agent_loop_continue`]
+/// instead of [`agent_loop`]. This supports the "resume from existing context"
+/// pattern where the user query is already the last message in `base_context`.
+/// The same preconditions as `agent_loop_continue` apply: `base_context.messages`
+/// must be non-empty and must not end on an assistant message.
+pub async fn agent_loop_parallel(
+    prompts: Vec<AgentMessage>,
+    mut base_context: AgentContext,
+    configs: Vec<AgentLoopConfig>,
+    strategy: Arc<dyn EvaluationStrategy>,
+    tx: mpsc::UnboundedSender<AgentEvent>,
+    cancel: tokio_util::sync::CancellationToken,
+) -> ParallelLoopResult {
+    assert!(
+        !configs.is_empty(),
+        "agent_loop_parallel requires at least one config"
+    );
+
+    // agent_loop_continue mode precondition guards.
+    if prompts.is_empty() {
+        assert!(
+            !base_context.messages.is_empty(),
+            "agent_loop_parallel with empty prompts requires non-empty base_context.messages \
+             (agent_loop_continue mode)"
+        );
+        assert!(
+            base_context.messages.last().map(|m| m.role()) != Some("assistant"),
+            "agent_loop_parallel with empty prompts requires context NOT ending on an \
+             assistant message (agent_loop_continue mode)"
+        );
+    }
+
+    // Ensure shared session / agent identity.
+    if base_context.agent_id.is_none() {
+        base_context.agent_id = Some(uuid::Uuid::new_v4().to_string());
+    }
+    if base_context.session_id.is_none() {
+        base_context.session_id = Some(uuid::Uuid::new_v4().to_string());
+    }
+    let session_id = base_context.session_id.clone().unwrap();
+
+    // Assign deterministic loop_ids: {session_id}.{config_segment}.{N}
+    let loop_ids: Vec<String> = configs
+        .iter()
+        .enumerate()
+        .map(|(i, cfg)| format!("{}.{}.{}", session_id, derive_config_segment(cfg), i + 1))
+        .collect();
+
+    tx.send(AgentEvent::ParallelLoopStart {
+        session_id: session_id.clone(),
+        loop_ids: loop_ids.clone(),
+        timestamp: Utc::now(),
+    })
+    .ok();
+
+    // Clone base context per branch; set individual loop_ids.
+    let branch_contexts: Vec<AgentContext> = loop_ids
+        .iter()
+        .map(|lid| {
+            let mut ctx = base_context.clone();
+            ctx.loop_id = Some(lid.clone());
+            ctx
+        })
+        .collect();
+
+    let outcomes =
+        run_parallel_branches(prompts.clone(), branch_contexts, configs, &tx, &cancel).await;
+
+    let (decision, eval_usage) = strategy.evaluate(&prompts, &outcomes, &tx, cancel).await;
+    let selected_index = match decision {
+        EvaluationDecision::Select(i) => i.min(outcomes.len() - 1),
+    };
+
+    tx.send(AgentEvent::ParallelLoopEnd {
+        session_id,
+        selected_loop_id: outcomes[selected_index].loop_id.clone(),
+        selected_config_index: selected_index,
+        evaluation_usage: eval_usage.clone(),
+        timestamp: Utc::now(),
+    })
+    .ok();
+
+    let total_usage = outcomes
+        .iter()
+        .fold(Usage::default(), |acc, o| acc.combine(&o.usage))
+        .combine(&eval_usage);
+
+    // Destructure outcomes: pull out the selected one, keep the rest.
+    let mut all_outcomes = outcomes;
+    let selected = all_outcomes.remove(selected_index);
+
+    ParallelLoopResult {
+        selected_context: selected.context,
+        selected_messages: selected.new_messages,
+        selected_index,
+        all_outcomes,
+        total_usage,
+    }
 }

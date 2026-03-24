@@ -10,6 +10,7 @@
 # Core Concepts
 
 - [The Agent Loop](concepts/agent-loop.md)
+- [Evaluational Parallelism](concepts/evaluational-parallelism.md)
 - [Messages & Events](concepts/messages-events.md)
 - [Tools](concepts/tools.md)
 - [Context Management](concepts/context-management.md)

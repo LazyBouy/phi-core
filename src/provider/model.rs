@@ -332,10 +332,10 @@ impl OpenAiCompat {
     /// Compat flags for OpenRouter.
     pub fn openrouter() -> Self {
         Self {
-            supports_developer_role: true,                       // OpenRouter supports "developer" role
+            supports_developer_role: true, // OpenRouter supports "developer" role
             supports_usage_in_streaming: true,
-            max_tokens_field: MaxTokensField::MaxTokens,         // OpenRouter uses max_tokens (not max_completion_tokens)
-            thinking_format: ThinkingFormat::OpenRouter,         // reasoning_details array format
+            max_tokens_field: MaxTokensField::MaxTokens, // OpenRouter uses max_tokens (not max_completion_tokens)
+            thinking_format: ThinkingFormat::OpenRouter, // reasoning_details array format
             ..Default::default()
         }
     }
@@ -428,8 +428,8 @@ pub struct ModelConfig {
 impl ModelConfig {
     /// Create a new Anthropic model config.
     pub fn anthropic(
-        id: impl Into<String>,      // API ID — model identifier sent in the request body (e.g. "claude-sonnet-4-20250514")
-        name: impl Into<String>,    // DISPLAY NAME — human-readable label for logging/UI; not sent to the API
+        id: impl Into<String>, // API ID — model identifier sent in the request body (e.g. "claude-sonnet-4-20250514")
+        name: impl Into<String>, // DISPLAY NAME — human-readable label for logging/UI; not sent to the API
         api_key: impl Into<String>, // AUTH — "sk-ant-..." or OAuth token "sk-ant-oat..."
     ) -> Self {
         Self {
@@ -450,8 +450,8 @@ impl ModelConfig {
 
     /// Create a new OpenAI model config.
     pub fn openai(
-        id: impl Into<String>,      // API ID — model identifier sent in the request body (e.g. "gpt-4o")
-        name: impl Into<String>,    // DISPLAY NAME — human-readable label for logging/UI; not sent to the API
+        id: impl Into<String>, // API ID — model identifier sent in the request body (e.g. "gpt-4o")
+        name: impl Into<String>, // DISPLAY NAME — human-readable label for logging/UI; not sent to the API
         api_key: impl Into<String>, // AUTH — "sk-..."
     ) -> Self {
         Self {
@@ -495,8 +495,8 @@ impl ModelConfig {
 
     /// Create a new Google Generative AI (Gemini) model config.
     pub fn google(
-        id: impl Into<String>,      // API ID — model identifier sent in the request URL (e.g. "gemini-2.5-pro")
-        name: impl Into<String>,    // DISPLAY NAME — human-readable label for logging/UI; not sent to the API
+        id: impl Into<String>, // API ID — model identifier sent in the request URL (e.g. "gemini-2.5-pro")
+        name: impl Into<String>, // DISPLAY NAME — human-readable label for logging/UI; not sent to the API
         api_key: impl Into<String>, // AUTH — Google AI Studio API key
     ) -> Self {
         Self {
@@ -545,7 +545,8 @@ mod tests {
 
     #[test]
     fn test_model_config_anthropic() {
-        let config = ModelConfig::anthropic("claude-sonnet-4-20250514", "Claude Sonnet 4", "sk-ant-key");
+        let config =
+            ModelConfig::anthropic("claude-sonnet-4-20250514", "Claude Sonnet 4", "sk-ant-key");
         assert_eq!(config.api, ApiProtocol::AnthropicMessages);
         assert_eq!(config.provider, "anthropic");
         assert_eq!(config.api_key, "sk-ant-key");

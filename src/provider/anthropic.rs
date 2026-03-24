@@ -118,7 +118,10 @@ impl StreamProvider for AnthropicProvider {
         if is_oauth {
             // OAuth token — Bearer auth with Claude Code identity headers
             builder = builder
-                .header("authorization", format!("Bearer {}", config.model_config.api_key))
+                .header(
+                    "authorization",
+                    format!("Bearer {}", config.model_config.api_key),
+                )
                 .header(
                     "anthropic-beta",
                     "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14",

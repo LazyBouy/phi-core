@@ -146,57 +146,11 @@ impl SubAgentTool {
 }
 
 /*
-RUST QUIRK: `Arc<dyn AgentTool>` vs `Box<dyn AgentTool>` — sharing vs exclusive ownership
-
-`SubAgentTool.tools` stores `Arc<dyn AgentTool>` (shared ownership).
-`AgentContext.tools` requires `Vec<Box<dyn AgentTool>>` (exclusive ownership).
-
-Why the difference?
-  - SubAgentTool may be REUSED across many parallel invocations — Arc allows sharing.
-  - AgentContext is created fresh for each invocation — Box is simpler and cheaper there.
-
-The adapter below bridges the two worlds:
-  Arc<dyn AgentTool> → ArcToolWrapper → Box<dyn AgentTool>
-
-RUST QUIRK: Newtype pattern — wrapping a type to give it a different interface
-
-`struct ArcToolWrapper(Arc<dyn AgentTool>)` is a "newtype" — a tuple struct with one field.
-It wraps `Arc<dyn AgentTool>` so we can implement `AgentTool` on it.
-
-Why not implement AgentTool directly for Arc<dyn AgentTool>?
-Because of Rust's "orphan rule": you can only implement a trait for a type if you own
-either the trait OR the type. `Arc` is from std, `AgentTool` is from this crate.
-The newtype solves this by making a new type (that we own) to wrap the Arc.
-
-The .0 in `self.0.name()` accesses the first (and only) field of the tuple struct.
-Python analogy: self.inner.name() where inner is the wrapped Arc.
+Both `SubAgentTool.tools` and `AgentContext.tools` now use `Vec<Arc<dyn AgentTool>>`,
+so tools can be passed directly — no adapter needed. Arc::clone on each tool just
+increments the reference count (cheap), and the sub-agent's context shares the same
+underlying tool instances as the parent.
 */
-/// Thin adapter: wraps `Arc<dyn AgentTool>` so it can be placed in a
-/// `Vec<Box<dyn AgentTool>>` (required by `AgentContext`).
-struct ArcToolWrapper(Arc<dyn AgentTool>);
-
-#[async_trait::async_trait]
-impl AgentTool for ArcToolWrapper {
-    fn name(&self) -> &str {
-        self.0.name()
-    }
-    fn label(&self) -> &str {
-        self.0.label()
-    }
-    fn description(&self) -> &str {
-        self.0.description()
-    }
-    fn parameters_schema(&self) -> serde_json::Value {
-        self.0.parameters_schema()
-    }
-    async fn execute(
-        &self,
-        params: serde_json::Value,
-        ctx: ToolContext,
-    ) -> Result<ToolResult, ToolError> {
-        self.0.execute(params, ctx).await
-    }
-}
 
 #[async_trait::async_trait]
 impl AgentTool for SubAgentTool {
@@ -262,27 +216,8 @@ impl AgentTool for SubAgentTool {
             .ok_or_else(|| ToolError::InvalidArgs("Missing required 'task' parameter".into()))?
             .to_string(); // &str → owned String
 
-        /*
-        RUST QUIRK: `Arc::clone(t)` vs `t.clone()` — both work, Arc::clone is clearer
-
-        `Arc::clone(t)` is the idiomatic way to clone an Arc — it makes it clear
-        you're incrementing a reference count, not deep-copying the underlying value.
-        `t.clone()` does the same thing but less obviously.
-
-        Convention: use `Arc::clone(arc_ref)` at clone sites to signal "this is cheap."
-
-        `as Box<dyn AgentTool>` — explicit coercion (type ascription)
-        `Box::new(ArcToolWrapper(...))` returns `Box<ArcToolWrapper>`.
-        The `as Box<dyn AgentTool>` tells Rust to coerce it to the trait object type.
-        Required here because `.map()` needs to return a consistent type, and the
-        concrete type `Box<ArcToolWrapper>` must be widened to `Box<dyn AgentTool>`.
-        */
-        // Build tool list from Arc wrappers
-        let tools: Vec<Box<dyn AgentTool>> = self
-            .tools
-            .iter()
-            .map(|t| Box::new(ArcToolWrapper(Arc::clone(t))) as Box<dyn AgentTool>)
-            .collect();
+        // Clone Arc references — increments reference count, no deep copy.
+        let tools: Vec<Arc<dyn AgentTool>> = self.tools.iter().map(Arc::clone).collect();
 
         // Generate stable identity for the child loop.
         // Each sub-agent invocation is its own independent session: fresh agent_id,

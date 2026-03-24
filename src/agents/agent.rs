@@ -24,6 +24,7 @@
 //! - `last_loop_id` — returns `None`. Override if your impl tracks loop identity.
 
 use crate::types::*;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 /// Controls how messages are drained from the steering/follow-up queues per turn.
@@ -78,11 +79,7 @@ pub trait Agent: Send {
     ///
     /// Default: wraps `text` in `AgentMessage::Llm(Message::user(text))` and calls
     /// `prompt_messages_with_sender`.
-    async fn prompt_with_sender(
-        &mut self,
-        text: String,
-        tx: mpsc::UnboundedSender<AgentEvent>,
-    ) {
+    async fn prompt_with_sender(&mut self, text: String, tx: mpsc::UnboundedSender<AgentEvent>) {
         let msg = AgentMessage::Llm(Message::user(text));
         self.prompt_messages_with_sender(vec![msg], tx).await;
     }
@@ -159,7 +156,7 @@ pub trait Agent: Send {
     fn restore_messages(&mut self, json: &str) -> Result<(), serde_json::Error>;
 
     /// Replace the tool set.
-    fn set_tools(&mut self, tools: Vec<Box<dyn AgentTool>>);
+    fn set_tools(&mut self, tools: Vec<Arc<dyn AgentTool>>);
 
     // ── Control (required) ───────────────────────────────────────────────────────
 

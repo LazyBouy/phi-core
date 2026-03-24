@@ -8,10 +8,10 @@
 //! Run:
 //!   ANTHROPIC_API_KEY=sk-... cargo run --example sub_agent
 
-use phi_core::BasicAgent;
-use phi_core::provider::ModelConfig;
 use phi_core::agents::SubAgentTool;
+use phi_core::provider::ModelConfig;
 use phi_core::tools;
+use phi_core::BasicAgent;
 use phi_core::*;
 
 #[tokio::main]
