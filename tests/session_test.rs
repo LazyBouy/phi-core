@@ -1,0 +1,1172 @@
+//! Tests for SessionRecorder, Session navigation, persistence, and BasicAgent session management.
+
+use phi_core::agent_loop::{agent_loop, agent_loop_continue, agent_loop_parallel, AgentLoopConfig};
+use phi_core::evaluation::PickFirstEvaluation;
+use phi_core::provider::{MockProvider, ModelConfig};
+use phi_core::session::*;
+use phi_core::*;
+use std::sync::Arc;
+use tempfile::TempDir;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn make_config(provider: Arc<dyn phi_core::provider::StreamProvider>) -> AgentLoopConfig {
+    AgentLoopConfig {
+        model_config: ModelConfig::anthropic("mock", "mock", "test"),
+        provider_override: Some(provider),
+        thinking_level: ThinkingLevel::Off,
+        max_tokens: None,
+        temperature: None,
+        convert_to_llm: None,
+        transform_context: None,
+        get_steering_messages: None,
+        get_follow_up_messages: None,
+        context_config: None,
+        compaction_strategy: None,
+        execution_limits: None,
+        cache_config: CacheConfig::default(),
+        tool_execution: ToolExecutionStrategy::default(),
+        retry_config: phi_core::RetryConfig::default(),
+        before_turn: None,
+        after_turn: None,
+        on_error: None,
+        before_loop: None,
+        after_loop: None,
+        before_tool_execution: None,
+        after_tool_execution: None,
+        before_tool_execution_update: None,
+        after_tool_execution_update: None,
+        input_filters: vec![],
+        first_turn_trigger: TurnTrigger::User,
+        config_id: None,
+    }
+}
+
+fn drain(mut rx: mpsc::UnboundedReceiver<AgentEvent>) -> Vec<AgentEvent> {
+    let mut events = Vec::new();
+    while let Ok(e) = rx.try_recv() {
+        events.push(e);
+    }
+    events
+}
+
+fn feed(recorder: &mut SessionRecorder, events: Vec<AgentEvent>) {
+    for e in events {
+        recorder.on_event(e);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// test_session_recorder_single_loop
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_session_recorder_single_loop() {
+    let provider = Arc::new(MockProvider::text("Hello!"));
+    let config = make_config(provider);
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    let mut context = AgentContext {
+        system_prompt: "You are helpful.".into(),
+        agent_id: Some("agent-1".into()),
+        session_id: Some("session-1".into()),
+        ..Default::default()
+    };
+
+    agent_loop(
+        vec![AgentMessage::Llm(Message::user("Hello"))],
+        &mut context,
+        &config,
+        tx,
+        cancel,
+    )
+    .await;
+
+    let events = drain(rx);
+    let mut recorder = SessionRecorder::new(SessionRecorderConfig::default());
+    feed(&mut recorder, events);
+    recorder.flush();
+
+    let sessions: Vec<_> = recorder.sessions().collect();
+    assert_eq!(sessions.len(), 1);
+    let session = &sessions[0];
+    assert_eq!(session.session_id, "session-1");
+    assert_eq!(session.agent_id, "agent-1");
+    assert_eq!(session.loops.len(), 1);
+
+    let lr = &session.loops[0];
+    assert_eq!(lr.status, LoopStatus::Completed);
+    assert!(lr.rejection.is_none());
+    assert!(!lr.messages.is_empty());
+    // Usage should be non-zero (MockProvider uses non-zero synthetic tokens).
+    // The message should be an assistant message.
+    assert!(lr
+        .messages
+        .iter()
+        .any(|m| matches!(m, AgentMessage::Llm(Message::Assistant { .. }))));
+}
+
+// ---------------------------------------------------------------------------
+// test_session_recorder_continuation
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_session_recorder_continuation() {
+    let provider = Arc::new(MockProvider::texts(vec!["First", "Second"]));
+    let config = make_config(provider);
+
+    let (tx1, rx1) = mpsc::unbounded_channel();
+    let cancel1 = CancellationToken::new();
+    let mut context = AgentContext {
+        system_prompt: "You are helpful.".into(),
+        agent_id: Some("agent-1".into()),
+        session_id: Some("session-cont".into()),
+        ..Default::default()
+    };
+
+    // First loop.
+    agent_loop(
+        vec![AgentMessage::Llm(Message::user("First question"))],
+        &mut context,
+        &config,
+        tx1,
+        cancel1,
+    )
+    .await;
+    let events1 = drain(rx1);
+
+    // Set up continuation with a parent_loop_id.
+    let parent_lid = context.loop_id.clone().unwrap();
+    context.loop_id = Some(format!(
+        "{}.test.2",
+        context.session_id.as_deref().unwrap_or("")
+    ));
+    context.parent_loop_id = Some(parent_lid.clone());
+    context.continuation_kind = Some(ContinuationKind::Default);
+    context
+        .messages
+        .push(AgentMessage::Llm(Message::user("Second question")));
+
+    let (tx2, rx2) = mpsc::unbounded_channel();
+    let cancel2 = CancellationToken::new();
+    agent_loop_continue(&mut context, &config, tx2, cancel2).await;
+    let events2 = drain(rx2);
+
+    let mut recorder = SessionRecorder::new(SessionRecorderConfig::default());
+    feed(&mut recorder, events1);
+    feed(&mut recorder, events2);
+    recorder.flush();
+
+    let sessions: Vec<_> = recorder.sessions().collect();
+    assert_eq!(sessions.len(), 1);
+    let session = &sessions[0];
+    assert_eq!(session.loops.len(), 2);
+
+    // Find parent and child loops.
+    let parent = session
+        .get_loop(&parent_lid)
+        .expect("parent loop not found");
+    assert!(parent.children_loop_ids.len() == 1);
+
+    let child_lid = &parent.children_loop_ids[0];
+    let child = session.get_loop(child_lid).expect("child loop not found");
+    assert_eq!(child.parent_loop_id.as_deref(), Some(parent_lid.as_str()));
+    assert_eq!(child.continuation_kind, Some(ContinuationKind::Default));
+
+    // Tree navigation.
+    let roots: Vec<_> = session.root_loops().collect();
+    assert_eq!(roots.len(), 1);
+    assert_eq!(roots[0].loop_id, parent_lid);
+
+    let children: Vec<_> = session.children_of(&parent_lid).collect();
+    assert_eq!(children.len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// test_session_recorder_parallel_group
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_session_recorder_parallel_group() {
+    let provider_a = Arc::new(MockProvider::text("Branch A response"));
+    let provider_b = Arc::new(MockProvider::text("Branch B response BB"));
+
+    let config_a = AgentLoopConfig {
+        provider_override: Some(provider_a),
+        ..make_config(Arc::new(MockProvider::text("")))
+    };
+    let config_b = AgentLoopConfig {
+        provider_override: Some(provider_b),
+        ..make_config(Arc::new(MockProvider::text("")))
+    };
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+
+    let base_ctx = AgentContext {
+        system_prompt: "Be concise.".into(),
+        agent_id: Some("agent-par".into()),
+        session_id: Some("session-par".into()),
+        ..Default::default()
+    };
+
+    agent_loop_parallel(
+        vec![AgentMessage::Llm(Message::user("Compare A vs B"))],
+        base_ctx.clone(),
+        vec![config_a, config_b],
+        Arc::new(PickFirstEvaluation),
+        tx,
+        cancel,
+    )
+    .await;
+
+    let events = drain(rx);
+    let mut recorder = SessionRecorder::new(SessionRecorderConfig::default());
+    feed(&mut recorder, events);
+    recorder.flush();
+
+    let sessions: Vec<_> = recorder.sessions().collect();
+    assert_eq!(sessions.len(), 1);
+    let session = &sessions[0];
+    assert_eq!(session.loops.len(), 2);
+
+    // Both branches should have a parallel_group set.
+    for lr in &session.loops {
+        let pg = lr
+            .parallel_group
+            .as_ref()
+            .expect("parallel_group should be set");
+        assert_eq!(pg.all_loop_ids.len(), 2);
+    }
+
+    // Exactly one branch should be selected.
+    let selected: Vec<_> = session
+        .loops
+        .iter()
+        .filter(|l| {
+            l.parallel_group
+                .as_ref()
+                .map(|pg| pg.is_selected)
+                .unwrap_or(false)
+        })
+        .collect();
+    assert_eq!(selected.len(), 1);
+
+    // parallel_siblings returns both branches.
+    let winner_id = &selected[0].loop_id;
+    let siblings: Vec<_> = session.parallel_siblings(winner_id).collect();
+    assert_eq!(siblings.len(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// test_session_recorder_streaming_events
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_session_recorder_streaming_events() {
+    let provider = Arc::new(MockProvider::text("Stream test"));
+    let config = make_config(provider);
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    let mut context = AgentContext::default();
+
+    agent_loop(
+        vec![AgentMessage::Llm(Message::user("Stream me"))],
+        &mut context,
+        &config,
+        tx,
+        cancel,
+    )
+    .await;
+
+    let events = drain(rx);
+
+    // Without streaming events.
+    let mut recorder_no_stream = SessionRecorder::new(SessionRecorderConfig::default());
+    feed(&mut recorder_no_stream, events.clone());
+    recorder_no_stream.flush();
+
+    // With streaming events.
+    let mut recorder_with_stream = SessionRecorder::new(SessionRecorderConfig {
+        include_streaming_events: true,
+    });
+    feed(&mut recorder_with_stream, events.clone());
+    recorder_with_stream.flush();
+
+    let no_stream_sessions: Vec<_> = recorder_no_stream.sessions().collect();
+    let with_stream_sessions: Vec<_> = recorder_with_stream.sessions().collect();
+
+    let lr_no = &no_stream_sessions[0].loops[0];
+    let lr_with = &with_stream_sessions[0].loops[0];
+
+    let updates_no = lr_no
+        .events
+        .iter()
+        .filter(|e| matches!(e.event, AgentEvent::MessageUpdate { .. }))
+        .count();
+    let updates_with = lr_with
+        .events
+        .iter()
+        .filter(|e| matches!(e.event, AgentEvent::MessageUpdate { .. }))
+        .count();
+
+    assert_eq!(
+        updates_no, 0,
+        "no streaming: MessageUpdate events should be absent"
+    );
+    // MockProvider emits text deltas, so there should be at least one MessageUpdate with streaming on.
+    assert!(
+        updates_with > 0,
+        "with streaming: expected at least one MessageUpdate event"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// test_session_save_load_roundtrip
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_session_save_load_roundtrip() {
+    let provider = Arc::new(MockProvider::text("Roundtrip!"));
+    let config = make_config(provider);
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    let mut context = AgentContext {
+        agent_id: Some("agent-rt".into()),
+        session_id: Some("session-rt".into()),
+        ..Default::default()
+    };
+
+    agent_loop(
+        vec![AgentMessage::Llm(Message::user("save me"))],
+        &mut context,
+        &config,
+        tx,
+        cancel,
+    )
+    .await;
+
+    let events = drain(rx);
+    let mut recorder = SessionRecorder::new(SessionRecorderConfig::default());
+    feed(&mut recorder, events);
+    recorder.flush();
+    let mut sessions = recorder.drain_completed();
+    assert_eq!(sessions.len(), 1);
+    let original = sessions.remove(0);
+
+    let dir = TempDir::new().unwrap();
+    let path = save_session(&original, dir.path()).unwrap();
+    assert!(path.exists());
+
+    let loaded = load_session("session-rt", dir.path()).unwrap();
+    assert_eq!(loaded.session_id, original.session_id);
+    assert_eq!(loaded.agent_id, original.agent_id);
+    assert_eq!(loaded.loops.len(), original.loops.len());
+    assert_eq!(loaded.loops[0].status, LoopStatus::Completed);
+}
+
+// ---------------------------------------------------------------------------
+// test_session_list_ids
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_session_list_ids() {
+    let dir = TempDir::new().unwrap();
+
+    // Save s0 first, then s1 with a 10ms gap so filesystem mtimes differ.
+    // list_session_ids is documented to return newest-first (by mtime).
+    let make_session = |id: &str| Session {
+        session_id: id.to_string(),
+        agent_id: "agent".into(),
+        created_at: chrono::Utc::now(),
+        last_active_at: chrono::Utc::now(),
+        formation: SessionFormation::Explicit {
+            timestamp: chrono::Utc::now(),
+        },
+        parent_spawn_ref: None,
+        loops: Vec::new(),
+    };
+
+    save_session(&make_session("s0"), dir.path()).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    save_session(&make_session("s1"), dir.path()).unwrap();
+
+    let ids = list_session_ids(dir.path()).unwrap();
+    assert_eq!(ids.len(), 2);
+    assert!(ids.contains(&"s0".to_string()));
+    assert!(ids.contains(&"s1".to_string()));
+    // s1 was written last — it must appear first (newest-first ordering).
+    assert_eq!(ids[0], "s1", "newest session (s1) should be first");
+    assert_eq!(ids[1], "s0", "oldest session (s0) should be last");
+}
+
+// ---------------------------------------------------------------------------
+// test_session_delete
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_session_delete() {
+    let dir = TempDir::new().unwrap();
+    let session = Session {
+        session_id: "del-session".into(),
+        agent_id: "agent".into(),
+        created_at: chrono::Utc::now(),
+        last_active_at: chrono::Utc::now(),
+        formation: SessionFormation::Explicit {
+            timestamp: chrono::Utc::now(),
+        },
+        parent_spawn_ref: None,
+        loops: Vec::new(),
+    };
+    save_session(&session, dir.path()).unwrap();
+    assert!(list_session_ids(dir.path())
+        .unwrap()
+        .contains(&"del-session".to_string()));
+
+    delete_session("del-session", dir.path()).unwrap();
+    assert!(!list_session_ids(dir.path())
+        .unwrap()
+        .contains(&"del-session".to_string()));
+
+    // Deleting non-existent session returns NotFound.
+    let err = delete_session("ghost", dir.path());
+    assert!(matches!(err, Err(SessionError::NotFound { .. })));
+}
+
+// ---------------------------------------------------------------------------
+// test_basic_agent_new_session
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_basic_agent_new_session() {
+    let provider = Arc::new(MockProvider::text("hi"));
+    let mut agent = BasicAgent::new(ModelConfig::anthropic("mock", "mock", "test"))
+        .with_provider_override(provider);
+
+    let original_session_id = agent.session_id().to_string();
+
+    let new_id = agent.new_session();
+    assert_ne!(
+        new_id, original_session_id,
+        "new_session should rotate to a different id"
+    );
+    assert_eq!(agent.session_id(), new_id.as_str());
+}
+
+// ---------------------------------------------------------------------------
+// test_basic_agent_check_and_rotate
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_basic_agent_check_and_rotate() {
+    let provider = Arc::new(MockProvider::text("hi"));
+    let mut agent = BasicAgent::new(ModelConfig::anthropic("mock", "mock", "test"))
+        .with_provider_override(provider);
+
+    // Before any prompt, no last_active_at → no rotation.
+    let result = agent.check_and_rotate(std::time::Duration::from_secs(1));
+    assert!(result.is_none(), "no rotation when never prompted");
+
+    // Run one prompt to set last_active_at.
+    let (tx, rx) = mpsc::unbounded_channel();
+    agent.prompt_with_sender("hello", tx).await;
+    drop(rx);
+
+    // Threshold of 100 seconds should NOT trigger rotation (just ran).
+    let result = agent.check_and_rotate(std::time::Duration::from_secs(100));
+    assert!(result.is_none(), "should not rotate within threshold");
+
+    // Sleep 1ms to guarantee the clock advances before testing elapsed > threshold.
+    std::thread::sleep(std::time::Duration::from_millis(1));
+
+    // Zero-duration threshold SHOULD trigger rotation (elapsed > 0 after the sleep).
+    let old_id = agent.session_id().to_string();
+    let result = agent.check_and_rotate(std::time::Duration::ZERO);
+    assert!(
+        result.is_some(),
+        "zero-duration threshold should trigger rotation"
+    );
+    assert_ne!(
+        agent.session_id(),
+        old_id.as_str(),
+        "session_id should have changed"
+    );
+
+    // After rotation, last_active_at is cleared — a second check_and_rotate must
+    // return None (the new session has never been used, so there is nothing to measure).
+    let result = agent.check_and_rotate(std::time::Duration::ZERO);
+    assert!(
+        result.is_none(),
+        "second check_and_rotate after rotation should return None (new session never used)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// test_session_recorder_bidirectional_tree
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_session_recorder_bidirectional_tree() {
+    // Three loops: parent → child1, parent → child2 (two independent continuations).
+    let provider = Arc::new(MockProvider::texts(vec!["P", "C1", "C2"]));
+
+    // Loop 1 (origin).
+    let config = make_config(provider.clone());
+    let (tx1, rx1) = mpsc::unbounded_channel();
+    let mut ctx = AgentContext {
+        agent_id: Some("agent-tree".into()),
+        session_id: Some("session-tree".into()),
+        ..Default::default()
+    };
+    agent_loop(
+        vec![AgentMessage::Llm(Message::user("parent"))],
+        &mut ctx,
+        &config,
+        tx1,
+        CancellationToken::new(),
+    )
+    .await;
+    let parent_lid = ctx.loop_id.clone().unwrap();
+    let events1 = drain(rx1);
+
+    // Loop 2: continuation from parent.
+    let config2 = make_config(provider.clone());
+    let (tx2, rx2) = mpsc::unbounded_channel();
+    let mut ctx2 = ctx.clone();
+    ctx2.loop_id = Some(format!(
+        "{}.test.2",
+        ctx2.session_id.as_deref().unwrap_or("")
+    ));
+    ctx2.parent_loop_id = Some(parent_lid.clone());
+    ctx2.continuation_kind = Some(ContinuationKind::Default);
+    ctx2.messages
+        .push(AgentMessage::Llm(Message::user("child1")));
+    agent_loop_continue(&mut ctx2, &config2, tx2, CancellationToken::new()).await;
+    let child1_lid = ctx2.loop_id.clone().unwrap();
+    let events2 = drain(rx2);
+
+    // Loop 3: another continuation from same parent.
+    let config3 = make_config(provider);
+    let (tx3, rx3) = mpsc::unbounded_channel();
+    let mut ctx3 = ctx.clone();
+    ctx3.loop_id = Some(format!(
+        "{}.test.3",
+        ctx3.session_id.as_deref().unwrap_or("")
+    ));
+    ctx3.parent_loop_id = Some(parent_lid.clone());
+    ctx3.continuation_kind = Some(ContinuationKind::Default);
+    ctx3.messages
+        .push(AgentMessage::Llm(Message::user("child2")));
+    agent_loop_continue(&mut ctx3, &config3, tx3, CancellationToken::new()).await;
+    let child2_lid = ctx3.loop_id.clone().unwrap();
+    let events3 = drain(rx3);
+
+    let mut recorder = SessionRecorder::new(SessionRecorderConfig::default());
+    feed(&mut recorder, events1);
+    feed(&mut recorder, events2);
+    feed(&mut recorder, events3);
+    recorder.flush();
+
+    let sessions: Vec<_> = recorder.sessions().collect();
+    assert_eq!(sessions.len(), 1);
+    let session = &sessions[0];
+    assert_eq!(session.loops.len(), 3);
+
+    let parent = session.get_loop(&parent_lid).unwrap();
+    assert!(parent.children_loop_ids.contains(&child1_lid));
+    assert!(parent.children_loop_ids.contains(&child2_lid));
+
+    let c1 = session.get_loop(&child1_lid).unwrap();
+    assert_eq!(c1.parent_loop_id.as_deref(), Some(parent_lid.as_str()));
+
+    let c2 = session.get_loop(&child2_lid).unwrap();
+    assert_eq!(c2.parent_loop_id.as_deref(), Some(parent_lid.as_str()));
+
+    // children_of returns both children.
+    let children: Vec<_> = session.children_of(&parent_lid).collect();
+    assert_eq!(children.len(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// test_session_recorder_continuation_kind
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_session_recorder_continuation_kind() {
+    let provider = Arc::new(MockProvider::texts(vec!["A", "B"]));
+    let config = make_config(provider.clone());
+
+    let (tx1, rx1) = mpsc::unbounded_channel();
+    let mut ctx = AgentContext {
+        agent_id: Some("agent-ck".into()),
+        session_id: Some("session-ck".into()),
+        ..Default::default()
+    };
+    agent_loop(
+        vec![AgentMessage::Llm(Message::user("origin"))],
+        &mut ctx,
+        &config,
+        tx1,
+        CancellationToken::new(),
+    )
+    .await;
+    let parent_lid = ctx.loop_id.clone().unwrap();
+    let events1 = drain(rx1);
+
+    // Rerun continuation.
+    let config2 = make_config(provider);
+    let (tx2, rx2) = mpsc::unbounded_channel();
+    let mut ctx2 = ctx.clone();
+    ctx2.loop_id = Some(format!(
+        "{}.test.2",
+        ctx2.session_id.as_deref().unwrap_or("")
+    ));
+    ctx2.parent_loop_id = Some(parent_lid.clone());
+    ctx2.continuation_kind = Some(ContinuationKind::Rerun { tag: "test".into() });
+    ctx2.messages
+        .push(AgentMessage::Llm(Message::user("rerun")));
+    agent_loop_continue(&mut ctx2, &config2, tx2, CancellationToken::new()).await;
+    let rerun_lid = ctx2.loop_id.clone().unwrap();
+    let events2 = drain(rx2);
+
+    let mut recorder = SessionRecorder::new(SessionRecorderConfig::default());
+    feed(&mut recorder, events1);
+    feed(&mut recorder, events2);
+    recorder.flush();
+
+    let sessions: Vec<_> = recorder.sessions().collect();
+    let session = &sessions[0];
+    let rerun = session.get_loop(&rerun_lid).unwrap();
+    assert!(matches!(
+        rerun.continuation_kind,
+        Some(ContinuationKind::Rerun { .. })
+    ));
+    assert!(session
+        .get_loop(&parent_lid)
+        .unwrap()
+        .parent_loop_id
+        .is_none());
+}
+
+// ---------------------------------------------------------------------------
+// test_session_recorder_child_loop_ref
+// ---------------------------------------------------------------------------
+
+/// Verify cross-session sub-agent tracking:
+/// - Parent LoopRecord.child_loop_refs has one entry pointing to the child loop
+/// - Child Session.parent_spawn_ref points back to the parent loop
+/// - Parent LoopRecord.children_loop_ids does NOT contain the child loop_id
+///   (cross-session children must NOT appear in the same-session tree)
+#[test]
+fn test_session_recorder_child_loop_ref() {
+    let parent_session_id = "sess-parent";
+    let parent_loop_id = format!("{}.mock.1", parent_session_id);
+    let child_session_id = "sess-child";
+    let child_loop_id = format!("{}.mock.1", child_session_id);
+
+    let now = chrono::Utc::now();
+
+    // Realistic interleaving:
+    //   1. parent AgentStart
+    //   2. parent ToolExecutionStart (sub-agent tool call begins)
+    //   3. child AgentStart (child loop starts inside the tool)
+    //   4. child AgentEnd  (child loop finishes)
+    //   5. parent ToolExecutionEnd (tool returns, child_loop_id set)
+    //   6. parent AgentEnd
+    let parent_start = AgentEvent::AgentStart {
+        agent_id: "parent-agent".into(),
+        session_id: parent_session_id.into(),
+        loop_id: parent_loop_id.clone(),
+        parent_loop_id: None,
+        continuation_kind: None,
+        timestamp: now,
+        metadata: None,
+    };
+    let tool_start = AgentEvent::ToolExecutionStart {
+        loop_id: parent_loop_id.clone(),
+        tool_call_id: "tc-1".into(),
+        tool_name: "sub_agent".into(),
+        args: serde_json::json!({"task": "do work"}),
+    };
+    let child_start = AgentEvent::AgentStart {
+        agent_id: "child-agent".into(),
+        session_id: child_session_id.into(),
+        loop_id: child_loop_id.clone(),
+        parent_loop_id: Some(parent_loop_id.clone()),
+        continuation_kind: None,
+        timestamp: now,
+        metadata: None,
+    };
+    let child_end = AgentEvent::AgentEnd {
+        loop_id: child_loop_id.clone(),
+        messages: vec![],
+        usage: Usage::default(),
+        timestamp: now,
+        rejection: None,
+    };
+    let tool_end = AgentEvent::ToolExecutionEnd {
+        loop_id: parent_loop_id.clone(),
+        tool_call_id: "tc-1".into(),
+        tool_name: "sub_agent".into(),
+        result: ToolResult {
+            content: vec![Content::Text {
+                text: "done".into(),
+            }],
+            details: serde_json::Value::Null,
+            child_loop_id: Some(child_loop_id.clone()),
+        },
+        is_error: false,
+        child_loop_id: Some(child_loop_id.clone()),
+    };
+    let parent_end = AgentEvent::AgentEnd {
+        loop_id: parent_loop_id.clone(),
+        messages: vec![],
+        usage: Usage::default(),
+        timestamp: now,
+        rejection: None,
+    };
+
+    let mut recorder = SessionRecorder::new(SessionRecorderConfig::default());
+    for event in [
+        parent_start,
+        tool_start,
+        child_start,
+        child_end,
+        tool_end,
+        parent_end,
+    ] {
+        recorder.on_event(event);
+    }
+    recorder.flush();
+
+    let sessions: Vec<_> = recorder.sessions().collect();
+    assert_eq!(sessions.len(), 2, "expected 2 sessions (parent + child)");
+
+    let parent_sess = recorder
+        .get_session(parent_session_id)
+        .expect("parent session not found");
+    let child_sess = recorder
+        .get_session(child_session_id)
+        .expect("child session not found");
+
+    // 1. Parent LoopRecord has the ChildLoopRef.
+    let parent_loop = parent_sess
+        .get_loop(&parent_loop_id)
+        .expect("parent loop not found");
+    assert_eq!(
+        parent_loop.child_loop_refs.len(),
+        1,
+        "expected one ChildLoopRef on the parent loop"
+    );
+    let clr = &parent_loop.child_loop_refs[0];
+    assert_eq!(clr.tool_call_id, "tc-1");
+    assert_eq!(clr.tool_name, "sub_agent");
+    assert_eq!(clr.child_loop_id, child_loop_id);
+    assert_eq!(clr.child_session_id, child_session_id);
+
+    // 2. Parent's children_loop_ids must NOT contain the cross-session child.
+    assert!(
+        !parent_loop.children_loop_ids.contains(&child_loop_id),
+        "children_loop_ids must not contain a cross-session child"
+    );
+
+    // 3. Child session has parent_spawn_ref pointing back to the parent.
+    let sr = child_sess
+        .parent_spawn_ref
+        .as_ref()
+        .expect("child session should have parent_spawn_ref");
+    assert_eq!(sr.parent_session_id, parent_session_id);
+    assert_eq!(sr.parent_loop_id, parent_loop_id);
+    assert_eq!(sr.tool_call_id, "tc-1");
+    assert_eq!(sr.tool_name, "sub_agent");
+}
+
+// ---------------------------------------------------------------------------
+// test_session_recorder_child_loop_ref_tool_end_before_child_end
+// ---------------------------------------------------------------------------
+
+/// Same cross-session scenario as above but with a reversed event ordering:
+/// tool_end fires before child_end (can happen when events from two channels
+/// are interleaved). Verifies ChildLoopRef and parent_spawn_ref are still
+/// correctly wired.
+#[test]
+fn test_session_recorder_child_loop_ref_tool_end_before_child_end() {
+    let parent_session_id = "sess-parent-rev";
+    let parent_loop_id = format!("{}.mock.1", parent_session_id);
+    let child_session_id = "sess-child-rev";
+    let child_loop_id = format!("{}.mock.1", child_session_id);
+    let now = chrono::Utc::now();
+
+    let parent_start = AgentEvent::AgentStart {
+        agent_id: "parent-agent".into(),
+        session_id: parent_session_id.into(),
+        loop_id: parent_loop_id.clone(),
+        parent_loop_id: None,
+        continuation_kind: None,
+        timestamp: now,
+        metadata: None,
+    };
+    let child_start = AgentEvent::AgentStart {
+        agent_id: "child-agent".into(),
+        session_id: child_session_id.into(),
+        loop_id: child_loop_id.clone(),
+        parent_loop_id: Some(parent_loop_id.clone()),
+        continuation_kind: None,
+        timestamp: now,
+        metadata: None,
+    };
+    // tool_end arrives BEFORE child_end (reversed ordering).
+    let tool_end = AgentEvent::ToolExecutionEnd {
+        loop_id: parent_loop_id.clone(),
+        tool_call_id: "tc-rev".into(),
+        tool_name: "sub_agent".into(),
+        result: ToolResult {
+            content: vec![],
+            details: serde_json::Value::Null,
+            child_loop_id: Some(child_loop_id.clone()),
+        },
+        is_error: false,
+        child_loop_id: Some(child_loop_id.clone()),
+    };
+    let child_end = AgentEvent::AgentEnd {
+        loop_id: child_loop_id.clone(),
+        messages: vec![],
+        usage: Usage::default(),
+        timestamp: now,
+        rejection: None,
+    };
+    let parent_end = AgentEvent::AgentEnd {
+        loop_id: parent_loop_id.clone(),
+        messages: vec![],
+        usage: Usage::default(),
+        timestamp: now,
+        rejection: None,
+    };
+
+    let mut recorder = SessionRecorder::new(SessionRecorderConfig::default());
+    for event in [parent_start, child_start, tool_end, child_end, parent_end] {
+        recorder.on_event(event);
+    }
+    recorder.flush();
+
+    let parent_sess = recorder
+        .get_session(parent_session_id)
+        .expect("parent session not found");
+    let parent_loop = parent_sess
+        .get_loop(&parent_loop_id)
+        .expect("parent loop not found");
+
+    // ChildLoopRef must be recorded regardless of ordering.
+    assert_eq!(parent_loop.child_loop_refs.len(), 1);
+    assert_eq!(parent_loop.child_loop_refs[0].tool_call_id, "tc-rev");
+    assert_eq!(
+        parent_loop.child_loop_refs[0].child_session_id,
+        child_session_id
+    );
+
+    // Cross-session child must not appear in same-session tree.
+    assert!(!parent_loop.children_loop_ids.contains(&child_loop_id));
+
+    // Child session's parent_spawn_ref should be enriched (child was still open
+    // in open_sessions when tool_end fired).
+    let child_sess = recorder
+        .get_session(child_session_id)
+        .expect("child session not found");
+    let sr = child_sess
+        .parent_spawn_ref
+        .as_ref()
+        .expect("child session should have parent_spawn_ref");
+    assert_eq!(sr.tool_call_id, "tc-rev");
+    assert_eq!(sr.tool_name, "sub_agent");
+}
+
+// ---------------------------------------------------------------------------
+// test_session_recorder_flush_aborts_open_loop
+// ---------------------------------------------------------------------------
+
+/// flush() called while a loop is still open must mark it Aborted.
+#[tokio::test]
+async fn test_session_recorder_flush_aborts_open_loop() {
+    let provider = Arc::new(MockProvider::text("hi"));
+    let config = make_config(provider);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    let mut context = AgentContext {
+        agent_id: Some("agent-flush".into()),
+        session_id: Some("session-flush".into()),
+        ..Default::default()
+    };
+
+    agent_loop(
+        vec![AgentMessage::Llm(Message::user("test"))],
+        &mut context,
+        &config,
+        tx,
+        cancel,
+    )
+    .await;
+
+    // Drain all events but deliberately drop AgentEnd so the loop stays open.
+    let events: Vec<_> = {
+        let mut v = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            v.push(e);
+        }
+        v
+    };
+    let events_without_end: Vec<_> = events
+        .into_iter()
+        .filter(|e| !matches!(e, AgentEvent::AgentEnd { .. }))
+        .collect();
+
+    let mut recorder = SessionRecorder::new(SessionRecorderConfig::default());
+    feed(&mut recorder, events_without_end);
+    // Loop is still open — flush must abort it.
+    recorder.flush();
+
+    let sessions: Vec<_> = recorder.sessions().collect();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].loops.len(), 1);
+    assert_eq!(
+        sessions[0].loops[0].status,
+        LoopStatus::Aborted,
+        "loop missing AgentEnd should be marked Aborted by flush()"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// test_session_recorder_current_loop
+// ---------------------------------------------------------------------------
+
+/// current_loop() returns the in-progress LoopRecord while the loop is open,
+/// and None after it closes.
+#[tokio::test]
+async fn test_session_recorder_current_loop() {
+    let provider = Arc::new(MockProvider::text("hi"));
+    let config = make_config(provider);
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    let mut context = AgentContext {
+        agent_id: Some("agent-cl".into()),
+        session_id: Some("session-cl".into()),
+        ..Default::default()
+    };
+
+    agent_loop(
+        vec![AgentMessage::Llm(Message::user("test"))],
+        &mut context,
+        &config,
+        tx,
+        cancel,
+    )
+    .await;
+
+    let events = drain(rx);
+    let loop_id = context.loop_id.clone().unwrap();
+
+    let mut recorder = SessionRecorder::new(SessionRecorderConfig::default());
+
+    // Feed all events up to (but not including) AgentEnd.
+    let (before_end, rest): (Vec<_>, Vec<_>) = events
+        .into_iter()
+        .partition(|e| !matches!(e, AgentEvent::AgentEnd { .. }));
+
+    feed(&mut recorder, before_end);
+    assert!(
+        recorder.current_loop(&loop_id).is_some(),
+        "current_loop should be Some while loop is open"
+    );
+
+    // Feed the AgentEnd.
+    feed(&mut recorder, rest);
+    assert!(
+        recorder.current_loop(&loop_id).is_none(),
+        "current_loop should be None after AgentEnd"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// test_load_sessions_for_agent
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_load_sessions_for_agent() {
+    let dir = TempDir::new().unwrap();
+
+    // Save two sessions for "agent-a" and one for "agent-b".
+    let sessions_a: Vec<Session> = (0..2)
+        .map(|i| Session {
+            session_id: format!("agent-a-sess-{i}"),
+            agent_id: "agent-a".into(),
+            created_at: chrono::Utc::now(),
+            last_active_at: chrono::Utc::now(),
+            formation: SessionFormation::Explicit {
+                timestamp: chrono::Utc::now(),
+            },
+            parent_spawn_ref: None,
+            loops: Vec::new(),
+        })
+        .collect();
+    let session_b = Session {
+        session_id: "agent-b-sess-0".into(),
+        agent_id: "agent-b".into(),
+        created_at: chrono::Utc::now(),
+        last_active_at: chrono::Utc::now(),
+        formation: SessionFormation::Explicit {
+            timestamp: chrono::Utc::now(),
+        },
+        parent_spawn_ref: None,
+        loops: Vec::new(),
+    };
+
+    for s in &sessions_a {
+        save_session(s, dir.path()).unwrap();
+    }
+    save_session(&session_b, dir.path()).unwrap();
+
+    let loaded = load_sessions_for_agent("agent-a", dir.path()).unwrap();
+    assert_eq!(loaded.len(), 2, "should load exactly agent-a's 2 sessions");
+    assert!(loaded.iter().all(|s| s.agent_id == "agent-a"));
+
+    let loaded_b = load_sessions_for_agent("agent-b", dir.path()).unwrap();
+    assert_eq!(loaded_b.len(), 1);
+
+    let loaded_none = load_sessions_for_agent("agent-z", dir.path()).unwrap();
+    assert!(loaded_none.is_empty(), "unknown agent returns empty vec");
+}
+
+// ---------------------------------------------------------------------------
+// test_malformed_loop_id_handling
+// ---------------------------------------------------------------------------
+
+/// Verifies the documented fallback behaviour of loop_id helpers when loop_ids
+/// don't follow the `{session_id}.{config_segment}.{N}` format.
+///
+/// - `session_id_from_loop_id`: returns the whole string if there is no dot.
+/// - `config_segment_from_loop_id`: returns None if there are fewer than two dots.
+///
+/// These are private functions so we exercise them through the public
+/// SessionRecorder API by feeding events with abnormal loop_id values and
+/// asserting the derived fields on the resulting records.
+#[test]
+fn test_malformed_loop_id_handling() {
+    let now = chrono::Utc::now();
+
+    // ── Case 1: loop_id with no dots ─────────────────────────────────────────
+    // session_id_from_loop_id("nodots") == "nodots" (whole string)
+    // config_segment_from_loop_id("nodots") == None
+    {
+        let loop_id = "nodots".to_string();
+        let mut recorder = SessionRecorder::new(SessionRecorderConfig::default());
+        recorder.on_event(AgentEvent::AgentStart {
+            agent_id: "a".into(),
+            session_id: "nodots".into(), // must match what session_id_from_loop_id returns
+            loop_id: loop_id.clone(),
+            parent_loop_id: None,
+            continuation_kind: None,
+            timestamp: now,
+            metadata: None,
+        });
+        recorder.on_event(AgentEvent::AgentEnd {
+            loop_id: loop_id.clone(),
+            messages: vec![],
+            usage: Usage::default(),
+            timestamp: now,
+            rejection: None,
+        });
+        recorder.flush();
+
+        let sess = recorder.get_session("nodots").expect("session not created");
+        assert_eq!(sess.loops.len(), 1);
+        // config_id should be None — no two dots means no config segment
+        assert!(
+            sess.loops[0].config.is_none(),
+            "no assistant message → config is None"
+        );
+    }
+
+    // ── Case 2: loop_id with exactly one dot ─────────────────────────────────
+    // session_id_from_loop_id("sess.1") == "sess"
+    // config_segment_from_loop_id("sess.1") == None (only one dot)
+    {
+        let loop_id = "sess.1".to_string();
+        let mut recorder = SessionRecorder::new(SessionRecorderConfig::default());
+        recorder.on_event(AgentEvent::AgentStart {
+            agent_id: "a".into(),
+            session_id: "sess".into(),
+            loop_id: loop_id.clone(),
+            parent_loop_id: None,
+            continuation_kind: None,
+            timestamp: now,
+            metadata: None,
+        });
+        recorder.on_event(AgentEvent::AgentEnd {
+            loop_id: loop_id.clone(),
+            messages: vec![],
+            usage: Usage::default(),
+            timestamp: now,
+            rejection: None,
+        });
+        recorder.flush();
+
+        let sess = recorder.get_session("sess").expect("session not created");
+        assert_eq!(sess.loops.len(), 1);
+        assert_eq!(sess.loops[0].loop_id, loop_id);
+    }
+
+    // ── Case 3: cross-session child with a no-dot loop_id ────────────────────
+    // When ToolExecutionEnd carries child_loop_id="child-nodots",
+    // session_id_from_loop_id returns "child-nodots" as the child_session_id.
+    {
+        let parent_loop_id = "parent.cfg.1".to_string();
+        let child_loop_id = "child-nodots".to_string();
+        let mut recorder = SessionRecorder::new(SessionRecorderConfig::default());
+        recorder.on_event(AgentEvent::AgentStart {
+            agent_id: "a".into(),
+            session_id: "parent".into(),
+            loop_id: parent_loop_id.clone(),
+            parent_loop_id: None,
+            continuation_kind: None,
+            timestamp: now,
+            metadata: None,
+        });
+        recorder.on_event(AgentEvent::ToolExecutionEnd {
+            loop_id: parent_loop_id.clone(),
+            tool_call_id: "tc".into(),
+            tool_name: "tool".into(),
+            result: ToolResult {
+                content: vec![],
+                details: serde_json::Value::Null,
+                child_loop_id: Some(child_loop_id.clone()),
+            },
+            is_error: false,
+            child_loop_id: Some(child_loop_id.clone()),
+        });
+        recorder.on_event(AgentEvent::AgentEnd {
+            loop_id: parent_loop_id.clone(),
+            messages: vec![],
+            usage: Usage::default(),
+            timestamp: now,
+            rejection: None,
+        });
+        recorder.flush();
+
+        let sess = recorder.get_session("parent").expect("session not found");
+        let lr = sess.get_loop(&parent_loop_id).unwrap();
+        assert_eq!(lr.child_loop_refs.len(), 1);
+        // Fallback: whole string becomes the child_session_id
+        assert_eq!(
+            lr.child_loop_refs[0].child_session_id, "child-nodots",
+            "no-dot loop_id should use whole string as child_session_id"
+        );
+    }
+}

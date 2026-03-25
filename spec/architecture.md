@@ -22,6 +22,18 @@
 - `with_openapi_file(path, config, filter)` — Load tools from an OpenAPI spec file and add them to the agent.
 - `with_openapi_url(url, config, filter)` — Fetch an OpenAPI spec from a URL and add its tools to the agent.
 - `with_openapi_spec(spec_str, config, filter)` — Parse an OpenAPI spec string (JSON or YAML) and add its tools to the agent.
+- `new_session()` — Immediately rotate to a new `session_id`; resets loop counters and `last_loop_id`; returns the new session id.
+- `check_and_rotate(threshold)` — Rotate to a new session if the agent has been idle longer than `threshold` since the last `prompt_*` call; returns `Some(new_session_id)` on rotation, `None` otherwise.
+
+**BasicAgent state relevant to session management:**
+
+| Field | Type | Description |
+|---|---|---|
+| `agent_id` | `String` | Stable identifier across all sessions for this instance |
+| `session_id` | `String` | Current session identifier; updated by `new_session()` |
+| `loop_counters` | `HashMap<String, usize>` | Per-config loop counter; cleared on `new_session()` |
+| `last_loop_id` | `Option<String>` | Most recent loop; cleared on `new_session()` |
+| `last_active_at` | `Option<DateTime<Utc>>` | Timestamp of last `prompt_*` call; used by `check_and_rotate()` |
 
 ### AgentLoop (`src/agent_loop.rs`)
 **Responsibility:** The core execution engine. Manages the turn loop, tool dispatch, steering injection, follow-up processing, and lifecycle event emission.
@@ -109,6 +121,22 @@
 - `from_str(spec, config, filter)` — Parse an OpenAPI spec from an in-memory string (auto-detects JSON vs YAML) and return one tool adapter per matching operation.
 **Availability:** Only compiled when the `openapi` feature flag is enabled.
 
+### SessionStore (`src/session.rs`)
+**Responsibility:** Persistent session layer. Records every `AgentEvent` into a structured tree of `Session` + `LoopRecord` objects, and provides load/save/list/delete functions for flat JSON-file persistence.
+**Public interface:**
+- `SessionRecorder::new(config)` — Create a recorder; call `on_event(event)` for every event on the agent's `tx` channel.
+- `SessionRecorder::flush()` — Finalize all open loops (status → `Aborted`) and move them into their sessions.
+- `SessionRecorder::drain_completed()` — Consume and return all completed sessions.
+- `SessionRecorder::sessions()` — Iterate all known sessions (completed + in-progress).
+- `SessionRecorder::get_session(id)` — Look up a session by `session_id`.
+- `SessionRecorder::current_loop(id)` — Look up an in-progress `LoopRecord` by `loop_id`.
+- `save_session(session, dir)` — Write `{dir}/{session_id}.json` (creates `dir` if needed).
+- `load_session(session_id, dir)` — Read `{dir}/{session_id}.json`.
+- `list_session_ids(dir)` — List all session ids in `dir`, newest first.
+- `load_sessions_for_agent(agent_id, dir)` — Load all sessions matching `agent_id`.
+- `delete_session(session_id, dir)` — Remove `{dir}/{session_id}.json`.
+**File format:** Pretty-printed JSON. Flat directory — one file per session, no index.
+
 ### RetryEngine (`src/retry.rs`)
 **Responsibility:** Computes exponential-backoff delay with ±20% jitter. Classifies which errors are retryable.
 **Public interface:**
@@ -148,6 +176,8 @@ graph TD
     Types --> AgentLoop
     Types --> ToolSystem
     Types --> ProviderRegistry
+    SessionStore["SessionStore\nsession.rs"] --> Types
+    App --> SessionStore
 ```
 
 ---
@@ -343,7 +373,12 @@ Derived: cache_hit_rate() = cache_read / (input + cache_read + cache_write)
 
 ### AgentEvent
 ```
-Entity: AgentEvent (enum)
+Entity: AgentEvent (enum, #[serde(tag = "type")])
+
+Every variant except AgentStart, ParallelLoopStart, and ParallelLoopEnd now carries
+loop_id: String so that events from concurrent parallel branches can be reliably
+attributed to the correct LoopRecord even when they are interleaved on one tx channel.
+
   AgentStart {
     agent_id:          String                    [stable agent instance identifier]
     session_id:        String                    [groups all loops in one session]
@@ -353,27 +388,53 @@ Entity: AgentEvent (enum)
     timestamp:         DateTime<Utc>
     metadata:          Option<JSON>
   }
-  AgentEnd { messages: Vec<AgentMessage> }  [loop finished; all new messages]
+  AgentEnd {
+    loop_id:  String                         [← identifies the loop]
+    messages: Vec<AgentMessage>              [all new messages produced by this loop]
+    usage:    Usage
+    timestamp: DateTime<Utc>
+    rejection: Option<String>               [Some if input filter blocked the run]
+  }
   TurnStart {
+    loop_id:      String
     turn_index:   u32
     timestamp:    DateTime<Utc>
     triggered_by: TurnTrigger               [what caused this turn to begin]
   }
-  TurnEnd { message, tool_results }         [LLM call + tools complete]
-  MessageStart { message }                  [message streaming began]
-  MessageUpdate { message, delta }          [content delta arrived]
-  MessageEnd { message }                    [message complete]
-  ToolExecutionStart { tool_call_id, tool_name, args }
-  ToolExecutionUpdate { tool_call_id, tool_name, partial_result }  [streaming partial result]
+  TurnEnd {
+    loop_id:      String
+    message:      AgentMessage
+    usage:        Usage
+    timestamp:    DateTime<Utc>
+    tool_results: Vec<Message>
+  }
+  MessageStart  { loop_id: String, message }            [message streaming began]
+  MessageUpdate { loop_id: String, message, delta }     [content delta arrived]
+  MessageEnd    { loop_id: String, message }            [message complete]
+  ToolExecutionStart  { loop_id: String, tool_call_id, tool_name, args }
+  ToolExecutionUpdate { loop_id: String, tool_call_id, tool_name, partial_result }
   ToolExecutionEnd {
+    loop_id:       String
     tool_call_id:  String
     tool_name:     String
     result:        ToolResult
     is_error:      bool
     child_loop_id: Option<String>           [Some only when tool spawned a sub-agent loop]
   }
-  ProgressMessage { tool_call_id, tool_name, text }  [user-facing status text]
-  InputRejected { reason }                  [input filter blocked the prompt]
+  ProgressMessage { loop_id: String, tool_call_id, tool_name, text }
+  InputRejected   { loop_id: String, reason }           [input filter blocked the prompt]
+  ParallelLoopStart {                                   [loop_id NOT on this variant]
+    session_id: String
+    loop_ids:   Vec<String>                 [one loop_id per branch, in config order]
+    timestamp:  DateTime<Utc>
+  }
+  ParallelLoopEnd {                                     [loop_id NOT on this variant]
+    session_id:             String
+    selected_loop_id:       String
+    selected_config_index:  usize
+    evaluation_usage:       Usage
+    timestamp:              DateTime<Utc>
+  }
 ```
 
 ### StreamDelta
@@ -583,6 +644,63 @@ Entity: OperationFilter (enum) — controls which API operations become tools
   ByOperationId(Vec<String>)        [include only operations whose id is in the list]
   ByTag(Vec<String>)                [include operations tagged with any listed tag]
   ByPathPrefix(String)              [include operations whose path starts with the prefix]
+```
+
+### Session / LoopRecord / SessionRecorder
+```
+Entity: Session
+  session_id:      String
+  agent_id:        String
+  created_at:      DateTime<Utc>
+  last_active_at:  DateTime<Utc>
+  formation:       SessionFormation  [Explicit | FirstLoop | InactivityTimeout{..}]
+  parent_spawn_ref: Option<SpawnRef> [set when this session was a sub-agent spawn]
+  loops:           Vec<LoopRecord>   [ordered by started_at]
+
+Methods: root_loops(), children_of(loop_id), parallel_siblings(loop_id),
+         get_loop(loop_id), total_usage()
+
+Entity: LoopRecord
+  loop_id:             String
+  session_id:          String
+  agent_id:            String
+  parent_loop_id:      Option<String>
+  continuation_kind:   Option<ContinuationKind>
+  started_at:          DateTime<Utc>
+  ended_at:            Option<DateTime<Utc>>
+  status:              LoopStatus          [Pending | Running | Completed | Rejected | Aborted]
+  rejection:           Option<String>
+  config:              Option<LoopConfigSnapshot>  [model + provider + config_id]
+  messages:            Vec<AgentMessage>   [from AgentEnd.messages — authoritative]
+  usage:               Usage
+  metadata:            Option<JSON>
+  events:              Vec<LoopEvent>      [full event stream; MessageUpdate opt-in]
+  children_loop_ids:   Vec<String>         [same-session direct children]
+  child_loop_refs:     Vec<ChildLoopRef>   [cross-session sub-agent spawn links]
+  parallel_group:      Option<ParallelGroupRecord>
+
+Entity: ChildLoopRef — outbound cross-session link on the parent LoopRecord
+  tool_call_id:    String
+  tool_name:       String
+  child_loop_id:   String
+  child_session_id: String
+
+Entity: SpawnRef — inbound cross-session link on the child Session
+  parent_session_id: String
+  parent_loop_id:    String
+  tool_call_id:      String
+  tool_name:         String
+
+Entity: ParallelGroupRecord
+  all_loop_ids:         Vec<String>   [all branch loop_ids in config order]
+  selected_loop_id:     String
+  selected_config_index: usize
+  evaluation_usage:     Usage
+  is_selected:          bool          [true only on the winner's LoopRecord]
+
+Entity: SessionRecorderConfig
+  formation_policy:         SessionFormationPolicy  [PerSessionId | InactivityTimeout{secs}]
+  include_streaming_events: bool                    [default: false — excludes MessageUpdate]
 ```
 
 ---

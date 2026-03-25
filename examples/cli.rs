@@ -238,6 +238,7 @@ async fn main() {
                             error_message,
                             ..
                         }),
+                    ..
                 } => {
                     if in_text {
                         println!();

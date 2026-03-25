@@ -44,6 +44,7 @@ pub mod evaluation;
 pub mod mcp;
 pub mod provider;
 pub mod retry;
+pub mod session;
 pub mod skills;
 pub mod tools;
 pub mod types;
@@ -64,5 +65,10 @@ pub use evaluation::{
     TransparentEvaluation,
 };
 pub use retry::RetryConfig;
+pub use session::{
+    delete_session, list_session_ids, load_session, load_sessions_for_agent, save_session,
+    ChildLoopRef, LoopConfigSnapshot, LoopEvent, LoopRecord, LoopStatus, ParallelGroupRecord,
+    Session, SessionError, SessionFormation, SessionRecorder, SessionRecorderConfig, SpawnRef,
+};
 pub use skills::SkillSet;
 pub use types::*; // glob re-export: ALL public items from types become top-level exports

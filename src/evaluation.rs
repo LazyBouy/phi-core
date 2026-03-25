@@ -541,6 +541,7 @@ impl EvaluationStrategy for LlmJudgeEvaluation {
                 compact_for_judge(prior_context_text, raw_responses, content_budget);
             if !satisfied {
                 tx.send(AgentEvent::ProgressMessage {
+                    loop_id: String::new(),
                     tool_call_id: "judge-compaction".into(),
                     tool_name: "LlmJudgeEvaluation".into(),
                     text: format!(

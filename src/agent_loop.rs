@@ -250,10 +250,17 @@ pub async fn agent_loop(
     tx: mpsc::UnboundedSender<AgentEvent>, // OBSERVER — taken by value; all AgentEvents pushed here
     cancel: tokio_util::sync::CancellationToken, // ABORT — checked between every major step; child tokens for tools
 ) -> Vec<AgentMessage> {
+    // loop_id: use caller-supplied value or fall back to a UUID (Agent sets this via next_loop_id).
+    // Must be set BEFORE before_loop so AgentEnd (on abort) can carry the loop_id.
+    if context.loop_id.is_none() {
+        context.loop_id = Some(uuid::Uuid::new_v4().to_string());
+    }
+
     // before_loop hook — fires before AgentStart; false aborts the entire loop
     if let Some(ref before_loop) = config.before_loop {
         if !before_loop(&context.messages, 0) {
             tx.send(AgentEvent::AgentEnd {
+                loop_id: context.loop_id.clone().unwrap_or_default(),
                 messages: vec![],
                 usage: Usage::default(),
                 timestamp: chrono::Utc::now(),
@@ -272,10 +279,6 @@ pub async fn agent_loop(
     if context.session_id.is_none() {
         context.session_id = Some(uuid::Uuid::new_v4().to_string());
     }
-    // loop_id: use caller-supplied value or fall back to a UUID (Agent sets this via next_loop_id).
-    if context.loop_id.is_none() {
-        context.loop_id = Some(uuid::Uuid::new_v4().to_string());
-    }
 
     tx.send(AgentEvent::AgentStart {
         agent_id: context.agent_id.clone().unwrap(), // safe: just set above
@@ -292,12 +295,18 @@ pub async fn agent_loop(
     // Reject → emit InputRejected + AgentEnd and return immediately (no LLM call made).
     // Warn  → warning text appended to the last user message so the LLM sees it.
     // Pass  → prompts returned unchanged.
-    let prompts = match apply_input_filters(prompts, &config.input_filters, &tx) {
+    let prompts = match apply_input_filters(
+        prompts,
+        &config.input_filters,
+        &tx,
+        context.loop_id.as_deref().unwrap_or_default(),
+    ) {
         Ok(filtered) => filtered,
         Err(reason) => {
             // AgentEnd with rejection: pre-run rejection is the one case where
             // AgentEnd.rejection is Some — the agent never actually started.
             tx.send(AgentEvent::AgentEnd {
+                loop_id: context.loop_id.clone().unwrap(),
                 messages: vec![],
                 usage: Usage::default(),
                 timestamp: chrono::Utc::now(),
@@ -327,6 +336,7 @@ pub async fn agent_loop(
     .await;
 
     tx.send(AgentEvent::AgentEnd {
+        loop_id: context.loop_id.clone().unwrap(),
         messages: new_messages.clone(),
         usage: loop_usage.clone(),
         timestamp: chrono::Utc::now(),
@@ -401,10 +411,17 @@ pub async fn agent_loop_continue(
 
     let mut new_messages: Vec<AgentMessage> = Vec::new();
 
+    // loop_id: use caller-supplied value (Agent sets this via next_loop_id) or fall back to UUID.
+    // Must be set BEFORE before_loop so AgentEnd (on abort) can carry the loop_id.
+    if context.loop_id.is_none() {
+        context.loop_id = Some(uuid::Uuid::new_v4().to_string());
+    }
+
     // before_loop hook — fires before AgentStart; false aborts the entire loop
     if let Some(ref before_loop) = config.before_loop {
         if !before_loop(&context.messages, 0) {
             tx.send(AgentEvent::AgentEnd {
+                loop_id: context.loop_id.clone().unwrap(),
                 messages: vec![],
                 usage: Usage::default(),
                 timestamp: chrono::Utc::now(),
@@ -413,11 +430,6 @@ pub async fn agent_loop_continue(
             .ok();
             return vec![];
         }
-    }
-
-    // loop_id: use caller-supplied value (Agent sets this via next_loop_id) or fall back to UUID.
-    if context.loop_id.is_none() {
-        context.loop_id = Some(uuid::Uuid::new_v4().to_string());
     }
 
     tx.send(AgentEvent::AgentStart {
@@ -434,6 +446,7 @@ pub async fn agent_loop_continue(
     let loop_usage = run_loop(context, &mut new_messages, config, &tx, &cancel, None).await;
 
     tx.send(AgentEvent::AgentEnd {
+        loop_id: context.loop_id.clone().unwrap(),
         messages: new_messages.clone(),
         usage: loop_usage.clone(),
         timestamp: chrono::Utc::now(),
@@ -464,6 +477,7 @@ async fn run_loop(
     cancel: &tokio_util::sync::CancellationToken, // ABORT — borrowed; child tokens derived per tool
     first_turn_prompts: Option<&[AgentMessage]>, // Initial prompts (agent_loop only); None for agent_loop_continue
 ) -> Usage {
+    let loop_id = context.loop_id.clone().unwrap_or_default();
     let mut first_turn = true;
     let mut turn: usize = 0; // single counter: passed to hooks (as usize) and TurnStart events (as u32)
     let mut loop_usage = Usage::default(); // accumulated usage across all turns, returned for after_loop
@@ -486,7 +500,7 @@ async fn run_loop(
         .as_ref()
         .map(|f| f())
         .unwrap_or_default();
-    let mut pending = match apply_input_filters(raw, &config.input_filters, tx) {
+    let mut pending = match apply_input_filters(raw, &config.input_filters, tx, &loop_id) {
         Ok(filtered) => filtered,
         Err(_) => return loop_usage,
     };
@@ -543,10 +557,12 @@ async fn run_loop(
                         timestamp: now_ms(),
                     });
                     tx.send(AgentEvent::MessageStart {
+                        loop_id: loop_id.clone(),
                         message: limit_msg.clone(),
                     })
                     .ok();
                     tx.send(AgentEvent::MessageEnd {
+                        loop_id: loop_id.clone(),
                         message: limit_msg.clone(),
                     })
                     .ok();
@@ -565,6 +581,7 @@ async fn run_loop(
 
             // TurnStart — fires AFTER before_turn hook
             tx.send(AgentEvent::TurnStart {
+                loop_id: loop_id.clone(),
                 turn_index: turn as u32,
                 timestamp: chrono::Utc::now(),
                 triggered_by: turn_trigger,
@@ -583,10 +600,12 @@ async fn run_loop(
                 if let Some(prompts) = first_turn_prompts {
                     for prompt in prompts {
                         tx.send(AgentEvent::MessageStart {
+                            loop_id: loop_id.clone(),
                             message: prompt.clone(),
                         })
                         .ok();
                         tx.send(AgentEvent::MessageEnd {
+                            loop_id: loop_id.clone(),
                             message: prompt.clone(),
                         })
                         .ok();
@@ -598,10 +617,12 @@ async fn run_loop(
             if !pending.is_empty() {
                 for msg in pending.drain(..) {
                     tx.send(AgentEvent::MessageStart {
+                        loop_id: loop_id.clone(),
                         message: msg.clone(),
                     })
                     .ok();
                     tx.send(AgentEvent::MessageEnd {
+                        loop_id: loop_id.clone(),
                         message: msg.clone(),
                     })
                     .ok();
@@ -621,7 +642,7 @@ async fn run_loop(
             }
 
             // Stream assistant response
-            let message = stream_assistant_response(context, config, tx, cancel).await;
+            let message = stream_assistant_response(context, config, tx, cancel, &loop_id).await;
 
             let agent_msg: AgentMessage = message.clone().into();
             context.messages.push(agent_msg.clone());
@@ -655,6 +676,7 @@ async fn run_loop(
                     }
                     // TurnEnd fires BEFORE after_turn
                     tx.send(AgentEvent::TurnEnd {
+                        loop_id: loop_id.clone(),
                         message: agent_msg,
                         usage: usage.clone(),
                         timestamp: chrono::Utc::now(),
@@ -697,6 +719,7 @@ async fn run_loop(
                     config.get_steering_messages.as_ref(),
                     &config.tool_execution,
                     config,
+                    &loop_id,
                 )
                 .await;
 
@@ -736,6 +759,7 @@ async fn run_loop(
 
             // TurnEnd fires BEFORE after_turn
             tx.send(AgentEvent::TurnEnd {
+                loop_id: loop_id.clone(),
                 message: agent_msg,
                 usage: turn_usage.clone(),
                 timestamp: chrono::Utc::now(),
@@ -751,7 +775,7 @@ async fn run_loop(
             // Check steering after turn — filter before assigning to pending
             if let Some(steering) = steering_after_tools.take() {
                 if !steering.is_empty() {
-                    match apply_input_filters(steering, &config.input_filters, tx) {
+                    match apply_input_filters(steering, &config.input_filters, tx, &loop_id) {
                         Ok(filtered) => {
                             pending = filtered;
                             continue;
@@ -766,7 +790,7 @@ async fn run_loop(
                 .as_ref()
                 .map(|f| f())
                 .unwrap_or_default();
-            pending = match apply_input_filters(raw, &config.input_filters, tx) {
+            pending = match apply_input_filters(raw, &config.input_filters, tx, &loop_id) {
                 Ok(filtered) => filtered,
                 Err(_) => return loop_usage,
             };
@@ -785,7 +809,7 @@ async fn run_loop(
             .unwrap_or_default();
 
         if !follow_ups.is_empty() {
-            match apply_input_filters(follow_ups, &config.input_filters, tx) {
+            match apply_input_filters(follow_ups, &config.input_filters, tx, &loop_id) {
                 Ok(filtered) => {
                     pending = filtered;
                     continue;
@@ -827,6 +851,7 @@ async fn stream_assistant_response(
     config: &AgentLoopConfig, // SETTINGS — model, system prompt, cache; used to build StreamConfig
     tx: &mpsc::UnboundedSender<AgentEvent>, // OBSERVER — re-emits StreamEvents as AgentEvents for the caller
     cancel: &tokio_util::sync::CancellationToken, // ABORT — forwarded to provider.stream(); cloned as provider_cancel
+    loop_id: &str,
 ) -> Message {
     // complete LLM response (all content blocks assembled); synthetic error Message on failure
     // Apply context transform (optional hook to prune/reshape messages before LLM sees them)
@@ -981,6 +1006,7 @@ async fn stream_assistant_response(
                 });
                 partial_message = Some(placeholder.clone());
                 tx.send(AgentEvent::MessageStart {
+                    loop_id: loop_id.to_string(),
                     message: placeholder,
                 })
                 .ok(); // .ok() = discard Result — receiver being dropped is non-fatal
@@ -991,6 +1017,7 @@ async fn stream_assistant_response(
                 // Without `ref`, the match would try to MOVE partial_message out, leaving it unusable.
                 if let Some(ref msg) = partial_message {
                     tx.send(AgentEvent::MessageUpdate {
+                        loop_id: loop_id.to_string(),
                         message: msg.clone(),
                         delta: StreamDelta::Text {
                             delta: delta.clone(),
@@ -1002,6 +1029,7 @@ async fn stream_assistant_response(
             StreamEvent::ThinkingDelta { delta, .. } => {
                 if let Some(ref msg) = partial_message {
                     tx.send(AgentEvent::MessageUpdate {
+                        loop_id: loop_id.to_string(),
                         message: msg.clone(),
                         delta: StreamDelta::Thinking {
                             delta: delta.clone(),
@@ -1013,6 +1041,7 @@ async fn stream_assistant_response(
             StreamEvent::ToolCallDelta { delta, .. } => {
                 if let Some(ref msg) = partial_message {
                     tx.send(AgentEvent::MessageUpdate {
+                        loop_id: loop_id.to_string(),
                         message: msg.clone(),
                         delta: StreamDelta::ToolCallDelta {
                             delta: delta.clone(),
@@ -1027,7 +1056,11 @@ async fn stream_assistant_response(
                 let am: AgentMessage = message.clone().into();
                 partial_message = Some(am.clone());
                 // MessageStart was already emitted on StreamEvent::Start
-                tx.send(AgentEvent::MessageEnd { message: am }).ok();
+                tx.send(AgentEvent::MessageEnd {
+                    loop_id: loop_id.to_string(),
+                    message: am,
+                })
+                .ok();
             }
             StreamEvent::Error { message } => {
                 let am: AgentMessage = message.clone().into();
@@ -1035,12 +1068,17 @@ async fn stream_assistant_response(
                 // (error before stream opened → no Start event was sent)
                 if partial_message.is_none() {
                     tx.send(AgentEvent::MessageStart {
+                        loop_id: loop_id.to_string(),
                         message: am.clone(),
                     })
                     .ok();
                 }
                 partial_message = Some(am.clone());
-                tx.send(AgentEvent::MessageEnd { message: am }).ok();
+                tx.send(AgentEvent::MessageEnd {
+                    loop_id: loop_id.to_string(),
+                    message: am,
+                })
+                .ok();
             }
             _ => {} // catch-all: ignore any future StreamEvent variants we don't handle here
         }
@@ -1125,6 +1163,7 @@ The same BashTool entry may appear 5× in `tool_calls` with different arguments.
 One registry entry → many call-site invocations. They can never be the same structure.
 The LLM can also hallucinate tool names; `tools` lookup can fail, producing is_error=true.
 */
+#[allow(clippy::too_many_arguments)]
 async fn execute_tool_calls(
     tools: &[Arc<dyn AgentTool>], // REGISTRY — available implementations (unchanged per-turn)
     tool_calls: &[(String, String, serde_json::Value)], // INVOCATIONS — (id, name, args) tuples from the LLM
@@ -1133,13 +1172,14 @@ async fn execute_tool_calls(
     get_steering: Option<&GetMessagesFn>, // INTERRUPT CHECK — polled between tools; None = no steering
     strategy: &ToolExecutionStrategy,     // DISPATCH — Sequential | Parallel | Batched{size}
     config: &AgentLoopConfig,
+    loop_id: &str,
 ) -> ToolExecutionResult {
     match strategy {
         ToolExecutionStrategy::Sequential => {
-            execute_sequential(tools, tool_calls, tx, cancel, get_steering, config).await
+            execute_sequential(tools, tool_calls, tx, cancel, get_steering, config, loop_id).await
         }
         ToolExecutionStrategy::Parallel => {
-            execute_batch(tools, tool_calls, tx, cancel, get_steering, config).await
+            execute_batch(tools, tool_calls, tx, cancel, get_steering, config, loop_id).await
         }
         ToolExecutionStrategy::Batched { size } => {
             /*
@@ -1160,7 +1200,8 @@ async fn execute_tool_calls(
             let mut steering_messages: Option<Vec<AgentMessage>> = None;
 
             for (batch_idx, batch) in tool_calls.chunks(*size).enumerate() {
-                let batch_result = execute_batch(tools, batch, tx, cancel, None, config).await;
+                let batch_result =
+                    execute_batch(tools, batch, tx, cancel, None, config, loop_id).await;
                 // .extend() appends all items from an iterator into the Vec
                 // Python analogy: results.extend(batch_result.tool_results)
                 results.extend(batch_result.tool_results);
@@ -1175,7 +1216,7 @@ async fn execute_tool_calls(
                         let executed = (batch_idx + 1) * *size;
                         if executed < tool_calls.len() {
                             for (skip_id, skip_name, _) in &tool_calls[executed..] {
-                                results.push(skip_tool_call(skip_id, skip_name, tx));
+                                results.push(skip_tool_call(skip_id, skip_name, tx, loop_id));
                             }
                         }
                         break;
@@ -1199,13 +1240,14 @@ async fn execute_sequential(
     cancel: &tokio_util::sync::CancellationToken, // ABORT — forwarded to execute_single_tool
     get_steering: Option<&GetMessagesFn>, // INTERRUPT CHECK — polled after each tool; non-empty → skip remaining
     config: &AgentLoopConfig, // HOOKS — before/after_tool_execution* forwarded to execute_single_tool
+    loop_id: &str,
 ) -> ToolExecutionResult {
     let mut results: Vec<Message> = Vec::new();
     let mut steering_messages: Option<Vec<AgentMessage>> = None;
 
     for (index, (id, name, args)) in tool_calls.iter().enumerate() {
         let (result_msg, _is_error) =
-            execute_single_tool(tools, id, name, args, tx, cancel, config).await;
+            execute_single_tool(tools, id, name, args, tx, cancel, config, loop_id).await;
         results.push(result_msg);
 
         // Check for steering — skip remaining tools if user interrupted
@@ -1214,7 +1256,7 @@ async fn execute_sequential(
             if !steering.is_empty() {
                 steering_messages = Some(steering);
                 for (skip_id, skip_name, _) in &tool_calls[index + 1..] {
-                    results.push(skip_tool_call(skip_id, skip_name, tx));
+                    results.push(skip_tool_call(skip_id, skip_name, tx, loop_id));
                 }
                 break;
             }
@@ -1238,12 +1280,15 @@ async fn execute_batch(
     cancel: &tokio_util::sync::CancellationToken, // ABORT — each task gets a child token
     get_steering: Option<&GetMessagesFn>, // INTERRUPT CHECK — polled once after the full batch finishes
     config: &AgentLoopConfig, // HOOKS — before/after_tool_execution* forwarded to execute_single_tool
+    loop_id: &str,
 ) -> ToolExecutionResult {
     use futures::future::join_all;
 
     let futures: Vec<_> = tool_calls
         .iter()
-        .map(|(id, name, args)| execute_single_tool(tools, id, name, args, tx, cancel, config))
+        .map(|(id, name, args)| {
+            execute_single_tool(tools, id, name, args, tx, cancel, config, loop_id)
+        })
         .collect();
 
     let batch_results = join_all(futures).await;
@@ -1287,6 +1332,7 @@ Why `id` AND `name` as separate params?
 ///
 /// Returns `(Message::ToolResult, is_error)`. The message is appended to the LLM context by
 /// the caller; `is_error` is forwarded to the `ToolExecutionEnd` event and `after_tool_execution` hook.
+#[allow(clippy::too_many_arguments)]
 async fn execute_single_tool(
     tools: &[Arc<dyn AgentTool>], // REGISTRY — searched by `name` to find the implementation
     id: &str,   // INSTANCE ID — unique per call; correlates Start/Update/End events
@@ -1295,6 +1341,7 @@ async fn execute_single_tool(
     tx: &mpsc::UnboundedSender<AgentEvent>, // OBSERVER — pushes ToolExecution* events; independent of return
     cancel: &tokio_util::sync::CancellationToken, // ABORT — child_token() derived inside for per-tool cancellation
     config: &AgentLoopConfig, // HOOKS — before/after_tool_execution and update variants
+    loop_id: &str,
 ) -> (Message, bool) {
     // (Message::ToolResult for LLM context, is_error for ToolExecutionEnd event)
     // Find the tool by name. `find` returns Option<&&Arc<dyn AgentTool>>.
@@ -1319,10 +1366,12 @@ async fn execute_single_tool(
                 timestamp: now_ms(),
             };
             tx.send(AgentEvent::MessageStart {
+                loop_id: loop_id.to_string(),
                 message: tool_result_msg.clone().into(),
             })
             .ok();
             tx.send(AgentEvent::MessageEnd {
+                loop_id: loop_id.to_string(),
                 message: tool_result_msg.clone().into(),
             })
             .ok();
@@ -1331,6 +1380,7 @@ async fn execute_single_tool(
     }
 
     tx.send(AgentEvent::ToolExecutionStart {
+        loop_id: loop_id.to_string(),
         tool_call_id: id.to_string(),
         tool_name: name.to_string(),
         args: args.clone(),
@@ -1369,6 +1419,7 @@ async fn execute_single_tool(
         let tx = tx.clone();
         let id = id.to_string();
         let name = name.to_string();
+        let loop_id_owned = loop_id.to_string();
         let before_update = config.before_tool_execution_update.clone();
         let after_update = config.after_tool_execution_update.clone();
         Some(Arc::new(move |partial: ToolResult| {
@@ -1393,6 +1444,7 @@ async fn execute_single_tool(
 
             if emit {
                 tx.send(AgentEvent::ToolExecutionUpdate {
+                    loop_id: loop_id_owned.clone(),
                     tool_call_id: id.clone(),
                     tool_name: name.clone(),
                     partial_result: partial,
@@ -1410,8 +1462,10 @@ async fn execute_single_tool(
         let tx = tx.clone();
         let id = id.to_string();
         let name = name.to_string();
+        let loop_id_owned = loop_id.to_string();
         Some(Arc::new(move |text: String| {
             tx.send(AgentEvent::ProgressMessage {
+                loop_id: loop_id_owned.clone(),
                 tool_call_id: id.clone(),
                 tool_name: name.clone(),
                 text,
@@ -1476,6 +1530,7 @@ async fn execute_single_tool(
     };
 
     tx.send(AgentEvent::ToolExecutionEnd {
+        loop_id: loop_id.to_string(),
         tool_call_id: id.to_string(),
         tool_name: name.to_string(),
         result: result.clone(),
@@ -1497,10 +1552,12 @@ async fn execute_single_tool(
     };
 
     tx.send(AgentEvent::MessageStart {
+        loop_id: loop_id.to_string(),
         message: tool_result_msg.clone().into(),
     })
     .ok();
     tx.send(AgentEvent::MessageEnd {
+        loop_id: loop_id.to_string(),
         message: tool_result_msg.clone().into(),
     })
     .ok();
@@ -1528,6 +1585,7 @@ fn apply_input_filters(
     mut messages: Vec<AgentMessage>,
     filters: &[std::sync::Arc<dyn InputFilter>],
     tx: &mpsc::UnboundedSender<AgentEvent>,
+    loop_id: &str,
 ) -> Result<Vec<AgentMessage>, String> {
     if filters.is_empty() || messages.is_empty() {
         return Ok(messages);
@@ -1565,6 +1623,7 @@ fn apply_input_filters(
             FilterResult::Warn(w) => warnings.push(w),
             FilterResult::Reject(reason) => {
                 tx.send(AgentEvent::InputRejected {
+                    loop_id: loop_id.to_string(),
                     reason: reason.clone(),
                 })
                 .ok();
@@ -1595,6 +1654,7 @@ fn skip_tool_call(
     tool_call_id: &str, // INSTANCE ID — matches the ToolCall.id that was skipped
     tool_name: &str,    // NAME — included in events for caller visibility
     tx: &mpsc::UnboundedSender<AgentEvent>, // OBSERVER — emits Start+End so caller sees the skip in the event stream
+    loop_id: &str,
 ) -> Message {
     // Message::ToolResult with is_error=true, content = "Skipped due to queued user message."
     let result = ToolResult {
@@ -1606,6 +1666,7 @@ fn skip_tool_call(
     };
 
     tx.send(AgentEvent::ToolExecutionStart {
+        loop_id: loop_id.to_string(),
         tool_call_id: tool_call_id.into(),
         tool_name: tool_name.into(),
         args: serde_json::Value::Null,
@@ -1613,6 +1674,7 @@ fn skip_tool_call(
     .ok();
 
     tx.send(AgentEvent::ToolExecutionEnd {
+        loop_id: loop_id.to_string(),
         tool_call_id: tool_call_id.into(),
         tool_name: tool_name.into(),
         result: result.clone(),
@@ -1630,10 +1692,12 @@ fn skip_tool_call(
     };
 
     tx.send(AgentEvent::MessageStart {
+        loop_id: loop_id.to_string(),
         message: msg.clone().into(),
     })
     .ok();
     tx.send(AgentEvent::MessageEnd {
+        loop_id: loop_id.to_string(),
         message: msg.clone().into(),
     })
     .ok();

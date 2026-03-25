@@ -980,7 +980,7 @@ pub trait AgentTool: Send + Sync {
 /// The runtime does **not** enforce context constraints — e.g. it does not verify
 /// that a `Rerun` uses an identical context to the original loop. That is the caller's
 /// responsibility. The distinction is purely semantic / for traceability.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ContinuationKind {
     /// Unspecified continuation — preserves the original `agent_loop_continue` semantics.
     /// Use when the Rerun/Branch distinction is not relevant to the caller.
@@ -1000,7 +1000,7 @@ pub enum ContinuationKind {
 }
 
 /// Identifies what caused a new turn to begin.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TurnTrigger {
     /// First turn triggered by a user message (`agent_loop`).
     User,
@@ -1013,7 +1013,8 @@ pub enum TurnTrigger {
     Branch,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum AgentEvent {
     /*********************** NOTEs ON AGENT EVENTS *************************
     AgentEvent is the runtime's event vocabulary — it captures all the significant happenings
@@ -1065,6 +1066,8 @@ pub enum AgentEvent {
     /// Fires once when agent_loop() exits — after all turns and follow-ups complete.
     /// UI use: hide spinner, render final output, log token cost from the last assistant message.
     AgentEnd {
+        /// Identifies which loop this event belongs to — matches `AgentStart.loop_id`.
+        loop_id: String,
         /// All new messages added during this run (not the full history).
         /// Empty when `rejection` is `Some` — input was blocked before the LLM was called.
         messages: Vec<AgentMessage>,
@@ -1082,6 +1085,8 @@ pub enum AgentEvent {
     /// A single agent run may have many turns: initial response + one per tool-call round-trip.
     /// UI use: show "waiting for LLM..." indicator between tool results and the next response.
     TurnStart {
+        /// Identifies which loop this event belongs to — matches `AgentStart.loop_id`.
+        loop_id: String,
         /// Zero-based index of this turn within the current agent run (0 = first turn after AgentStart).
         turn_index: u32,
         /// Wall-clock time when this turn began.
@@ -1094,6 +1099,8 @@ pub enum AgentEvent {
     /// Fires at the end of each LLM turn, carrying the assistant message and all tool results.
     /// UI use: close the turn's loading indicator; `tool_results` can be shown as a collapsible block.
     TurnEnd {
+        /// Identifies which loop this event belongs to — matches `AgentStart.loop_id`.
+        loop_id: String,
         /// The assistant message produced this turn (may include text, thinking, and tool calls).
         message: AgentMessage,
         /// Token usage for this turn — direct access without destructuring `message`.
@@ -1111,13 +1118,17 @@ pub enum AgentEvent {
     /// For LLM assistant messages: fires when the SSE stream opens (StreamEvent::Start).
     /// For user/tool messages:      fires immediately (they're complete on creation).
     /// UI use: create a placeholder message bubble in the chat UI.
-    MessageStart { message: AgentMessage },
+    MessageStart {
+        loop_id: String,
+        message: AgentMessage,
+    },
 
     /// Fires for each streaming token/chunk as the LLM generates content.
     /// `delta` carries the incremental update — text token, thinking chunk, or tool-call JSON piece.
     /// `message` is the current accumulated state (useful if you join late and missed earlier deltas).
     /// UI use: append delta to the message bubble — this is what makes "typing" animations work.
     MessageUpdate {
+        loop_id: String,
         message: AgentMessage,
         delta: StreamDelta,
     },
@@ -1125,12 +1136,16 @@ pub enum AgentEvent {
     /// Fires when a message is fully complete (all tokens received).
     /// `message` is the final, complete message — safe to persist or hand off.
     /// UI use: finalize the message bubble, enable copy/share actions.
-    MessageEnd { message: AgentMessage },
+    MessageEnd {
+        loop_id: String,
+        message: AgentMessage,
+    },
 
     /// Fires when a tool call begins execution (before execute() is called).
     /// `args` is the raw JSON the LLM sent — useful for showing "what the agent is doing".
     /// UI use: show "[tool_name] running with args: ..." status line.
     ToolExecutionStart {
+        loop_id: String,
         tool_call_id: String,
         tool_name: String,
         args: serde_json::Value,
@@ -1140,6 +1155,7 @@ pub enum AgentEvent {
     /// Not all tools emit these — only long-running tools that support streaming output.
     /// UI use: update a live output preview (e.g., bash command output as it streams in).
     ToolExecutionUpdate {
+        loop_id: String,
         tool_call_id: String,
         tool_name: String,
         partial_result: ToolResult,
@@ -1150,6 +1166,7 @@ pub enum AgentEvent {
     /// `result.content` is what gets appended as Message::ToolResult into the conversation.
     /// UI use: mark the tool status as done/failed; show final output in the tool block.
     ToolExecutionEnd {
+        loop_id: String,
         tool_call_id: String,
         tool_name: String,
         result: ToolResult,
@@ -1165,6 +1182,7 @@ pub enum AgentEvent {
     /// Example: a bash tool might emit "Installing dependencies..." before the final output.
     /// UI use: show as a transient status line / toast notification under the tool block.
     ProgressMessage {
+        loop_id: String,
         tool_call_id: String,
         tool_name: String,
         text: String,
@@ -1174,7 +1192,7 @@ pub enum AgentEvent {
     /// `reason` is the human-readable explanation from the filter (e.g., "PII detected").
     /// The agent loop returns immediately after emitting this — no LLM call is made.
     /// UI use: show an error banner; do NOT bubble this up as a normal message.
-    InputRejected { reason: String },
+    InputRejected { loop_id: String, reason: String },
 
     /// Emitted by `agent_loop_parallel` before any branch is dispatched.
     /// `loop_ids` lists the assigned loop_id for each branch, in config order.
@@ -1216,7 +1234,7 @@ StreamDelta::ToolCallDelta carries raw JSON fragments as the LLM streams tool
 argument JSON (e.g., `{"path": "src/ma` ... `in.rs"}`). The receiver must
 accumulate and parse these into a complete JSON value only after MessageEnd.
 */
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StreamDelta {
     /// A text token fragment from the LLM's response.
     Text { delta: String },

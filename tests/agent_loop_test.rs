@@ -1445,6 +1445,7 @@ async fn test_progress_message_event_emitted() {
                 tool_call_id,
                 tool_name,
                 text,
+                ..
             } => Some((tool_call_id.clone(), tool_name.clone(), text.clone())),
             _ => None,
         })
@@ -1804,7 +1805,7 @@ async fn test_filter_reject_returns_empty() {
     // InputRejected event should carry the reason
     assert!(events
         .iter()
-        .any(|e| matches!(e, AgentEvent::InputRejected { reason } if reason == "blocked")));
+        .any(|e| matches!(e, AgentEvent::InputRejected { reason, .. } if reason == "blocked")));
     // AgentStart + InputRejected + AgentEnd
     assert!(events
         .iter()
@@ -2064,7 +2065,7 @@ async fn test_filter_rejects_steering_message() {
     // InputRejected must have fired
     assert!(
         events.iter().any(
-            |e| matches!(e, AgentEvent::InputRejected { reason } if reason.contains("SECRET"))
+            |e| matches!(e, AgentEvent::InputRejected { reason, .. } if reason.contains("SECRET"))
         ),
         "expected InputRejected; got: {:?}",
         events
@@ -2204,7 +2205,7 @@ async fn test_filter_rejects_follow_up_message() {
     );
     // Follow-up was rejected
     assert!(
-        events.iter().any(|e| matches!(e, AgentEvent::InputRejected { reason } if reason.contains("BLOCKED_FOLLOWUP"))),
+        events.iter().any(|e| matches!(e, AgentEvent::InputRejected { reason, .. } if reason.contains("BLOCKED_FOLLOWUP"))),
         "expected InputRejected for follow-up; got: {:?}", events
     );
     // AgentEnd still fires (run closes cleanly)

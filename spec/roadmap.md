@@ -918,6 +918,58 @@ meet or exceed documented expectations.
 
 ---
 
+### Milestone 4.11 — Persistent Session Layer
+
+- [x] **REQ-210:** Add `loop_id: String` to all `AgentEvent` variants that lacked it (`AgentEnd`, `TurnStart`, `TurnEnd`, `MessageStart`, `MessageUpdate`, `MessageEnd`, `ToolExecutionStart`, `ToolExecutionUpdate`, `ToolExecutionEnd`, `ProgressMessage`, `InputRejected`). Add `Serialize, Deserialize` to `AgentEvent`, `ContinuationKind`, `TurnTrigger`, `StreamDelta`. Thread `loop_id` through all emission sites in `agent_loop.rs` and `evaluation.rs`. *(Source: [AR])*
+  - Depends on: REQ-007, REQ-114
+  - Definition of Done: All `AgentEvent` variants carry `loop_id`; events from interleaved parallel branches can be unambiguously attributed to the correct `LoopRecord`.
+
+- [x] **REQ-211:** Define `Session`, `LoopRecord`, `LoopEvent`, and `LoopConfigSnapshot` types in `src/session.rs`. `Session` contains an ordered `Vec<LoopRecord>`; `LoopRecord` holds identity fields (`loop_id`, `session_id`, `agent_id`), timing, status, messages (from `AgentEnd.messages`), usage, events, and tree links (`children_loop_ids`, `parent_loop_id`). `LoopConfigSnapshot` stores `model`, `provider`, `config_id`. *(Source: [AR])*
+  - Depends on: REQ-210
+  - Definition of Done: All types serialize/deserialize (JSON round-trip lossless); `Session.total_usage()` sums `LoopRecord.usage` across all loops.
+
+- [x] **REQ-212:** Define `ChildLoopRef` and `SpawnRef` for bidirectional cross-session sub-agent tracking. `ChildLoopRef` is stored in `LoopRecord.child_loop_refs` (parent → child); `SpawnRef` is stored in `Session.parent_spawn_ref` (child → parent). Both carry `tool_call_id`, `tool_name`, and cross-session ids. *(Source: [AR])*
+  - Depends on: REQ-211
+  - Definition of Done: A parent session's `LoopRecord.child_loop_refs` can be used to load and link the child session.
+
+- [x] **REQ-213:** Define `ParallelGroupRecord` and implement `LoopStatus::Pending` pre-registration in `SessionRecorder`. When `ParallelLoopStart` arrives, pre-create `LoopRecord { status: Pending }` for each branch loop_id so the group is registered before `AgentStart` fires for each branch. `ParallelLoopEnd` retroactively sets `ParallelGroupRecord` on all branch records. *(Source: [AR])*
+  - Depends on: REQ-211
+  - Definition of Done: After a parallel loop completes, all branch `LoopRecord`s have `parallel_group` set; exactly one has `is_selected = true`.
+
+- [x] **REQ-214:** Implement `SessionRecorder` with `PerSessionId` formation policy. `on_event(event)` routes events by `loop_id`: creates `Session` on first-seen `session_id` from `AgentStart`; closes `LoopRecord` on `AgentEnd`; appends bidirectional tree links; handles sub-agent `SpawnRef` enrichment from `ToolExecutionEnd.child_loop_id`. *(Source: [AR])*
+  - Depends on: REQ-211, REQ-212, REQ-213
+  - Definition of Done: `test_session_recorder_single_loop`, `test_session_recorder_continuation`, `test_session_recorder_bidirectional_tree`, `test_session_recorder_continuation_kind` all pass.
+
+- [x] **REQ-215:** Add `BasicAgent::new_session()` and `check_and_rotate(threshold)` to `BasicAgent`. Add `last_active_at: Option<DateTime<Utc>>` field; update `prompt_messages_with_sender` to record it. `new_session()` rotates `session_id`, clears `loop_counters` and `last_loop_id`. *(Source: [AR])*
+  - Depends on: REQ-214
+  - Definition of Done: `test_basic_agent_new_session` and `test_basic_agent_check_and_rotate` pass.
+
+- [x] **REQ-216:** Implement `save_session`, `load_session`, `list_session_ids` persistence API. File layout: `{dir}/{session_id}.json` (pretty-printed JSON, flat directory). `list_session_ids` returns ids sorted by modification time (newest first). *(Source: [AR])*
+  - Depends on: REQ-211
+  - Definition of Done: `test_session_save_load_roundtrip` and `test_session_list_ids` pass; saved files are valid, human-readable JSON.
+
+- [x] **REQ-217:** Implement `load_sessions_for_agent` and `delete_session`. `load_sessions_for_agent` loads all sessions in `dir` and filters by `agent_id`. `delete_session` removes the file; returns `SessionError::NotFound` if absent. *(Source: [AR])*
+  - Depends on: REQ-216
+  - Definition of Done: `test_session_delete` passes; `load_sessions_for_agent` returns only sessions with the matching `agent_id`.
+
+- [x] **REQ-218:** Implement `Session` tree navigation methods: `root_loops()`, `children_of(loop_id)`, `parallel_siblings(loop_id)`, `get_loop(loop_id)`. Export all public session types from `src/lib.rs`. *(Source: [AR])*
+  - Depends on: REQ-211
+  - Definition of Done: `test_session_recorder_parallel_group` and `test_session_recorder_bidirectional_tree` exercise all navigation methods; all assertions pass.
+
+- [x] **REQ-219:** Write `docs/concepts/sessions.md` documenting: Overview, Session Formation (three modes), LoopRecord Anatomy (field table, `LoopStatus` lifecycle, `continuation_kind` classification, `LoopConfigSnapshot` rationale), Loop Tree Navigation, Cross-Session Sub-Agent Tracking, Parallel Evaluation Groups, `SessionRecorder` usage with code example, Persistence API, and 9 Design Decisions (each with decision / why / rejected alternative). *(Source: [AR])*
+  - Depends on: REQ-211 – REQ-218
+  - Definition of Done: `docs/concepts/sessions.md` exists; covers all listed sections; code examples are syntactically valid Rust.
+
+- [x] **REQ-220:** Update `spec/architecture.md`: add `SessionStore` component section, add `SessionStore` to dependency graph, update `AgentEvent` variant table to document `loop_id: String` on all applicable variants, add `Session`/`LoopRecord`/`SessionRecorder` data model entries, add `new_session()` / `check_and_rotate()` / `last_active_at` to BasicAgent interface table. Update `spec/roadmap.md` with this milestone. *(Source: [AR])*
+  - Depends on: REQ-219
+  - Definition of Done: Both spec files updated; all new types and methods are documented.
+
+- [ ] **REQ-221:** Fix `SessionRecorder` `SpawnRef` enrichment to handle the case where the child session has already been moved to `completed` before the parent's `ToolExecutionEnd` fires. Currently, `ToolExecutionEnd` only searches `open_sessions` for the child session to enrich `parent_spawn_ref.tool_call_id` / `tool_name`; if `flush()` was called between `child AgentEnd` and the parent's `ToolExecutionEnd` (e.g. periodic batch checkpointing in production), the child session is in `completed` and the enrichment is silently skipped — leaving `tool_call_id: ""` and `tool_name: ""` on the `SpawnRef` permanently. Fix by also searching `completed` sessions in the enrichment step, or by deferring child-session promotion to `completed` until the parent loop also closes. *(Source: post-sprint review)*
+  - Depends on: REQ-214
+  - Definition of Done: A test demonstrates that calling `flush()` between `child AgentEnd` and `parent ToolExecutionEnd` still produces a fully-enriched `SpawnRef` on the child session.
+
+---
+
 ### Milestone 5.1 — Sub-Agent Delegation
 
 - [ ] **REQ-148:** Implement `SubAgentTool::execute`: validate `params["task"]` is non-empty; build a fresh `AgentContext` (empty messages, own toolset); build `AgentLoopConfig` with `max_turns` guard (default 10), no steering/follow-ups, no input filters; spawn child `agent_loop`; await result; call `extract_final_text`. *(Source: [PS])*

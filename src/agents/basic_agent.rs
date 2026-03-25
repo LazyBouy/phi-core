@@ -158,6 +158,9 @@ pub struct BasicAgent {
     session_id: String,
     loop_counters: HashMap<String, usize>,
     last_loop_id: Option<String>,
+    /// Timestamp of the most recent `prompt_messages_with_sender` call.
+    /// Used by [`check_and_rotate`][BasicAgent::check_and_rotate] to detect inactivity.
+    last_active_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl BasicAgent {
@@ -191,6 +194,7 @@ impl BasicAgent {
             session_id: uuid::Uuid::new_v4().to_string(),
             loop_counters: HashMap::new(),
             last_loop_id: None,
+            last_active_at: None,
         }
     }
 
@@ -600,6 +604,44 @@ impl BasicAgent {
             config_id: None, // auto-derived in next_loop_id() from provider + model + thinking_level
         }
     }
+
+    // ── Session management ────────────────────────────────────────────────────
+
+    /// Immediately rotate to a new `session_id`.
+    ///
+    /// All subsequent loops will belong to the new session. Loop counters are
+    /// reset so the new session's loop ids start from `.1`.
+    ///
+    /// Returns the newly assigned `session_id`.
+    pub fn new_session(&mut self) -> String {
+        self.session_id = uuid::Uuid::new_v4().to_string();
+        self.loop_counters.clear();
+        self.last_loop_id = None;
+        // Clear last_active_at so the new session is treated as never-used.
+        // Without this, a subsequent check_and_rotate would see the old timestamp
+        // and immediately rotate again without any prompt having run.
+        self.last_active_at = None;
+        self.session_id.clone()
+    }
+
+    /// Rotate to a new session if the agent has been idle for longer than `threshold`.
+    ///
+    /// Idleness is measured from the last [`prompt_messages_with_sender`][Self::prompt_messages_with_sender]
+    /// call. If no prompt has ever been issued, returns `None` (no rotation needed
+    /// — the session has never been used).
+    ///
+    /// Returns `Some(new_session_id)` if rotation happened, `None` otherwise.
+    pub fn check_and_rotate(&mut self, threshold: std::time::Duration) -> Option<String> {
+        let last = self.last_active_at?;
+        let elapsed = (chrono::Utc::now() - last)
+            .to_std()
+            .unwrap_or(std::time::Duration::ZERO);
+        if elapsed > threshold {
+            Some(self.new_session())
+        } else {
+            None
+        }
+    }
 }
 
 // ── Agent trait implementation ────────────────────────────────────────────────
@@ -630,6 +672,7 @@ impl Agent for BasicAgent {
             "Agent is already streaming. Use steer() or follow_up()."
         );
 
+        self.last_active_at = Some(chrono::Utc::now());
         let cancel = CancellationToken::new();
         self.cancel = Some(cancel.clone()); // store a clone so abort() can cancel it
         self.is_streaming = true;
