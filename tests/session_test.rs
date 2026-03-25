@@ -395,7 +395,7 @@ async fn test_session_list_ids() {
     };
 
     save_session(&make_session("s0"), dir.path()).unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(10));
+    std::thread::sleep(std::time::Duration::from_millis(50));
     save_session(&make_session("s1"), dir.path()).unwrap();
 
     let ids = list_session_ids(dir.path()).unwrap();
@@ -885,6 +885,137 @@ fn test_session_recorder_child_loop_ref_tool_end_before_child_end() {
         .expect("child session should have parent_spawn_ref");
     assert_eq!(sr.tool_call_id, "tc-rev");
     assert_eq!(sr.tool_name, "sub_agent");
+}
+
+// ---------------------------------------------------------------------------
+// test_session_recorder_spawn_ref_enrichment_after_flush
+// ---------------------------------------------------------------------------
+
+/// REQ-221 regression: SpawnRef must be enriched even when the child session
+/// has already been promoted to `completed` by a checkpoint() call.
+///
+/// Sequence:
+///   1. parent AgentStart
+///   2. child  AgentStart   (parent_loop_id = parent loop)
+///   3. child  AgentEnd     (child loop closes; child session has no open loops)
+///   4. recorder.checkpoint()  → child session promoted to completed;
+///      parent session remains open (parent loop still live)
+///   5. parent ToolExecutionEnd (result.child_loop_id = child loop)
+///   6. parent AgentEnd
+///   7. recorder.flush()   → parent session promoted to completed
+///
+/// Without the fix, enrichment in step 5 would find the child only in
+/// `completed` and silently skip it → tool_call_id stays "".
+/// With the fix the fallback search through `completed` enriches it correctly.
+#[test]
+fn test_session_recorder_spawn_ref_enrichment_after_flush() {
+    let parent_session_id = "sess-parent-221";
+    let parent_loop_id = format!("{}.mock.1", parent_session_id);
+    let child_session_id = "sess-child-221";
+    let child_loop_id = format!("{}.mock.1", child_session_id);
+    let now = chrono::Utc::now();
+
+    let parent_start = AgentEvent::AgentStart {
+        agent_id: "parent-agent-221".into(),
+        session_id: parent_session_id.into(),
+        loop_id: parent_loop_id.clone(),
+        parent_loop_id: None,
+        continuation_kind: None,
+        timestamp: now,
+        metadata: None,
+    };
+    let child_start = AgentEvent::AgentStart {
+        agent_id: "child-agent-221".into(),
+        session_id: child_session_id.into(),
+        loop_id: child_loop_id.clone(),
+        parent_loop_id: Some(parent_loop_id.clone()),
+        continuation_kind: None,
+        timestamp: now,
+        metadata: None,
+    };
+    let child_end = AgentEvent::AgentEnd {
+        loop_id: child_loop_id.clone(),
+        messages: vec![],
+        usage: Usage::default(),
+        timestamp: now,
+        rejection: None,
+    };
+    let tool_end = AgentEvent::ToolExecutionEnd {
+        loop_id: parent_loop_id.clone(),
+        tool_call_id: "tc-221".into(),
+        tool_name: "sub_agent_221".into(),
+        result: ToolResult {
+            content: vec![],
+            details: serde_json::Value::Null,
+            child_loop_id: Some(child_loop_id.clone()),
+        },
+        is_error: false,
+        child_loop_id: Some(child_loop_id.clone()),
+    };
+    let parent_end = AgentEvent::AgentEnd {
+        loop_id: parent_loop_id.clone(),
+        messages: vec![],
+        usage: Usage::default(),
+        timestamp: now,
+        rejection: None,
+    };
+
+    let mut recorder = SessionRecorder::new(SessionRecorderConfig::default());
+
+    // Steps 1–3: feed parent start, child start, child end.
+    recorder.on_event(parent_start);
+    recorder.on_event(child_start);
+    recorder.on_event(child_end);
+
+    // Step 4: checkpoint promotes child session (no open loops) to completed,
+    // leaving the parent session (still has an open loop) untouched.
+    let promoted = recorder.checkpoint();
+    assert_eq!(
+        promoted, 1,
+        "exactly one session (child) should have been promoted"
+    );
+
+    // Step 5: parent processes ToolExecutionEnd — child is now in `completed`,
+    // not in `open_sessions`. Without the fix this enrichment is skipped.
+    recorder.on_event(tool_end);
+
+    // Step 6-7: close parent loop and flush.
+    recorder.on_event(parent_end);
+    recorder.flush();
+
+    let sessions: Vec<_> = recorder.sessions().collect();
+    assert_eq!(sessions.len(), 2, "expected 2 sessions (parent + child)");
+
+    let parent_sess = recorder
+        .get_session(parent_session_id)
+        .expect("parent session not found");
+    let child_sess = recorder
+        .get_session(child_session_id)
+        .expect("child session not found");
+
+    // Parent loop must have a ChildLoopRef pointing to the child.
+    let parent_loop = parent_sess
+        .get_loop(&parent_loop_id)
+        .expect("parent loop not found");
+    assert_eq!(parent_loop.child_loop_refs.len(), 1);
+    assert_eq!(parent_loop.child_loop_refs[0].tool_call_id, "tc-221");
+    assert_eq!(
+        parent_loop.child_loop_refs[0].child_session_id,
+        child_session_id
+    );
+
+    // Child session's SpawnRef must be fully enriched — the key assertion for REQ-221.
+    let sr = child_sess
+        .parent_spawn_ref
+        .as_ref()
+        .expect("child session should have parent_spawn_ref");
+    assert_eq!(sr.parent_session_id, parent_session_id);
+    assert_eq!(sr.parent_loop_id, parent_loop_id);
+    assert_eq!(
+        sr.tool_call_id, "tc-221",
+        "SpawnRef must be enriched even after checkpoint() moved child to completed"
+    );
+    assert_eq!(sr.tool_name, "sub_agent_221");
 }
 
 // ---------------------------------------------------------------------------

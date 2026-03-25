@@ -731,12 +731,9 @@ impl SessionRecorder {
                         });
 
                         // Enrich child session's parent_spawn_ref with the tool details we now know.
-                        // ASSUMPTION: the child session must still be open (in open_sessions) when
-                        // this ToolExecutionEnd fires. If flush() was called between child AgentEnd
-                        // and this event, the child session will have moved to `completed` and the
-                        // enrichment is silently skipped (parent_spawn_ref.tool_call_id stays "").
-                        // In normal streaming use this cannot happen: flush() is only called after
-                        // all events have been processed.
+                        // The child may still be in open_sessions (common case) or already in
+                        // completed (if flush() was called between child AgentEnd and this event).
+                        // We check both to avoid a silent enrichment skip.
                         let parent_session_id = open.record.session_id.clone();
                         let parent_lid = loop_id.clone();
                         let tc_id = tool_call_id.clone();
@@ -753,6 +750,10 @@ impl SessionRecorder {
                             }
                         };
                         if let Some(child_sess) = self.open_sessions.get_mut(&csl) {
+                            enrich(child_sess);
+                        } else if let Some(child_sess) =
+                            self.completed.iter_mut().find(|s| s.session_id == csl)
+                        {
                             enrich(child_sess);
                         }
                     }
@@ -854,10 +855,48 @@ impl SessionRecorder {
         }
     }
 
+    /// Promote sessions that have no remaining open loops to the completed list,
+    /// without aborting any running loops.
+    ///
+    /// A session is eligible when every loop belonging to it has already received
+    /// an [`AgentEnd`][crate::AgentEvent::AgentEnd] event (i.e. it has no entry in
+    /// the internal open-loops map). Sessions that still have active loops are left
+    /// in place.
+    ///
+    /// This is intended for **periodic checkpointing** in production: save finished
+    /// sessions to disk while leaving in-flight agent runs untouched. In contrast,
+    /// [`flush`][Self::flush] first aborts all open loops and then promotes
+    /// everything.
+    ///
+    /// Returns the number of sessions that were promoted.
+    pub fn checkpoint(&mut self) -> usize {
+        // Collect session_ids that still have open loops.
+        let sessions_with_open_loops: Vec<String> = self
+            .open_loops
+            .values()
+            .map(|l| l.record.session_id.clone())
+            .collect();
+        // Promote sessions whose id is not in that set.
+        let promotable: Vec<String> = self
+            .open_sessions
+            .keys()
+            .filter(|sid| !sessions_with_open_loops.contains(sid))
+            .cloned()
+            .collect();
+        let count = promotable.len();
+        for sid in promotable {
+            if let Some(session) = self.open_sessions.remove(&sid) {
+                self.completed.push(session);
+            }
+        }
+        count
+    }
+
     /// Drain all completed sessions out of the recorder (consuming them).
     ///
     /// Useful for periodic checkpointing. Call [`flush`][Self::flush] first
-    /// if you want to include in-progress sessions.
+    /// if you want to include in-progress sessions, or [`checkpoint`][Self::checkpoint]
+    /// to drain only fully-finished sessions without aborting active loops.
     pub fn drain_completed(&mut self) -> Vec<Session> {
         std::mem::take(&mut self.completed)
     }
