@@ -105,6 +105,7 @@ chat" button, new document context).
 | `events` | `Vec<LoopEvent>` | Full ordered event stream |
 | `children_loop_ids` | `Vec<String>` | Same-session child loops (parent→children) |
 | `child_loop_refs` | `Vec<ChildLoopRef>` | Cross-session sub-agent spawn links |
+| `compaction_block` | `Option<CompactionBlock>` | Non-destructive compaction overlay (see below) |
 | `parallel_group` | `Option<ParallelGroupRecord>` | Parallel-evaluation group metadata |
 
 ### `LoopStatus` lifecycle
@@ -166,6 +167,15 @@ Enable them with `SessionRecorderConfig { include_streaming_events: true, .. }`.
 `AgentEnd.messages` is the **authoritative message source** for a loop.
 `LoopRecord.messages` is populated directly from it. Reconstructing messages
 from `MessageStart`/`MessageEnd` events would be fragile.
+
+### `compaction_block` field
+
+`LoopRecord.compaction_block` holds a non-destructive compaction overlay. When
+present, the context loader uses this block instead of the raw `messages` field
+to reconstruct the agent's working context. The original `messages` remain
+authoritative for replay and branching — they are never mutated or discarded.
+This overlay model means compaction is always reversible: removing or replacing
+the `CompactionBlock` restores the original conversation without data loss.
 
 ### Bidirectional parent↔child links
 

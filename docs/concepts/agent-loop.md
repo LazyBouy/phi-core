@@ -198,7 +198,19 @@ let config = AgentLoopConfig {
 
 ## Custom Compaction
 
-By default, when context exceeds the token budget in `ContextConfig`, phi-core runs a 3-level compaction strategy: truncate tool outputs → summarize old turns → drop middle messages. You can replace this with your own `CompactionStrategy`:
+By default, when context exceeds the token budget in `ContextConfig`, phi-core runs a 3-level compaction strategy: truncate tool outputs → summarize old turns → drop middle messages. You can replace this with your own `CompactionStrategy`.
+
+> **`CompactionStrategy` vs `BlockCompactionStrategy`**
+>
+> - **`CompactionStrategy`** — Legacy in-memory approach. Destructive: it mutates
+>   the message list directly. Used when `AgentContext.session` is `None` (no
+>   session persistence).
+> - **`BlockCompactionStrategy`** — New overlay approach. Non-destructive: it
+>   creates a `CompactionBlock` on the `LoopRecord` rather than altering the
+>   original messages. Used when `AgentContext.session` is `Some` (session-backed
+>   execution). Original messages remain authoritative for replay and branching.
+
+Example of a custom `CompactionStrategy`:
 
 ```rust
 use phi_core::context::{CompactionStrategy, ContextConfig, compact_messages};
@@ -273,7 +285,7 @@ impl CompactionStrategy for SemanticPointerCompaction {
 
         // Insert a marker after the first kept messages
         let mut result = compacted;
-        let insert_at = config.keep_first.min(result.len());
+        let insert_at = config.compaction.keep_first_turns.min(result.len());
         result.insert(insert_at, AgentMessage::Extension(
             ExtensionMessage::new("compaction_marker", serde_json::json!({
                 "dropped": dropped_count,

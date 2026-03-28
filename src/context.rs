@@ -9,7 +9,133 @@
 //! then summarize conversation if needed.
 
 use crate::types::*;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+// ---------------------------------------------------------------------------
+// Compaction Block — non-destructive overlay on LoopRecord
+// ---------------------------------------------------------------------------
+
+/// Non-destructive compaction overlay. Stored on `LoopRecord` alongside
+/// the original messages. When present, the context loader uses this block
+/// instead of raw messages.
+///
+/// Three sections control what gets loaded into context:
+/// - `keep_first`: turns kept verbatim from the start (most recent loop only)
+/// - `keep_recent`: recent turns with truncated tool outputs (most recent loop only)
+/// - `keep_compacted`: fully summarised section (all loops)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompactionBlock {
+    /// Turns kept verbatim from the start of the loop.
+    /// Only populated for the MOST RECENT loop. For older loops this is `None`.
+    /// During context load: original messages in this range are used as-is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_first: Option<TurnRange>,
+
+    /// Recent turns with tool outputs truncated. Rest unchanged.
+    /// Only populated for the MOST RECENT loop. For older loops this is `None`.
+    /// Invariant: if a ToolCall is in range, its corresponding ToolResult is too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_recent: Option<CompactedSection>,
+
+    /// Fully summarised middle section (most recent loop) or entire loop (older loops).
+    /// Relevant for ALL loops — this is what gets loaded from earlier loops.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_compacted: Option<CompactedSection>,
+
+    /// When this block was created.
+    #[serde(rename = "createdAt")]
+    pub created_at: DateTime<Utc>,
+}
+
+/// A range of turns within a loop, identified by turn indices.
+/// Both bounds are inclusive. These correspond to `TurnId.turn_index` values.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TurnRange {
+    #[serde(rename = "startTurn")]
+    pub start_turn: u32,
+    #[serde(rename = "endTurn")]
+    pub end_turn: u32,
+}
+
+/// A range of turns plus the compacted replacement messages for that range.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompactedSection {
+    /// The turn range this section replaces.
+    pub range: TurnRange,
+    /// Replacement messages loaded into context instead of the originals.
+    pub messages: Vec<AgentMessage>,
+}
+
+// ---------------------------------------------------------------------------
+// TurnMap — maps turn indices to message index ranges
+// ---------------------------------------------------------------------------
+
+/// Maps turn indices to message index ranges within a message array.
+/// Built from messages by grouping on `TurnId.turn_index`.
+pub struct TurnMap {
+    /// Indexed by position (0-based). Each entry is `(start_msg_idx, end_msg_idx)` inclusive.
+    entries: Vec<(usize, usize)>,
+}
+
+impl TurnMap {
+    /// Build from messages by grouping on `turn_id.turn_index`.
+    /// Messages without a `turn_id` are treated as their own single-message group.
+    pub fn from_messages(messages: &[AgentMessage]) -> Self {
+        let mut entries: Vec<(usize, usize)> = Vec::new();
+        let mut current_turn: Option<u32> = None;
+
+        for (i, msg) in messages.iter().enumerate() {
+            let turn_idx = msg.turn_id().map(|t| t.turn_index);
+            match (turn_idx, current_turn) {
+                (Some(idx), Some(cur)) if idx == cur => {
+                    // Same turn — extend end index
+                    if let Some(last) = entries.last_mut() {
+                        last.1 = i;
+                    }
+                }
+                (Some(idx), _) => {
+                    // New turn
+                    entries.push((i, i));
+                    current_turn = Some(idx);
+                }
+                (None, _) => {
+                    // Legacy message without turn_id — treat as its own group
+                    entries.push((i, i));
+                    current_turn = None;
+                }
+            }
+        }
+
+        Self { entries }
+    }
+
+    /// Number of turn groups.
+    pub fn turn_count(&self) -> u32 {
+        self.entries.len() as u32
+    }
+
+    /// Slice of messages belonging to a `TurnRange`.
+    pub fn messages_for_range<'a>(
+        &self,
+        range: &TurnRange,
+        all_msgs: &'a [AgentMessage],
+    ) -> &'a [AgentMessage] {
+        if range.start_turn as usize >= self.entries.len()
+            || range.end_turn as usize >= self.entries.len()
+        {
+            return &[];
+        }
+        let start = self.entries[range.start_turn as usize].0;
+        let end = self.entries[range.end_turn as usize].1;
+        &all_msgs[start..=end]
+    }
+
+    /// Message index range `(start, end)` inclusive for a single turn.
+    pub fn turn_msg_range(&self, turn_index: u32) -> Option<(usize, usize)> {
+        self.entries.get(turn_index as usize).copied()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Token estimation
@@ -35,7 +161,7 @@ pub fn estimate_tokens(text: &str) -> usize {
 /// Estimate tokens for a single message
 pub fn message_tokens(msg: &AgentMessage) -> usize {
     match msg {
-        AgentMessage::Llm(m) => match m {
+        AgentMessage::Llm(lm) => match &lm.message {
             Message::User { content, .. } => content_tokens(content) + 4,
             Message::Assistant { content, .. } => content_tokens(content) + 4,
             Message::ToolResult {
@@ -195,18 +321,27 @@ impl Default for ContextTracker {
 // Context configuration
 // ---------------------------------------------------------------------------
 
-/// Configuration for context management
+/// Configuration for context management — model constraints + compaction policy.
+///
+/// `CompactionConfig` is a required field: if you set a context limit,
+/// compaction is always ready with sensible defaults. Compaction as a whole
+/// is disabled by setting `context_config: None` on `AgentLoopConfig`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextConfig {
-    /// Maximum context tokens (leave room for response)
+    /// Maximum context tokens (the model's context window).
     pub max_context_tokens: usize,
-    /// Tokens reserved for the system prompt
+    /// Tokens reserved for the system prompt.
     pub system_prompt_tokens: usize,
-    /// Minimum recent messages to always keep (full detail)
+    /// Compaction policy — always present when context limits are set.
+    pub compaction: CompactionConfig,
+
+    // Legacy fields — kept for backward compatibility with existing configs.
+    // New code should use `compaction.*` instead.
+    #[serde(default)]
     pub keep_recent: usize,
-    /// Minimum first messages to always keep
+    #[serde(default)]
     pub keep_first: usize,
-    /// Max lines to keep per tool output in Level 1 compaction
+    #[serde(default)]
     pub tool_output_max_lines: usize,
 }
 
@@ -215,8 +350,81 @@ impl Default for ContextConfig {
         Self {
             max_context_tokens: 100_000,
             system_prompt_tokens: 4_000,
+            compaction: CompactionConfig::default(),
             keep_recent: 10,
             keep_first: 2,
+            tool_output_max_lines: 50,
+        }
+    }
+}
+
+/// Controls how many earlier loops are included in compaction and context loading.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CompactionScope {
+    /// Compact a fixed number of earlier loops on the active chain.
+    FixedCount(usize),
+    /// Walk the chain backward, accumulating per-loop token estimates,
+    /// and stop when `max_context_tokens` would be exceeded.
+    ///
+    /// NOTE: The scope can include loops whose raw messages EXCEED
+    /// `max_context_tokens`. This is intentional — the compacted summaries
+    /// of those loops will fit in the window, even though the originals
+    /// did not. This enables richer context for summarisation strategies
+    /// (e.g. LLM summarisers) that compress large loops into compact
+    /// representations that then fit within the budget.
+    TokenBudget,
+}
+
+impl Default for CompactionScope {
+    fn default() -> Self {
+        Self::FixedCount(3)
+    }
+}
+
+/// Full compaction policy — controls both WHEN and HOW to compact.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompactionConfig {
+    // ── WHEN to compact ──
+    /// Fraction of `max_context_tokens` below which headroom is measured.
+    /// Compaction fires when headroom drops below `compact_budget_threshold_pct`.
+    /// Default: 0.90 (90%).
+    pub compact_at_pct: f64,
+    /// Minimum remaining headroom fraction before compaction fires.
+    /// Default: 0.05 (5%). With defaults at 100k/4k: fires at ~81k tokens.
+    pub compact_budget_threshold_pct: f64,
+    /// Scope controlling how many earlier loops to compact and load.
+    /// Default: `FixedCount(3)`.
+    pub compaction_scope: CompactionScope,
+
+    // ── HOW to compact ──
+    /// Turns to keep verbatim from the start (most recent loop only). Default: 2.
+    pub keep_first_turns: usize,
+    /// Minimum turns to keep from the end (most recent loop only).
+    /// Extended to turn boundary so ToolCall/ToolResult pairs are never split.
+    /// Default: 10.
+    pub keep_recent_turns: usize,
+    /// Token budget for the summarised middle section. Default: 2_000.
+    ///
+    /// This is a budget, not a per-turn limit. Implementations of
+    /// `BlockCompactionStrategy::keep_compacted()` should aim to summarise
+    /// ALL turns in the range within this budget — e.g. by producing shorter
+    /// per-turn summaries or an LLM-generated holistic digest.
+    /// `DefaultBlockCompaction` is a basic implementation that generates
+    /// per-turn one-liners and drops remaining turns when the budget runs out.
+    pub max_summary_tokens: usize,
+    /// Max lines per tool output in the keep_recent section. Default: 50.
+    pub tool_output_max_lines: usize,
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            compact_at_pct: 0.90,
+            compact_budget_threshold_pct: 0.05,
+            compaction_scope: CompactionScope::default(),
+            keep_first_turns: 2,
+            keep_recent_turns: 10,
+            max_summary_tokens: 2_000,
             tool_output_max_lines: 50,
         }
     }
@@ -284,6 +492,259 @@ impl CompactionStrategy for DefaultCompaction {
         config: &ContextConfig,      // SETTINGS — forwarded to compact_messages()
     ) -> Vec<AgentMessage> {
         compact_messages(messages, config)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Block-based compaction strategy (non-destructive overlay model)
+// ---------------------------------------------------------------------------
+
+use crate::session::LoopRecord;
+
+/// Strategy for creating non-destructive `CompactionBlock` overlays.
+///
+/// Three methods produce the three sections of a `CompactionBlock`:
+/// - `keep_first`: turns kept verbatim from the start
+/// - `keep_recent`: recent turns with truncated tool outputs
+/// - `keep_compacted`: fully summarised section
+///
+/// The default `compact()` method assembles them. Override individual methods
+/// to customise specific sections (e.g. LLM-based summarisation for `keep_compacted`).
+pub trait BlockCompactionStrategy: Send + Sync {
+    /// Determine the keep_first section: turns kept verbatim from the start.
+    /// Only called for the most recent loop.
+    fn keep_first(
+        &self,
+        record: &LoopRecord,
+        turn_map: &TurnMap,
+        config: &CompactionConfig,
+    ) -> Option<TurnRange>;
+
+    /// Create the keep_recent section: recent turns with truncated tool outputs.
+    /// Only called for the most recent loop.
+    fn keep_recent(
+        &self,
+        record: &LoopRecord,
+        turn_map: &TurnMap,
+        config: &CompactionConfig,
+    ) -> Option<CompactedSection>;
+
+    /// Create the keep_compacted section: fully summarised turns.
+    /// For most recent loop: summarises the middle (between keep_first and keep_recent).
+    /// For older loops: summarises the entire loop.
+    ///
+    /// Implementations should aim to summarise ALL turns in the range within
+    /// `config.max_summary_tokens` — e.g. shorter per-turn summaries or an
+    /// LLM-generated holistic digest. The token budget is for the total output,
+    /// not a per-turn limit.
+    fn keep_compacted(
+        &self,
+        record: &LoopRecord,
+        turn_map: &TurnMap,
+        config: &CompactionConfig,
+        is_most_recent: bool,
+    ) -> Option<CompactedSection>;
+
+    /// Assemble a `CompactionBlock` from the three sections.
+    /// Default implementation calls the three methods above.
+    fn compact(
+        &self,
+        record: &LoopRecord,
+        config: &CompactionConfig,
+        is_most_recent: bool,
+    ) -> CompactionBlock {
+        let turn_map = TurnMap::from_messages(&record.messages);
+        CompactionBlock {
+            keep_first: if is_most_recent {
+                self.keep_first(record, &turn_map, config)
+            } else {
+                None
+            },
+            keep_recent: if is_most_recent {
+                self.keep_recent(record, &turn_map, config)
+            } else {
+                None
+            },
+            keep_compacted: self.keep_compacted(record, &turn_map, config, is_most_recent),
+            created_at: Utc::now(),
+        }
+    }
+}
+
+/// Default block-based compaction strategy.
+///
+/// Stateless — all parameters come from `CompactionConfig`.
+/// - `keep_first`: returns turn range `0..keep_first_turns`
+/// - `keep_compacted`: one-liner summaries of the middle section, bounded by `max_summary_tokens`
+/// - `keep_recent`: truncates tool outputs in the recent section to `tool_output_max_lines`
+pub struct DefaultBlockCompaction;
+
+impl BlockCompactionStrategy for DefaultBlockCompaction {
+    fn keep_first(
+        &self,
+        _record: &LoopRecord,
+        turn_map: &TurnMap,
+        config: &CompactionConfig,
+    ) -> Option<TurnRange> {
+        let total = turn_map.turn_count();
+        if total == 0 {
+            return None;
+        }
+        let end = (config.keep_first_turns as u32)
+            .min(total)
+            .saturating_sub(1);
+        Some(TurnRange {
+            start_turn: 0,
+            end_turn: end,
+        })
+    }
+
+    fn keep_recent(
+        &self,
+        record: &LoopRecord,
+        turn_map: &TurnMap,
+        config: &CompactionConfig,
+    ) -> Option<CompactedSection> {
+        let total = turn_map.turn_count();
+        if total == 0 {
+            return None;
+        }
+        let recent_start = total.saturating_sub(config.keep_recent_turns as u32);
+        let range = TurnRange {
+            start_turn: recent_start,
+            end_turn: total - 1,
+        };
+        let msgs = turn_map.messages_for_range(&range, &record.messages);
+        // Truncate tool outputs in the recent section
+        let truncated: Vec<AgentMessage> = msgs
+            .iter()
+            .map(|m| {
+                if let AgentMessage::Llm(lm) = m {
+                    if let Message::ToolResult {
+                        tool_call_id,
+                        tool_name,
+                        content,
+                        is_error,
+                        timestamp,
+                    } = &lm.message
+                    {
+                        let truncated_content: Vec<Content> = content
+                            .iter()
+                            .map(|c| match c {
+                                Content::Text { text } => Content::Text {
+                                    text: truncate_text_head_tail(
+                                        text,
+                                        config.tool_output_max_lines,
+                                    ),
+                                },
+                                other => other.clone(),
+                            })
+                            .collect();
+                        return AgentMessage::Llm(LlmMessage {
+                            message: Message::ToolResult {
+                                tool_call_id: tool_call_id.clone(),
+                                tool_name: tool_name.clone(),
+                                content: truncated_content,
+                                is_error: *is_error,
+                                timestamp: *timestamp,
+                            },
+                            turn_id: lm.turn_id.clone(),
+                        });
+                    }
+                }
+                m.clone()
+            })
+            .collect();
+        Some(CompactedSection {
+            range,
+            messages: truncated,
+        })
+    }
+
+    /// Basic implementation: generates per-turn one-liner summaries until
+    /// `max_summary_tokens` is exhausted. Remaining turns are dropped.
+    ///
+    /// More sophisticated strategies (e.g. LLM-based) should produce a holistic
+    /// summary of ALL turns within the budget rather than dropping turns.
+    ///
+    /// Summaries use `Message::User` role to maintain valid LLM message alternation
+    /// (user→assistant→user→...). A summary replaces a full turn sequence
+    /// (user + assistant + tool results) with a single user-role "[Summary]" message.
+    fn keep_compacted(
+        &self,
+        record: &LoopRecord,
+        turn_map: &TurnMap,
+        config: &CompactionConfig,
+        is_most_recent: bool,
+    ) -> Option<CompactedSection> {
+        let total = turn_map.turn_count();
+        if total == 0 {
+            return None;
+        }
+
+        let (start, end) = if is_most_recent {
+            let first_end = (config.keep_first_turns as u32).min(total);
+            let recent_start = total.saturating_sub(config.keep_recent_turns as u32);
+            if first_end >= recent_start {
+                return None; // No middle section
+            }
+            (first_end, recent_start.saturating_sub(1))
+        } else {
+            // Summarise the entire loop
+            (0, total.saturating_sub(1))
+        };
+
+        let range = TurnRange {
+            start_turn: start,
+            end_turn: end,
+        };
+        let msgs = turn_map.messages_for_range(&range, &record.messages);
+
+        // Generate one-liner summaries per assistant message
+        let mut summaries: Vec<AgentMessage> = Vec::new();
+        let mut token_budget = config.max_summary_tokens;
+
+        for msg in msgs {
+            if let AgentMessage::Llm(lm) = msg {
+                if let Message::Assistant { content, .. } = &lm.message {
+                    let text_parts: Vec<&str> = content
+                        .iter()
+                        .filter_map(|c| match c {
+                            Content::Text { text } if text.len() <= 200 => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect();
+                    let tool_count = content
+                        .iter()
+                        .filter(|c| matches!(c, Content::ToolCall { .. }))
+                        .count();
+                    let summary = if !text_parts.is_empty() {
+                        text_parts.join(" ")
+                    } else if tool_count > 0 {
+                        format!("[Assistant used {} tool(s)]", tool_count)
+                    } else {
+                        "[Assistant response]".into()
+                    };
+                    let summary_text = format!("[Summary] {}", summary);
+                    let est_tokens = estimate_tokens(&summary_text);
+                    if est_tokens > token_budget {
+                        break; // Budget exhausted
+                    }
+                    token_budget -= est_tokens;
+                    summaries.push(AgentMessage::Llm(LlmMessage::new(Message::user(
+                        &summary_text,
+                    ))));
+                }
+            }
+        }
+
+        if summaries.is_empty() {
+            return None;
+        }
+        Some(CompactedSection {
+            range,
+            messages: summaries,
+        })
     }
 }
 
@@ -361,12 +822,16 @@ fn level1_truncate_tool_outputs(
         .iter()
         .map(|msg| match msg {
             // Match only ToolResult messages — destructure all fields so we can reconstruct below
-            AgentMessage::Llm(Message::ToolResult {
-                tool_call_id,
-                tool_name,
-                content,
-                is_error,
-                timestamp,
+            AgentMessage::Llm(LlmMessage {
+                message:
+                    Message::ToolResult {
+                        tool_call_id,
+                        tool_name,
+                        content,
+                        is_error,
+                        timestamp,
+                    },
+                ..
             }) => {
                 let truncated_content: Vec<Content> = content
                     .iter()
@@ -394,13 +859,13 @@ fn level1_truncate_tool_outputs(
                 Python analogy: you never need this in Python because everything is a reference/object
                 and copying happens automatically for primitives.
                 */
-                AgentMessage::Llm(Message::ToolResult {
+                AgentMessage::Llm(LlmMessage::new(Message::ToolResult {
                     tool_call_id: tool_call_id.clone(),
                     tool_name: tool_name.clone(),
                     content: truncated_content,
                     is_error: *is_error,   // deref: &bool → bool
                     timestamp: *timestamp, // deref: &u64  → u64
-                })
+                }))
             }
             other => other.clone(), // Non-ToolResult messages pass through unchanged
         })
@@ -448,7 +913,10 @@ fn level2_summarize_old_turns(
     while i < boundary {
         let msg = &messages[i];
         match msg {
-            AgentMessage::Llm(Message::Assistant { content, .. }) => {
+            AgentMessage::Llm(LlmMessage {
+                message: Message::Assistant { content, .. },
+                ..
+            }) => {
                 // Summarize: extract text content, skip tool call details
                 let text_parts: Vec<&str> = content
                     .iter()
@@ -477,17 +945,21 @@ fn level2_summarize_old_turns(
                     "[Assistant response]".into()
                 };
 
-                result.push(AgentMessage::Llm(Message::User {
+                result.push(AgentMessage::Llm(LlmMessage::new(Message::User {
                     content: vec![Content::Text {
                         text: format!("[Summary] {}", summary),
                     }],
                     timestamp: now_ms(),
-                }));
+                })));
 
                 // Skip following tool results that belong to this turn
                 i += 1;
                 while i < boundary {
-                    if let AgentMessage::Llm(Message::ToolResult { .. }) = &messages[i] {
+                    if let AgentMessage::Llm(LlmMessage {
+                        message: Message::ToolResult { .. },
+                        ..
+                    }) = &messages[i]
+                    {
                         i += 1;
                     } else {
                         break;
@@ -495,7 +967,10 @@ fn level2_summarize_old_turns(
                 }
                 continue;
             }
-            AgentMessage::Llm(Message::ToolResult { .. }) => {
+            AgentMessage::Llm(LlmMessage {
+                message: Message::ToolResult { .. },
+                ..
+            }) => {
                 // Skip orphaned tool results in old section
                 i += 1;
                 continue;
@@ -535,7 +1010,7 @@ fn level3_drop_middle(
     let recent_msgs = &messages[recent_start..];
     let removed = recent_start - first_end;
 
-    let marker = AgentMessage::Llm(Message::User {
+    let marker = AgentMessage::Llm(LlmMessage::new(Message::User {
         content: vec![Content::Text {
             text: format!(
                 "[Context compacted: {} messages removed to fit context window]",
@@ -543,7 +1018,7 @@ fn level3_drop_middle(
             ),
         }],
         timestamp: now_ms(),
-    });
+    }));
 
     let mut result = first_msgs.to_vec();
     result.push(marker);
@@ -577,12 +1052,12 @@ fn keep_within_budget(messages: &[AgentMessage], budget: usize) -> Vec<AgentMess
         let removed = messages.len() - result.len();
         result.insert(
             0,
-            AgentMessage::Llm(Message::User {
+            AgentMessage::Llm(LlmMessage::new(Message::User {
                 content: vec![Content::Text {
                     text: format!("[Context compacted: {} messages removed]", removed),
                 }],
                 timestamp: now_ms(),
-            }),
+            })),
         );
     }
 
@@ -763,6 +1238,153 @@ To run just this module's tests:
 To run a single test:
   docker run ... cargo test test_estimate_tokens
 */
+// ---------------------------------------------------------------------------
+// Compaction orchestration — cross-loop block creation
+// ---------------------------------------------------------------------------
+
+use crate::session::Session;
+
+/// Resolve `CompactionScope` to a concrete number of earlier loops to include.
+///
+/// For `FixedCount(n)`, returns `n` directly.
+/// For `TokenBudget`, walks the chain backward from the current loop,
+/// accumulating `total_tokens(&record.messages)` per loop, and stops
+/// when `max_context_tokens` would be exceeded.
+///
+/// Note: with `TokenBudget`, the scope can include loops whose raw messages
+/// exceed the token budget. This is intentional — the compacted summaries
+/// will fit in the window even when the originals don't, enabling richer
+/// context for expensive summarisation strategies.
+fn resolve_scope(
+    session: &Session,
+    chain: &[String],
+    scope: &CompactionScope,
+    max_context_tokens: usize,
+) -> usize {
+    match scope {
+        CompactionScope::FixedCount(n) => *n,
+        CompactionScope::TokenBudget => {
+            let mut budget = max_context_tokens;
+            let mut count = 0usize;
+            // Walk backward from the loop before current (chain.last() is current)
+            for loop_id in chain.iter().rev().skip(1) {
+                if let Some(record) = session.get_loop(loop_id) {
+                    let loop_tokens = total_tokens(&record.messages);
+                    if loop_tokens > budget {
+                        break;
+                    }
+                    budget -= loop_tokens;
+                    count += 1;
+                }
+            }
+            count
+        }
+    }
+}
+
+/// Create `CompactionBlock`s for the current loop and earlier loops within scope.
+/// Mutates the session in place.
+///
+/// The caller is responsible for persisting the session to disk afterward.
+pub fn compact_session_loops(
+    session: &mut Session,
+    current_loop_id: &str,
+    strategy: &dyn BlockCompactionStrategy,
+    config: &CompactionConfig,
+    max_context_tokens: usize,
+) {
+    let chain = session.loop_chain_to(current_loop_id);
+
+    // 1. Compact current loop (most recent — all three sections)
+    if let Some(current) = session.get_loop_mut(current_loop_id) {
+        current.compaction_block = Some(strategy.compact(current, config, true));
+    }
+
+    // 2. Resolve scope, then compact earlier loops on the chain (only keep_compacted)
+    let earlier_count = resolve_scope(
+        session,
+        &chain,
+        &config.compaction_scope,
+        max_context_tokens,
+    )
+    .min(chain.len().saturating_sub(1));
+    let earlier_start = chain.len().saturating_sub(1 + earlier_count);
+    for loop_id in &chain[earlier_start..chain.len().saturating_sub(1)] {
+        if let Some(record) = session.get_loop_mut(loop_id) {
+            if record.compaction_block.is_none() {
+                record.compaction_block = Some(strategy.compact(record, config, false));
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Context builder — loads from CompactionBlocks when available
+// ---------------------------------------------------------------------------
+
+/// Build a compacted context by walking the loop chain and loading from
+/// `CompactionBlock`s where available, raw messages otherwise.
+///
+/// For the most recent loop: loads keep_first + keep_compacted + keep_recent.
+/// For older loops: loads only keep_compacted.
+/// Loops outside the resolved scope are skipped entirely.
+pub fn build_context_from_session(
+    session: &Session,
+    current_loop_id: &str,
+    config: &CompactionConfig,
+    max_context_tokens: usize,
+) -> Vec<AgentMessage> {
+    let chain = session.loop_chain_to(current_loop_id);
+    let mut context = Vec::new();
+
+    let earlier_count = resolve_scope(
+        session,
+        &chain,
+        &config.compaction_scope,
+        max_context_tokens,
+    );
+    let load_start = chain.len().saturating_sub(earlier_count + 1);
+
+    for (i, loop_id) in chain.iter().enumerate().skip(load_start) {
+        let Some(record) = session.get_loop(loop_id) else {
+            continue;
+        };
+        let is_most_recent = i == chain.len() - 1;
+
+        match &record.compaction_block {
+            Some(block) => {
+                if is_most_recent {
+                    // Load keep_first (original messages for that range)
+                    if let Some(ref range) = block.keep_first {
+                        let turn_map = TurnMap::from_messages(&record.messages);
+                        let msgs = turn_map.messages_for_range(range, &record.messages);
+                        context.extend_from_slice(msgs);
+                    }
+                    // Load keep_compacted (summarised middle)
+                    if let Some(ref section) = block.keep_compacted {
+                        context.extend(section.messages.iter().cloned());
+                    }
+                    // Load keep_recent (truncated tool outputs)
+                    if let Some(ref section) = block.keep_recent {
+                        context.extend(section.messages.iter().cloned());
+                    }
+                } else {
+                    // Older loops: only load keep_compacted
+                    if let Some(ref section) = block.keep_compacted {
+                        context.extend(section.messages.iter().cloned());
+                    }
+                }
+            }
+            None => {
+                // No compaction block — load raw messages
+                context.extend(record.messages.iter().cloned());
+            }
+        }
+    }
+
+    context
+}
+
 #[cfg(test)]
 mod tests {
     use super::*; // pull in all items from context.rs (including private functions)
@@ -795,19 +1417,23 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let messages = vec![
-            AgentMessage::Llm(Message::user("do something")),
-            AgentMessage::Llm(Message::ToolResult {
+            AgentMessage::Llm(LlmMessage::new(Message::user("do something"))),
+            AgentMessage::Llm(LlmMessage::new(Message::ToolResult {
                 tool_call_id: "tc-1".into(),
                 tool_name: "bash".into(),
                 content: vec![Content::Text { text: big_output }],
                 is_error: false,
                 timestamp: 0,
-            }),
+            })),
         ];
 
         let compacted = level1_truncate_tool_outputs(&messages, 20);
         let tool_msg = &compacted[1];
-        if let AgentMessage::Llm(Message::ToolResult { content, .. }) = tool_msg {
+        if let AgentMessage::Llm(LlmMessage {
+            message: Message::ToolResult { content, .. },
+            ..
+        }) = tool_msg
+        {
             if let Content::Text { text } = &content[0] {
                 assert!(text.contains("truncated"));
                 assert!(text.contains("output line 1")); // head
@@ -824,8 +1450,8 @@ mod tests {
     #[test]
     fn test_compact_within_budget() {
         let messages = vec![
-            AgentMessage::Llm(Message::user("Hello")),
-            AgentMessage::Llm(Message::user("World")),
+            AgentMessage::Llm(LlmMessage::new(Message::user("Hello"))),
+            AgentMessage::Llm(LlmMessage::new(Message::user("World"))),
         ];
         let config = ContextConfig::default();
         let result = compact_messages(messages.clone(), &config);
@@ -836,16 +1462,17 @@ mod tests {
     fn test_compact_drops_middle_when_needed() {
         let mut messages = Vec::new();
         for i in 0..100 {
-            messages.push(AgentMessage::Llm(Message::user(format!(
+            messages.push(AgentMessage::Llm(LlmMessage::new(Message::user(format!(
                 "Message {} {}",
                 i,
                 "x".repeat(200)
-            ))));
+            )))));
         }
 
         let config = ContextConfig {
             max_context_tokens: 500,
             system_prompt_tokens: 100,
+            compaction: CompactionConfig::default(),
             keep_recent: 5,
             keep_first: 2,
             tool_output_max_lines: 20,
@@ -860,8 +1487,8 @@ mod tests {
     fn test_context_tracker_no_usage() {
         let tracker = ContextTracker::new();
         let messages = vec![
-            AgentMessage::Llm(Message::user("Hello")),
-            AgentMessage::Llm(Message::user("World")),
+            AgentMessage::Llm(LlmMessage::new(Message::user("Hello"))),
+            AgentMessage::Llm(LlmMessage::new(Message::user("World"))),
         ];
         // Without usage data, falls back to estimation
         let tokens = tracker.estimate_context_tokens(&messages);
@@ -873,8 +1500,8 @@ mod tests {
     fn test_context_tracker_with_usage() {
         let mut tracker = ContextTracker::new();
         let messages = vec![
-            AgentMessage::Llm(Message::user("Hello")),
-            AgentMessage::Llm(Message::Assistant {
+            AgentMessage::Llm(LlmMessage::new(Message::user("Hello"))),
+            AgentMessage::Llm(LlmMessage::new(Message::Assistant {
                 content: vec![Content::Text {
                     text: "Hi there!".into(),
                 }],
@@ -888,8 +1515,8 @@ mod tests {
                 },
                 timestamp: 0,
                 error_message: None,
-            }),
-            AgentMessage::Llm(Message::user("Follow up question here")),
+            })),
+            AgentMessage::Llm(LlmMessage::new(Message::user("Follow up question here"))),
         ];
         // Record usage at index 1 (assistant message)
         tracker.record_usage(
@@ -918,7 +1545,7 @@ mod tests {
             5,
         );
         tracker.reset();
-        let messages = vec![AgentMessage::Llm(Message::user("test"))];
+        let messages = vec![AgentMessage::Llm(LlmMessage::new(Message::user("test")))];
         // After reset, should fall back to estimation
         assert_eq!(
             tracker.estimate_context_tokens(&messages),

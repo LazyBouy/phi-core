@@ -1,6 +1,6 @@
 use crate::provider::CostConfig;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::sync::Arc;
 
@@ -436,11 +436,92 @@ WHERE AgentMessage IS USED:
   Session history               — Extension messages are part of the full agent story,
                                   not just the LLM's narrower view of it
 */
+// ---------------------------------------------------------------------------
+// TurnId — identifies which turn produced a message.
+// ---------------------------------------------------------------------------
+
+/// Identifies the turn that produced a message, linking it to a specific
+/// loop and turn index within that loop.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TurnId {
+    #[serde(rename = "loopId")]
+    pub loop_id: String,
+    #[serde(rename = "turnIndex")]
+    pub turn_index: u32,
+}
+
+// ---------------------------------------------------------------------------
+// LlmMessage — wraps a Message with optional TurnId metadata.
+// ---------------------------------------------------------------------------
+
+/// An LLM-bound message with optional turn tracking metadata.
+/// Serializes as the same JSON as `Message` with an optional `turnId` field added.
+/// Old data without `turnId` deserializes with `turn_id: None`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LlmMessage {
+    pub message: Message,
+    /// Which turn produced this message. `None` for messages that predate
+    /// turn tracking or are created outside the agent loop.
+    pub turn_id: Option<TurnId>,
+}
+
+impl Serialize for LlmMessage {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // Serialize Message to a JSON Value, then inject turnId if present.
+        // This maintains the same serialization format as bare Message
+        // with an optional turnId field added.
+        let mut value = serde_json::to_value(&self.message).map_err(serde::ser::Error::custom)?;
+        if let Some(ref tid) = self.turn_id {
+            if let serde_json::Value::Object(ref mut map) = value {
+                map.insert(
+                    "turnId".to_string(),
+                    serde_json::to_value(tid).map_err(serde::ser::Error::custom)?,
+                );
+            }
+        }
+        value.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for LlmMessage {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Deserialize to a JSON Value, extract turnId if present,
+        // then deserialize the rest as Message.
+        let mut value: serde_json::Value = Deserialize::deserialize(deserializer)?;
+        let turn_id = if let serde_json::Value::Object(ref mut map) = value {
+            map.remove("turnId")
+                .and_then(|v| serde_json::from_value(v).ok())
+        } else {
+            None
+        };
+        let message = Message::deserialize(value).map_err(serde::de::Error::custom)?;
+        Ok(LlmMessage { message, turn_id })
+    }
+}
+
+impl LlmMessage {
+    /// Create a new LlmMessage without turn tracking.
+    pub fn new(message: Message) -> Self {
+        Self {
+            message,
+            turn_id: None,
+        }
+    }
+
+    /// Create a new LlmMessage with a specific turn.
+    pub fn with_turn(message: Message, turn_id: TurnId) -> Self {
+        Self {
+            message,
+            turn_id: Some(turn_id),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum AgentMessage {
     /// LLM-bound message — enters the context window and is sent to the provider API.
-    Llm(Message),
+    Llm(LlmMessage),
     /// App-only message — streamed as events but never enters the LLM context window.
     Extension(ExtensionMessage),
 }
@@ -448,30 +529,42 @@ pub enum AgentMessage {
 impl AgentMessage {
     pub fn role(&self) -> &str {
         match self {
-            Self::Llm(m) => m.role(),
+            Self::Llm(lm) => lm.message.role(),
             Self::Extension(ext) => &ext.role,
-            // ext.role is already a String, so we can return a reference to it directly.
-            // str vs &str vs String: ext.role is a String (owned, heap-allocated), but the method signature says we return &str (a string slice, borrowed reference).
-            // str is never alone type in Rust — it's always &str (a reference to a string slice) or String (an owned string).
-            // But Rust still differentiates between &String and &str.
         }
     }
 
     pub fn as_llm(&self) -> Option<&Message> {
         match self {
-            Self::Llm(m) => Some(m), // actually is Some(&m) but Rust allows this shorthand when the types line up
+            Self::Llm(lm) => Some(&lm.message),
             Self::Extension(_) => None,
-            // would have also worked with this syntax: _ => None, since we don't need to use the extension message in this method.
-            // The _ is a wildcard that matches any value without binding it to a variable.
+        }
+    }
+
+    /// Returns the TurnId if this is an LLM message with turn tracking.
+    pub fn turn_id(&self) -> Option<&TurnId> {
+        match self {
+            Self::Llm(lm) => lm.turn_id.as_ref(),
+            Self::Extension(_) => None,
+        }
+    }
+
+    /// Set the turn_id on this message. No-op for Extension messages.
+    pub fn with_turn_id(self, turn_id: Option<TurnId>) -> Self {
+        match self {
+            Self::Llm(mut lm) => {
+                lm.turn_id = turn_id;
+                Self::Llm(lm)
+            }
+            other => other,
         }
     }
 }
 
-// One-way: Message → AgentMessage::Llm only. No path exists from ExtensionMessage to Llm.
-// See ARCHITECTURE block above for why this asymmetry is intentional.
+// One-way: Message → AgentMessage::Llm only (with turn_id: None).
 impl From<Message> for AgentMessage {
     fn from(m: Message) -> Self {
-        Self::Llm(m)
+        Self::Llm(LlmMessage::new(m))
     }
 }
 
@@ -997,6 +1090,8 @@ pub enum ContinuationKind {
     /// before calling `agent_loop_continue`. The first turn emits
     /// [`TurnTrigger::Branch`] instead of `FollowUp`.
     Branch { tag: String },
+    /// A standalone context-compaction pass. No LLM call — messages only.
+    Compaction,
 }
 
 /// Identifies what caused a new turn to begin.
@@ -1213,6 +1308,30 @@ pub enum AgentEvent {
         evaluation_usage: Usage,
         timestamp: DateTime<Utc>,
     },
+
+    /// Emitted immediately before a compaction strategy runs.
+    /// Paired with `CompactionEnded`.
+    CompactionStarted {
+        loop_id: String,
+        /// Estimated token count of the context before compaction.
+        estimated_tokens: usize,
+        /// Number of messages in context before compaction.
+        message_count: usize,
+        timestamp: DateTime<Utc>,
+    },
+
+    /// Emitted after compaction completes. Only emitted when compaction triggered
+    /// (threshold was exceeded). Paired with `CompactionStarted`.
+    CompactionEnded {
+        loop_id: String,
+        messages_before: usize,
+        messages_after: usize,
+        estimated_tokens_before: usize,
+        estimated_tokens_after: usize,
+        /// How many loops got new CompactionBlocks (including current).
+        loops_compacted: usize,
+        timestamp: DateTime<Utc>,
+    },
 }
 
 /*
@@ -1294,6 +1413,14 @@ pub struct AgentContext {
     /// How this loop relates to prior loops. None for origin calls.
     /// Some(Default|Rerun|Branch) for agent_loop_continue() calls.
     pub continuation_kind: Option<ContinuationKind>,
+
+    /// Optional session for block-based compaction. When `Some`, the agent loop
+    /// uses `compact_session_loops()` / `build_context_from_session()` instead of
+    /// in-memory `CompactionStrategy::compact()`.
+    ///
+    /// When `None` (sub-agents, tests, direct callers), the loop falls back to
+    /// the existing in-memory compaction path.
+    pub session: Option<crate::session::Session>,
 }
 
 // ---------------------------------------------------------------------------

@@ -239,6 +239,7 @@ impl AgentTool for SubAgentTool {
             loop_id: Some(child_loop_id),
             parent_loop_id: self.parent_loop_id.clone(), // links child back to parent
             continuation_kind: None,
+            session: None,
         };
 
         // Config for the sub-agent loop
@@ -254,6 +255,7 @@ impl AgentTool for SubAgentTool {
             get_follow_up_messages: None,
             context_config: None,
             compaction_strategy: None,
+            block_compaction_strategy: None,
             execution_limits: Some(ExecutionLimits {
                 max_turns: self.max_turns,
                 // Generous token/duration limits — turn limit is the primary guard
@@ -345,7 +347,7 @@ impl AgentTool for SubAgentTool {
         // Run the sub-agent loop. We capture context.loop_id after the call to surface it
         // in ToolExecutionEnd.child_loop_id. The loop_id is already Some (we set it above);
         // agent_loop only writes it when None, so our value is preserved.
-        let prompt = AgentMessage::Llm(Message::user(task));
+        let prompt = AgentMessage::Llm(LlmMessage::new(Message::user(task)));
         let new_messages = agent_loop(vec![prompt], &mut context, &config, tx, cancel).await;
         let returned_child_loop_id = context.loop_id.clone();
 
@@ -386,7 +388,11 @@ impl AgentTool for SubAgentTool {
 /// Collects text from the last assistant message, or returns a fallback.
 fn extract_final_text(messages: &[AgentMessage]) -> String {
     for msg in messages.iter().rev() {
-        if let AgentMessage::Llm(Message::Assistant { content, .. }) = msg {
+        if let AgentMessage::Llm(LlmMessage {
+            message: Message::Assistant { content, .. },
+            ..
+        }) = msg
+        {
             let texts: Vec<&str> = content
                 .iter()
                 .filter_map(|c| match c {

@@ -3,7 +3,7 @@
 use phi_core::provider::mock::*;
 use phi_core::provider::{MockProvider, ModelConfig};
 use phi_core::BasicAgent;
-use phi_core::*;
+use phi_core::{LlmMessage, *};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -117,8 +117,8 @@ async fn test_agent_builder_pattern() {
 #[tokio::test]
 async fn test_with_messages_builder() {
     let saved = vec![
-        AgentMessage::Llm(Message::user("Hello")),
-        AgentMessage::Llm(Message::Assistant {
+        AgentMessage::Llm(LlmMessage::new(Message::user("Hello"))),
+        AgentMessage::Llm(LlmMessage::new(Message::Assistant {
             content: vec![Content::Text {
                 text: "Hi there!".into(),
             }],
@@ -128,7 +128,7 @@ async fn test_with_messages_builder() {
             usage: Usage::default(),
             timestamp: 0,
             error_message: None,
-        }),
+        })),
     ];
 
     let provider = MockProvider::text("ok");
@@ -265,7 +265,7 @@ async fn test_prompt_messages_with_sender() {
         events
     });
 
-    let msgs = vec![AgentMessage::Llm(Message::user("Hello"))];
+    let msgs = vec![AgentMessage::Llm(LlmMessage::new(Message::user("Hello")))];
     agent.prompt_messages_with_sender(msgs, tx).await;
 
     let events = consumer.await.unwrap();
@@ -281,8 +281,8 @@ async fn test_continue_loop_with_sender() {
         .with_system_prompt("test");
 
     // First, add some messages to continue from (last must not be assistant)
-    agent.append_message(AgentMessage::Llm(Message::user("Hello")));
-    agent.append_message(AgentMessage::Llm(Message::Assistant {
+    agent.append_message(AgentMessage::Llm(LlmMessage::new(Message::user("Hello"))));
+    agent.append_message(AgentMessage::Llm(LlmMessage::new(Message::Assistant {
         content: vec![Content::Text { text: "Hi!".into() }],
         stop_reason: StopReason::Error,
         model: "mock".into(),
@@ -290,8 +290,10 @@ async fn test_continue_loop_with_sender() {
         usage: Usage::default(),
         timestamp: 0,
         error_message: Some("rate limited".into()),
-    }));
-    agent.append_message(AgentMessage::Llm(Message::user("Please try again")));
+    })));
+    agent.append_message(AgentMessage::Llm(LlmMessage::new(Message::user(
+        "Please try again",
+    ))));
 
     let (tx, mut rx) = mpsc::unbounded_channel();
 

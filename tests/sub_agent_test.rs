@@ -4,7 +4,7 @@ use phi_core::agent_loop::{agent_loop, AgentLoopConfig};
 use phi_core::agents::SubAgentTool;
 use phi_core::provider::mock::*;
 use phi_core::provider::{MockProvider, ModelConfig};
-use phi_core::*;
+use phi_core::{LlmMessage, *};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -22,6 +22,7 @@ fn make_config(provider: Arc<dyn phi_core::provider::StreamProvider>) -> AgentLo
         get_follow_up_messages: None,
         context_config: None,
         compaction_strategy: None,
+        block_compaction_strategy: None,
         execution_limits: None,
         cache_config: CacheConfig::default(),
         tool_execution: ToolExecutionStrategy::default(),
@@ -365,9 +366,10 @@ async fn test_sub_agent_parallel() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
-    let prompt = AgentMessage::Llm(Message::user("Run both agents"));
+    let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Run both agents")));
     let (tx, rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -517,9 +519,10 @@ async fn test_sub_agent_in_parent_loop() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
-    let prompt = AgentMessage::Llm(Message::user("What is 6*7?"));
+    let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("What is 6*7?")));
     let (tx, rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -535,7 +538,11 @@ async fn test_sub_agent_in_parent_loop() {
     assert_eq!(new_messages[3].role(), "assistant");
 
     // Tool result should contain sub-agent's output
-    if let AgentMessage::Llm(Message::ToolResult { content, .. }) = &new_messages[2] {
+    if let AgentMessage::Llm(LlmMessage {
+        message: Message::ToolResult { content, .. },
+        ..
+    }) = &new_messages[2]
+    {
         let text = match &content[0] {
             Content::Text { text } => text.as_str(),
             _ => panic!("Expected text content"),

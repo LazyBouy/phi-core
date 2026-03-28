@@ -7,6 +7,7 @@ use phi_core::agent_loop::{agent_loop, AgentLoopConfig};
 use phi_core::provider::{AnthropicProvider, ModelConfig};
 use phi_core::tools;
 use phi_core::types::*;
+use phi_core::LlmMessage;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -29,6 +30,7 @@ fn make_config() -> AgentLoopConfig {
         get_follow_up_messages: None,
         context_config: None,
         compaction_strategy: None,
+        block_compaction_strategy: None,
         execution_limits: None,
         cache_config: CacheConfig::default(),
         tool_execution: ToolExecutionStrategy::default(),
@@ -52,7 +54,11 @@ fn extract_assistant_text(messages: &[AgentMessage]) -> String {
     messages
         .iter()
         .filter_map(|m| {
-            if let AgentMessage::Llm(Message::Assistant { content, .. }) = m {
+            if let AgentMessage::Llm(LlmMessage {
+                message: Message::Assistant { content, .. },
+                ..
+            }) = m
+            {
                 Some(
                     content
                         .iter()
@@ -75,9 +81,15 @@ fn extract_assistant_text(messages: &[AgentMessage]) -> String {
 }
 
 fn has_assistant_message(messages: &[AgentMessage]) -> bool {
-    messages
-        .iter()
-        .any(|m| matches!(m, AgentMessage::Llm(Message::Assistant { .. })))
+    messages.iter().any(|m| {
+        matches!(
+            m,
+            AgentMessage::Llm(LlmMessage {
+                message: Message::Assistant { .. },
+                ..
+            })
+        )
+    })
 }
 
 /// Simple text response — no tools.
@@ -97,9 +109,10 @@ async fn test_anthropic_simple_text() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
-    let prompt = AgentMessage::Llm(Message::user("What color is the sky?"));
+    let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("What color is the sky?")));
     let new_messages = agent_loop(vec![prompt], &mut context, &config, tx, cancel).await;
 
     assert!(
@@ -154,11 +167,12 @@ async fn test_anthropic_tool_use() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
-    let prompt = AgentMessage::Llm(Message::user(
+    let prompt = AgentMessage::Llm(LlmMessage::new(Message::user(
         "What is the output of `echo hello_phi-core`? Use bash to run it.",
-    ));
+    )));
     let new_messages = agent_loop(vec![prompt], &mut context, &config, tx, cancel).await;
 
     // Should have multiple messages: assistant (tool call) + tool result + assistant (final)
@@ -218,17 +232,18 @@ async fn test_anthropic_multi_turn() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
     // Turn 1
     let (tx1, _rx1) = mpsc::unbounded_channel();
-    let prompt1 = AgentMessage::Llm(Message::user("What color is grass?"));
+    let prompt1 = AgentMessage::Llm(LlmMessage::new(Message::user("What color is grass?")));
     let msgs1 = agent_loop(vec![prompt1], &mut context, &config, tx1, cancel.clone()).await;
     assert!(!msgs1.is_empty(), "Turn 1 should produce messages");
 
     // Turn 2 — should have context from turn 1
     let (tx2, _rx2) = mpsc::unbounded_channel();
-    let prompt2 = AgentMessage::Llm(Message::user("And the sky?"));
+    let prompt2 = AgentMessage::Llm(LlmMessage::new(Message::user("And the sky?")));
     let msgs2 = agent_loop(vec![prompt2], &mut context, &config, tx2, cancel.clone()).await;
     assert!(!msgs2.is_empty(), "Turn 2 should produce messages");
 

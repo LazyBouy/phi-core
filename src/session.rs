@@ -328,6 +328,13 @@ pub struct LoopRecord {
     // ── Parallel evaluation ───────────────────────────────────────────────
     /// Set when this loop was part of an evaluational-parallelism group.
     pub parallel_group: Option<ParallelGroupRecord>,
+
+    // ── Compaction ──────────────────────────────────────────────────────
+    /// Non-destructive compaction overlay. When `Some`, the context loader
+    /// uses this block instead of raw `self.messages`. The original messages
+    /// remain untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_block: Option<crate::context::CompactionBlock>,
 }
 
 // ---------------------------------------------------------------------------
@@ -426,6 +433,34 @@ impl Session {
     /// Look up a loop by its `loop_id`.
     pub fn get_loop(&self, loop_id: &str) -> Option<&LoopRecord> {
         self.loops.iter().find(|l| l.loop_id == loop_id)
+    }
+
+    /// Mutable look up a loop by its `loop_id`.
+    pub fn get_loop_mut(&mut self, loop_id: &str) -> Option<&mut LoopRecord> {
+        self.loops.iter_mut().find(|l| l.loop_id == loop_id)
+    }
+
+    /// Build the linear chain of loops from root to `target_loop_id`
+    /// by walking `parent_loop_id` links backward. Returns loop IDs
+    /// in chronological order (root first).
+    ///
+    /// This naturally handles parallel branches (only the selected path)
+    /// and reruns (only the active ancestor chain).
+    pub fn loop_chain_to(&self, target_loop_id: &str) -> Vec<String> {
+        let mut chain = Vec::new();
+        let mut current = target_loop_id.to_string();
+        loop {
+            chain.push(current.clone());
+            match self
+                .get_loop(&current)
+                .and_then(|r| r.parent_loop_id.as_ref())
+            {
+                Some(parent) => current = parent.clone(),
+                None => break,
+            }
+        }
+        chain.reverse();
+        chain
     }
 
     /// Cumulative token usage across all loops in this session.
@@ -618,6 +653,7 @@ impl SessionRecorder {
                     children_loop_ids: Vec::new(),
                     child_loop_refs: Vec::new(),
                     parallel_group: None,
+                    compaction_block: None,
                 };
                 let open = OpenLoop {
                     record,
@@ -1054,6 +1090,8 @@ fn loop_id_of(event: &AgentEvent) -> Option<&str> {
         AgentEvent::ToolExecutionUpdate { loop_id, .. } => Some(loop_id),
         AgentEvent::ProgressMessage { loop_id, .. } if !loop_id.is_empty() => Some(loop_id),
         AgentEvent::InputRejected { loop_id, .. } if !loop_id.is_empty() => Some(loop_id),
+        AgentEvent::CompactionStarted { loop_id, .. } => Some(loop_id),
+        AgentEvent::CompactionEnded { loop_id, .. } => Some(loop_id),
         _ => None,
     }
 }
@@ -1076,8 +1114,11 @@ fn config_segment_from_loop_id(loop_id: &str) -> Option<String> {
 /// the `config_segment` component of the `{session_id}.{config_segment}.{N}` format.
 fn extract_config_snapshot(messages: &[AgentMessage], loop_id: &str) -> Option<LoopConfigSnapshot> {
     messages.iter().find_map(|m| {
-        if let AgentMessage::Llm(Message::Assistant {
-            model, provider, ..
+        if let AgentMessage::Llm(LlmMessage {
+            message: Message::Assistant {
+                model, provider, ..
+            },
+            ..
         }) = m
         {
             Some(LoopConfigSnapshot {

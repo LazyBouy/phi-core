@@ -24,6 +24,7 @@ fn make_config(provider: Arc<dyn phi_core::provider::StreamProvider>) -> AgentLo
         get_follow_up_messages: None,
         context_config: None,
         compaction_strategy: None,
+        block_compaction_strategy: None,
         execution_limits: None,
         cache_config: CacheConfig::default(),
         tool_execution: ToolExecutionStrategy::default(),
@@ -65,9 +66,10 @@ async fn test_simple_text_response() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
-    let prompt = AgentMessage::Llm(Message::user("Hi"));
+    let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Hi")));
     let (tx, rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -94,6 +96,8 @@ async fn test_simple_text_response() {
             AgentEvent::InputRejected { .. } => "InputRejected",
             AgentEvent::ParallelLoopStart { .. } => "ParallelLoopStart",
             AgentEvent::ParallelLoopEnd { .. } => "ParallelLoopEnd",
+            AgentEvent::CompactionStarted { .. } => "CompactionStarted",
+            AgentEvent::CompactionEnded { .. } => "CompactionEnded",
         })
         .collect();
 
@@ -170,9 +174,10 @@ async fn test_tool_call_and_response() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
-    let prompt = AgentMessage::Llm(Message::user("Read test.txt"));
+    let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Read test.txt")));
     let (tx, rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -197,6 +202,8 @@ async fn test_tool_call_and_response() {
             AgentEvent::InputRejected { .. } => "InputRejected",
             AgentEvent::ParallelLoopStart { .. } => "ParallelLoopStart",
             AgentEvent::ParallelLoopEnd { .. } => "ParallelLoopEnd",
+            AgentEvent::CompactionStarted { .. } => "CompactionStarted",
+            AgentEvent::CompactionEnded { .. } => "CompactionEnded",
         })
         .collect();
 
@@ -227,9 +234,10 @@ async fn test_abort_cancels_loop() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
-    let prompt = AgentMessage::Llm(Message::user("Hi"));
+    let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Hi")));
     let (tx, _rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -251,8 +259,8 @@ async fn test_continue_from_tool_result() {
     let mut context = AgentContext {
         system_prompt: "test".into(),
         messages: vec![
-            AgentMessage::Llm(Message::user("do something")),
-            AgentMessage::Llm(Message::ToolResult {
+            AgentMessage::Llm(LlmMessage::new(Message::user("do something"))),
+            AgentMessage::Llm(LlmMessage::new(Message::ToolResult {
                 tool_call_id: "tc-1".into(),
                 tool_name: "test_tool".into(),
                 content: vec![Content::Text {
@@ -260,7 +268,7 @@ async fn test_continue_from_tool_result() {
                 }],
                 is_error: false,
                 timestamp: 0,
-            }),
+            })),
         ],
         tools: Vec::new(),
         // agent_loop_continue requires agent_id and session_id to be set
@@ -269,6 +277,7 @@ async fn test_continue_from_tool_result() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -325,9 +334,10 @@ async fn test_tool_error_is_reported() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
-    let prompt = AgentMessage::Llm(Message::user("Use the tool"));
+    let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Use the tool")));
     let (tx, rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -366,9 +376,10 @@ async fn test_unknown_tool_reports_error() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
-    let prompt = AgentMessage::Llm(Message::user("Use nonexistent tool"));
+    let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Use nonexistent tool")));
     let (tx, rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -468,9 +479,10 @@ async fn test_parallel_tool_execution_faster_than_sequential() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
-    let prompt = AgentMessage::Llm(Message::user("Run all tools"));
+    let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Run all tools")));
     let (tx, rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -544,9 +556,10 @@ async fn test_sequential_tool_execution_is_slower() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
-    let prompt = AgentMessage::Llm(Message::user("Run tools"));
+    let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Run tools")));
     let (tx, _rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -616,9 +629,10 @@ async fn test_batched_tool_execution() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
-    let prompt = AgentMessage::Llm(Message::user("Run all tools"));
+    let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Run all tools")));
     let (tx, rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -712,9 +726,10 @@ async fn test_tool_execution_update_events_emitted() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
-    let prompt = AgentMessage::Llm(Message::user("go"));
+    let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("go")));
     let (tx, rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -806,6 +821,7 @@ async fn test_retry_on_rate_limit_succeeds() {
         get_follow_up_messages: None,
         context_config: None,
         compaction_strategy: None,
+        block_compaction_strategy: None,
         execution_limits: None,
         cache_config: CacheConfig::default(),
         tool_execution: ToolExecutionStrategy::default(),
@@ -838,9 +854,10 @@ async fn test_retry_on_rate_limit_succeeds() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
-    let prompt = AgentMessage::Llm(Message::user("hi"));
+    let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("hi")));
     let (tx, rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -885,6 +902,7 @@ async fn test_retry_exhausted_returns_error() {
         get_follow_up_messages: None,
         context_config: None,
         compaction_strategy: None,
+        block_compaction_strategy: None,
         execution_limits: None,
         cache_config: CacheConfig::default(),
         tool_execution: ToolExecutionStrategy::default(),
@@ -917,9 +935,10 @@ async fn test_retry_exhausted_returns_error() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
-    let prompt = AgentMessage::Llm(Message::user("hi"));
+    let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("hi")));
     let (tx, _rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -927,9 +946,13 @@ async fn test_retry_exhausted_returns_error() {
 
     // Should have an error message (StopReason::Error)
     let last = new_messages.last().unwrap();
-    if let AgentMessage::Llm(Message::Assistant {
-        stop_reason,
-        error_message,
+    if let AgentMessage::Llm(LlmMessage {
+        message:
+            Message::Assistant {
+                stop_reason,
+                error_message,
+                ..
+            },
         ..
     }) = last
     {
@@ -971,6 +994,7 @@ async fn test_no_retry_on_auth_error() {
         get_follow_up_messages: None,
         context_config: None,
         compaction_strategy: None,
+        block_compaction_strategy: None,
         execution_limits: None,
         cache_config: CacheConfig::default(),
         tool_execution: ToolExecutionStrategy::default(),
@@ -998,9 +1022,10 @@ async fn test_no_retry_on_auth_error() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
-    let prompt = AgentMessage::Llm(Message::user("hi"));
+    let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("hi")));
     let (tx, _rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -1040,6 +1065,7 @@ async fn test_retry_none_disables_retries() {
         get_follow_up_messages: None,
         context_config: None,
         compaction_strategy: None,
+        block_compaction_strategy: None,
         execution_limits: None,
         cache_config: CacheConfig::default(),
         tool_execution: ToolExecutionStrategy::default(),
@@ -1067,9 +1093,10 @@ async fn test_retry_none_disables_retries() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
-    let prompt = AgentMessage::Llm(Message::user("hi"));
+    let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("hi")));
     let (tx, _rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -1105,9 +1132,10 @@ async fn test_message_update_events_emitted_during_streaming() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
-    let prompt = AgentMessage::Llm(Message::user("hi"));
+    let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("hi")));
     let (tx, rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -1208,9 +1236,10 @@ async fn test_before_turn_can_abort() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
-    let prompt = AgentMessage::Llm(Message::user("go"));
+    let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("go")));
     let (tx, _rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -1255,9 +1284,10 @@ async fn test_after_turn_receives_messages() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
-    let prompt = AgentMessage::Llm(Message::user("go"));
+    let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("go")));
     let (tx, _rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -1297,6 +1327,7 @@ async fn test_on_error_fires_on_provider_error() {
         get_follow_up_messages: None,
         context_config: None,
         compaction_strategy: None,
+        block_compaction_strategy: None,
         execution_limits: None,
         cache_config: CacheConfig::default(),
         tool_execution: ToolExecutionStrategy::default(),
@@ -1326,9 +1357,10 @@ async fn test_on_error_fires_on_provider_error() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
-    let prompt = AgentMessage::Llm(Message::user("hi"));
+    let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("hi")));
     let (tx, _rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -1355,9 +1387,10 @@ async fn test_callbacks_are_optional() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
-    let prompt = AgentMessage::Llm(Message::user("Hi"));
+    let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Hi")));
     let (tx, rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -1429,9 +1462,10 @@ async fn test_progress_message_event_emitted() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
-    let prompt = AgentMessage::Llm(Message::user("go"));
+    let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("go")));
     let (tx, rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -1509,9 +1543,10 @@ async fn test_tool_ignoring_progress_no_panic() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
-    let prompt = AgentMessage::Llm(Message::user("go"));
+    let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("go")));
     let (tx, rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -1596,9 +1631,10 @@ async fn test_parallel_tools_progress_distinguishable() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
-    let prompt = AgentMessage::Llm(Message::user("go"));
+    let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("go")));
     let (tx, rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -1642,9 +1678,10 @@ async fn test_on_update_still_works_after_refactor() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
-    let prompt = AgentMessage::Llm(Message::user("go"));
+    let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("go")));
     let (tx, rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -1712,9 +1749,10 @@ async fn test_filter_pass_message_goes_through() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
-    let prompt = AgentMessage::Llm(Message::user("Hi"));
+    let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Hi")));
     let (tx, rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -1745,9 +1783,10 @@ async fn test_filter_warn_injects_warning_message() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
-    let prompt = AgentMessage::Llm(Message::user("Hi"));
+    let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Hi")));
     let (tx, _rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -1756,7 +1795,11 @@ async fn test_filter_warn_injects_warning_message() {
     // user (with appended warning) + assistant = 2
     assert_eq!(new_messages.len(), 2);
     // The warning should be appended to the user message's content
-    if let AgentMessage::Llm(Message::User { content, .. }) = &new_messages[0] {
+    if let AgentMessage::Llm(LlmMessage {
+        message: Message::User { content, .. },
+        ..
+    }) = &new_messages[0]
+    {
         assert_eq!(content.len(), 2, "expected original text + warning");
         let warning = match &content[1] {
             Content::Text { text } => text.as_str(),
@@ -1785,9 +1828,10 @@ async fn test_filter_reject_returns_empty() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
-    let prompt = AgentMessage::Llm(Message::user("Bad input"));
+    let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Bad input")));
     let (tx, rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -1863,9 +1907,10 @@ async fn test_filter_chain_first_reject_wins() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
-    let prompt = AgentMessage::Llm(Message::user("Bad"));
+    let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Bad")));
     let (tx, _rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -1900,9 +1945,10 @@ async fn test_filter_multiple_warns_accumulate() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
-    let prompt = AgentMessage::Llm(Message::user("Hi"));
+    let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Hi")));
     let (tx, _rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -1910,7 +1956,11 @@ async fn test_filter_multiple_warns_accumulate() {
 
     // user (with appended warnings) + assistant = 2
     assert_eq!(new_messages.len(), 2);
-    if let AgentMessage::Llm(Message::User { content, .. }) = &new_messages[0] {
+    if let AgentMessage::Llm(LlmMessage {
+        message: Message::User { content, .. },
+        ..
+    }) = &new_messages[0]
+    {
         // Original text + appended warning block
         assert!(content.len() >= 2, "expected original text + warning");
         let warning = match content.last().unwrap() {
@@ -1956,9 +2006,10 @@ async fn test_filter_non_text_content_only_text_extracted() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
-    let prompt = AgentMessage::Llm(Message::User {
+    let prompt = AgentMessage::Llm(LlmMessage::new(Message::User {
         content: vec![
             Content::Text {
                 text: "Check this image".into(),
@@ -1969,7 +2020,7 @@ async fn test_filter_non_text_content_only_text_extracted() {
             },
         ],
         timestamp: 0,
-    });
+    }));
     let (tx, _rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -2033,7 +2084,9 @@ async fn test_filter_rejects_steering_message() {
         let mut done = steered_clone.lock().unwrap();
         if !*done {
             *done = true;
-            vec![AgentMessage::Llm(Message::user("SECRET content"))]
+            vec![AgentMessage::Llm(LlmMessage::new(Message::user(
+                "SECRET content",
+            )))]
         } else {
             vec![]
         }
@@ -2048,12 +2101,13 @@ async fn test_filter_rejects_steering_message() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
     let (tx, rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
     agent_loop(
-        vec![AgentMessage::Llm(Message::user("hello"))],
+        vec![AgentMessage::Llm(LlmMessage::new(Message::user("hello")))],
         &mut context,
         &config,
         tx,
@@ -2096,7 +2150,9 @@ async fn test_filter_warns_steering_message() {
         let mut done = steered_clone.lock().unwrap();
         if !*done {
             *done = true;
-            vec![AgentMessage::Llm(Message::user("FLAGGED content"))]
+            vec![AgentMessage::Llm(LlmMessage::new(Message::user(
+                "FLAGGED content",
+            )))]
         } else {
             vec![]
         }
@@ -2111,12 +2167,13 @@ async fn test_filter_warns_steering_message() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
     let (tx, _rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
     agent_loop(
-        vec![AgentMessage::Llm(Message::user("hello"))],
+        vec![AgentMessage::Llm(LlmMessage::new(Message::user("hello")))],
         &mut context,
         &config,
         tx,
@@ -2126,7 +2183,11 @@ async fn test_filter_warns_steering_message() {
 
     // The steering message should be in context with the warning appended
     let steering_msg = context.messages.iter().find(|m| {
-        if let AgentMessage::Llm(Message::User { content, .. }) = m {
+        if let AgentMessage::Llm(LlmMessage {
+            message: Message::User { content, .. },
+            ..
+        }) = m
+        {
             content
                 .iter()
                 .any(|c| matches!(c, Content::Text { text } if text.contains("FLAGGED")))
@@ -2139,7 +2200,11 @@ async fn test_filter_warns_steering_message() {
         "steering message not found in context"
     );
 
-    if let Some(AgentMessage::Llm(Message::User { content, .. })) = steering_msg {
+    if let Some(AgentMessage::Llm(LlmMessage {
+        message: Message::User { content, .. },
+        ..
+    })) = steering_msg
+    {
         let has_warning = content
             .iter()
             .any(|c| matches!(c, Content::Text { text } if text.contains("[Warning: steer-warn]")));
@@ -2167,7 +2232,9 @@ async fn test_filter_rejects_follow_up_message() {
         let mut done = followed_clone.lock().unwrap();
         if !*done {
             *done = true;
-            vec![AgentMessage::Llm(Message::user("BLOCKED_FOLLOWUP content"))]
+            vec![AgentMessage::Llm(LlmMessage::new(Message::user(
+                "BLOCKED_FOLLOWUP content",
+            )))]
         } else {
             vec![]
         }
@@ -2182,12 +2249,13 @@ async fn test_filter_rejects_follow_up_message() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
     let (tx, rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
     agent_loop(
-        vec![AgentMessage::Llm(Message::user("hello"))],
+        vec![AgentMessage::Llm(LlmMessage::new(Message::user("hello")))],
         &mut context,
         &config,
         tx,
@@ -2242,7 +2310,9 @@ async fn test_filter_warns_follow_up_message() {
         let mut done = followed_clone.lock().unwrap();
         if !*done {
             *done = true;
-            vec![AgentMessage::Llm(Message::user("WARN_FOLLOWUP content"))]
+            vec![AgentMessage::Llm(LlmMessage::new(Message::user(
+                "WARN_FOLLOWUP content",
+            )))]
         } else {
             vec![]
         }
@@ -2257,12 +2327,13 @@ async fn test_filter_warns_follow_up_message() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
     let (tx, _rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
     agent_loop(
-        vec![AgentMessage::Llm(Message::user("hello"))],
+        vec![AgentMessage::Llm(LlmMessage::new(Message::user("hello")))],
         &mut context,
         &config,
         tx,
@@ -2272,7 +2343,11 @@ async fn test_filter_warns_follow_up_message() {
 
     // The follow-up message should be in context with the warning appended
     let followup_msg = context.messages.iter().find(|m| {
-        if let AgentMessage::Llm(Message::User { content, .. }) = m {
+        if let AgentMessage::Llm(LlmMessage {
+            message: Message::User { content, .. },
+            ..
+        }) = m
+        {
             content
                 .iter()
                 .any(|c| matches!(c, Content::Text { text } if text.contains("WARN_FOLLOWUP")))
@@ -2285,7 +2360,11 @@ async fn test_filter_warns_follow_up_message() {
         "follow-up message not found in context"
     );
 
-    if let Some(AgentMessage::Llm(Message::User { content, .. })) = followup_msg {
+    if let Some(AgentMessage::Llm(LlmMessage {
+        message: Message::User { content, .. },
+        ..
+    })) = followup_msg
+    {
         let has_warning = content.iter().any(
             |c| matches!(c, Content::Text { text } if text.contains("[Warning: follow-warn]")),
         );
@@ -2300,7 +2379,13 @@ async fn test_filter_warns_follow_up_message() {
         context
             .messages
             .iter()
-            .filter(|m| matches!(m, AgentMessage::Llm(Message::Assistant { .. })))
+            .filter(|m| matches!(
+                m,
+                AgentMessage::Llm(LlmMessage {
+                    message: Message::Assistant { .. },
+                    ..
+                })
+            ))
             .count(),
         2
     );
@@ -2358,10 +2443,10 @@ async fn test_turn_end_carries_usage() {
         ..Default::default()
     };
     let (tx, rx) = mpsc::unbounded_channel();
-    let prompts = vec![AgentMessage::Llm(Message::User {
+    let prompts = vec![AgentMessage::Llm(LlmMessage::new(Message::User {
         content: vec![Content::Text { text: "hi".into() }],
         timestamp: 0,
-    })];
+    }))];
     agent_loop(prompts, &mut context, &config, tx, CancellationToken::new()).await;
     let events = collect_events(rx);
     let turn_end = events.iter().find_map(|e| {
@@ -2396,12 +2481,12 @@ async fn test_agent_end_carries_accumulated_usage() {
         let called = Arc::new(called);
         move || {
             if !called.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                vec![AgentMessage::Llm(Message::User {
+                vec![AgentMessage::Llm(LlmMessage::new(Message::User {
                     content: vec![Content::Text {
                         text: "follow up".into(),
                     }],
                     timestamp: 0,
-                })]
+                }))]
             } else {
                 vec![]
             }
@@ -2414,12 +2499,12 @@ async fn test_agent_end_carries_accumulated_usage() {
         ..Default::default()
     };
     let (tx, rx) = mpsc::unbounded_channel();
-    let prompts = vec![AgentMessage::Llm(Message::User {
+    let prompts = vec![AgentMessage::Llm(LlmMessage::new(Message::User {
         content: vec![Content::Text {
             text: "start".into(),
         }],
         timestamp: 0,
-    })];
+    }))];
     agent_loop(prompts, &mut context, &config, tx, CancellationToken::new()).await;
     let events = collect_events(rx);
     let agent_end_usage = events.iter().find_map(|e| {
@@ -2458,12 +2543,12 @@ async fn test_reasoning_tokens_accumulated() {
         ..Default::default()
     };
     let (tx, rx) = mpsc::unbounded_channel();
-    let prompts = vec![AgentMessage::Llm(Message::User {
+    let prompts = vec![AgentMessage::Llm(LlmMessage::new(Message::User {
         content: vec![Content::Text {
             text: "think hard".into(),
         }],
         timestamp: 0,
-    })];
+    }))];
     agent_loop(prompts, &mut context, &config, tx, CancellationToken::new()).await;
     let events = collect_events(rx);
     let agent_end_usage = events.iter().find_map(|e| {
@@ -2517,10 +2602,10 @@ async fn test_budget_enforcement_stops_loop() {
         ..Default::default()
     };
     let (tx, rx) = mpsc::unbounded_channel();
-    let prompts = vec![AgentMessage::Llm(Message::User {
+    let prompts = vec![AgentMessage::Llm(LlmMessage::new(Message::User {
         content: vec![Content::Text { text: "go".into() }],
         timestamp: 0,
-    })];
+    }))];
     agent_loop(prompts, &mut context, &config, tx, CancellationToken::new()).await;
     let events = collect_events(rx);
     let turn_starts = events
@@ -2550,16 +2635,17 @@ async fn test_default_compaction_matches_compact_messages() {
 
     let mut messages = Vec::new();
     for i in 0..100 {
-        messages.push(AgentMessage::Llm(Message::user(format!(
+        messages.push(AgentMessage::Llm(LlmMessage::new(Message::user(format!(
             "Message {} {}",
             i,
             "x".repeat(200)
-        ))));
+        )))));
     }
 
     let config = ContextConfig {
         max_context_tokens: 500,
         system_prompt_tokens: 100,
+        compaction: CompactionConfig::default(),
         keep_recent: 5,
         keep_first: 2,
         tool_output_max_lines: 20,
@@ -2596,7 +2682,9 @@ async fn test_custom_compaction_strategy_is_called() {
             messages: Vec<AgentMessage>,
             _config: &ContextConfig,
         ) -> Vec<AgentMessage> {
-            let mut result = vec![AgentMessage::Llm(Message::user("[compacted]"))];
+            let mut result = vec![AgentMessage::Llm(LlmMessage::new(Message::user(
+                "[compacted]",
+            )))];
             // Keep only the last message to prove we ran
             if let Some(last) = messages.last() {
                 result.push(last.clone());
@@ -2621,11 +2709,17 @@ async fn test_custom_compaction_strategy_is_called() {
         context_config: Some(ContextConfig {
             max_context_tokens: 10, // Tiny budget to force compaction
             system_prompt_tokens: 0,
+            compaction: CompactionConfig {
+                compact_at_pct: 0.01,               // Very aggressive — trigger at 1%
+                compact_budget_threshold_pct: 0.99, // Always fire
+                ..CompactionConfig::default()
+            },
             keep_recent: 1,
             keep_first: 1,
             tool_output_max_lines: 10,
         }),
         compaction_strategy: Some(std::sync::Arc::new(MarkerCompaction)),
+        block_compaction_strategy: None,
         execution_limits: None,
         cache_config: CacheConfig::default(),
         tool_execution: ToolExecutionStrategy::default(),
@@ -2644,7 +2738,7 @@ async fn test_custom_compaction_strategy_is_called() {
         config_id: None,
     };
 
-    let prompt = AgentMessage::Llm(Message::user("Hello"));
+    let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Hello")));
     let mut context = AgentContext {
         system_prompt: String::new(),
         messages: vec![],
@@ -2654,6 +2748,7 @@ async fn test_custom_compaction_strategy_is_called() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -2664,7 +2759,11 @@ async fn test_custom_compaction_strategy_is_called() {
     // The custom strategy should have inserted "[compacted]" as the first message
     assert!(
         context.messages.iter().any(|m| {
-            if let AgentMessage::Llm(Message::User { content, .. }) = m {
+            if let AgentMessage::Llm(LlmMessage {
+                message: Message::User { content, .. },
+                ..
+            }) = m
+            {
                 content
                     .iter()
                     .any(|c| matches!(c, Content::Text { text } if text == "[compacted]"))
@@ -2677,7 +2776,11 @@ async fn test_custom_compaction_strategy_is_called() {
             .messages
             .iter()
             .filter_map(|m| {
-                if let AgentMessage::Llm(Message::User { content, .. }) = m {
+                if let AgentMessage::Llm(LlmMessage {
+                    message: Message::User { content, .. },
+                    ..
+                }) = m
+                {
                     Some(content)
                 } else {
                     None
@@ -2707,11 +2810,17 @@ async fn test_none_compaction_strategy_uses_default() {
         context_config: Some(ContextConfig {
             max_context_tokens: 10, // Tiny budget to force compaction
             system_prompt_tokens: 0,
+            compaction: CompactionConfig {
+                compact_at_pct: 0.01,
+                compact_budget_threshold_pct: 0.99,
+                ..CompactionConfig::default()
+            },
             keep_recent: 1,
             keep_first: 1,
             tool_output_max_lines: 10,
         }),
         compaction_strategy: None, // Should fall back to DefaultCompaction
+        block_compaction_strategy: None,
         execution_limits: None,
         cache_config: CacheConfig::default(),
         tool_execution: ToolExecutionStrategy::default(),
@@ -2730,7 +2839,7 @@ async fn test_none_compaction_strategy_uses_default() {
         config_id: None,
     };
 
-    let prompt = AgentMessage::Llm(Message::user("Hello"));
+    let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Hello")));
     let mut context = AgentContext {
         system_prompt: String::new(),
         messages: vec![],
@@ -2740,6 +2849,7 @@ async fn test_none_compaction_strategy_uses_default() {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -2775,6 +2885,7 @@ async fn test_loop_id_explicit_config_id() {
         loop_id: Some("ses-test.anthropic-opus.1".into()),
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -2810,8 +2921,8 @@ async fn test_continuation_kind_in_agent_start() {
     let mut context = AgentContext {
         system_prompt: "test".into(),
         messages: vec![
-            AgentMessage::Llm(Message::user("do something")),
-            AgentMessage::Llm(Message::ToolResult {
+            AgentMessage::Llm(LlmMessage::new(Message::user("do something"))),
+            AgentMessage::Llm(LlmMessage::new(Message::ToolResult {
                 tool_call_id: "tc-1".into(),
                 tool_name: "test_tool".into(),
                 content: vec![Content::Text {
@@ -2819,7 +2930,7 @@ async fn test_continuation_kind_in_agent_start() {
                 }],
                 is_error: false,
                 timestamp: 0,
-            }),
+            })),
         ],
         tools: Vec::new(),
         agent_id: Some("agt-test".into()),
@@ -2827,6 +2938,7 @@ async fn test_continuation_kind_in_agent_start() {
         loop_id: Some("ses-test.mock.mock.2".into()),
         parent_loop_id: Some("ses-test.mock.mock.1".into()),
         continuation_kind: Some(ContinuationKind::Rerun { tag: tag.clone() }),
+        session: None,
     };
 
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -2933,13 +3045,14 @@ async fn test_continue_panics_without_agent_id() {
 
     let mut context = AgentContext {
         system_prompt: "test".into(),
-        messages: vec![AgentMessage::Llm(Message::user("hi"))],
+        messages: vec![AgentMessage::Llm(LlmMessage::new(Message::user("hi")))],
         tools: Vec::new(),
         agent_id: None, // ← intentionally None — should panic
         session_id: Some("ses-test".into()),
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     };
 
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -2959,6 +3072,7 @@ fn make_base_context() -> AgentContext {
         loop_id: None,
         parent_loop_id: None,
         continuation_kind: None,
+        session: None,
     }
 }
 
@@ -2970,7 +3084,7 @@ async fn test_parallel_transparent() {
 
     let (tx, rx) = mpsc::unbounded_channel();
     let result = agent_loop_parallel(
-        vec![AgentMessage::Llm(Message::user("hello"))],
+        vec![AgentMessage::Llm(LlmMessage::new(Message::user("hello")))],
         make_base_context(),
         vec![config],
         Arc::new(TransparentEvaluation),
@@ -3003,7 +3117,7 @@ async fn test_parallel_pick_first() {
 
     let (tx, rx) = mpsc::unbounded_channel();
     let result = agent_loop_parallel(
-        vec![AgentMessage::Llm(Message::user("compare"))],
+        vec![AgentMessage::Llm(LlmMessage::new(Message::user("compare")))],
         make_base_context(),
         vec![config_a, config_b],
         Arc::new(PickFirstEvaluation),
@@ -3050,7 +3164,7 @@ async fn test_parallel_token_efficient() {
 
     let (tx, _rx) = mpsc::unbounded_channel();
     let result = agent_loop_parallel(
-        vec![AgentMessage::Llm(Message::user("query"))],
+        vec![AgentMessage::Llm(LlmMessage::new(Message::user("query")))],
         make_base_context(),
         vec![config_a, config_b, config_c],
         Arc::new(TokenEfficientEvaluation),
@@ -3075,7 +3189,7 @@ async fn test_parallel_elaborate() {
 
     let (tx, _rx) = mpsc::unbounded_channel();
     let result = agent_loop_parallel(
-        vec![AgentMessage::Llm(Message::user("query"))],
+        vec![AgentMessage::Llm(LlmMessage::new(Message::user("query")))],
         make_base_context(),
         vec![config_a, config_b],
         Arc::new(ElaborateEvaluation),
@@ -3103,7 +3217,9 @@ async fn test_parallel_llm_judge() {
 
     let (tx, rx) = mpsc::unbounded_channel();
     let result = agent_loop_parallel(
-        vec![AgentMessage::Llm(Message::user("which is better?"))],
+        vec![AgentMessage::Llm(LlmMessage::new(Message::user(
+            "which is better?",
+        )))],
         make_base_context(),
         vec![config_a, config_b],
         Arc::new(LlmJudgeEvaluation {
@@ -3156,7 +3272,9 @@ async fn test_parallel_continue_mode() {
     base_ctx.session_id = Some("test-session".to_string());
     base_ctx
         .messages
-        .push(AgentMessage::Llm(Message::user("Which answer is better?")));
+        .push(AgentMessage::Llm(LlmMessage::new(Message::user(
+            "Which answer is better?",
+        ))));
 
     let (tx, rx) = mpsc::unbounded_channel();
     let result = agent_loop_parallel(

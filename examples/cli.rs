@@ -233,9 +233,13 @@ async fn main() {
                 }
                 AgentEvent::MessageEnd {
                     message:
-                        AgentMessage::Llm(Message::Assistant {
-                            stop_reason: StopReason::Error,
-                            error_message,
+                        AgentMessage::Llm(LlmMessage {
+                            message:
+                                Message::Assistant {
+                                    stop_reason: StopReason::Error,
+                                    error_message,
+                                    ..
+                                },
                             ..
                         }),
                     ..
@@ -250,7 +254,11 @@ async fn main() {
                 AgentEvent::AgentEnd { messages, .. } => {
                     // Extract usage from the last assistant message
                     for msg in messages.iter().rev() {
-                        if let AgentMessage::Llm(Message::Assistant { usage, .. }) = msg {
+                        if let AgentMessage::Llm(LlmMessage {
+                            message: Message::Assistant { usage, .. },
+                            ..
+                        }) = msg
+                        {
                             last_usage = usage.clone();
                             break;
                         }

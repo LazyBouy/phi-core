@@ -161,6 +161,8 @@ pub struct BasicAgent {
     /// Timestamp of the most recent `prompt_messages_with_sender` call.
     /// Used by [`check_and_rotate`][BasicAgent::check_and_rotate] to detect inactivity.
     last_active_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Optional session for block-based compaction.
+    session: Option<crate::session::Session>,
 }
 
 impl BasicAgent {
@@ -195,7 +197,24 @@ impl BasicAgent {
             loop_counters: HashMap::new(),
             last_loop_id: None,
             last_active_at: None,
+            session: None,
         }
+    }
+
+    /// Set a session for block-based compaction.
+    pub fn with_session(mut self, session: crate::session::Session) -> Self {
+        self.session = Some(session);
+        self
+    }
+
+    /// Take the session out of the agent, returning ownership.
+    pub fn take_session(&mut self) -> Option<crate::session::Session> {
+        self.session.take()
+    }
+
+    /// Borrow the session immutably.
+    pub fn session(&self) -> Option<&crate::session::Session> {
+        self.session.as_ref()
     }
 
     /*
@@ -446,7 +465,7 @@ impl BasicAgent {
     /// requires an owned `String`; use this inherent method to pass `&str` without `.to_string()`.
     pub async fn prompt(&mut self, text: impl Into<String>) -> mpsc::UnboundedReceiver<AgentEvent> {
         let (tx, rx) = mpsc::unbounded_channel();
-        let msg = AgentMessage::Llm(Message::user(text));
+        let msg = AgentMessage::Llm(LlmMessage::new(Message::user(text)));
         self.prompt_messages_with_sender(vec![msg], tx).await;
         rx
     }
@@ -459,7 +478,7 @@ impl BasicAgent {
         text: impl Into<String>,
         tx: mpsc::UnboundedSender<AgentEvent>,
     ) {
-        let msg = AgentMessage::Llm(Message::user(text));
+        let msg = AgentMessage::Llm(LlmMessage::new(Message::user(text)));
         self.prompt_messages_with_sender(vec![msg], tx).await;
     }
 
@@ -540,6 +559,138 @@ impl BasicAgent {
       .clone() bumps the reference count — cheap, no data duplication
     Both BasicAgent and AgentLoopConfig now share ownership of the same underlying provider.
     */
+
+    // ── Standalone compaction API ────────────────────────────────────────
+
+    /// Run block-based compaction on the agent's session and emit the full event lifecycle.
+    ///
+    /// Emits: `AgentStart(Compaction)` → `CompactionStarted` → `CompactionEnded` → `AgentEnd`.
+    ///
+    /// Requires `self.session` to be `Some` and `self.context_config` to be `Some`.
+    /// Panics if either is missing.
+    /// No-op if `self.session` or `self.context_config` is `None`.
+    pub fn compact_context_with_sender(
+        &mut self,
+        tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+    ) {
+        let (Some(session), Some(ctx_config)) =
+            (self.session.as_mut(), self.context_config.as_ref())
+        else {
+            return; // No session or config — nothing to compact
+        };
+        let comp = &ctx_config.compaction;
+        let max_tokens = ctx_config.max_context_tokens;
+
+        let loop_id = self
+            .last_loop_id
+            .clone()
+            .unwrap_or_else(|| "compaction".to_string());
+
+        let _ = tx.send(AgentEvent::AgentStart {
+            agent_id: self.agent_id.clone(),
+            session_id: self.session_id.clone(),
+            loop_id: loop_id.clone(),
+            parent_loop_id: self.last_loop_id.clone(),
+            continuation_kind: Some(ContinuationKind::Compaction),
+            timestamp: chrono::Utc::now(),
+            metadata: None,
+        });
+
+        let msgs_before = self.messages.len();
+        let tokens_before = crate::context::total_tokens(&self.messages);
+
+        let _ = tx.send(AgentEvent::CompactionStarted {
+            loop_id: loop_id.clone(),
+            estimated_tokens: tokens_before,
+            message_count: msgs_before,
+            timestamp: chrono::Utc::now(),
+        });
+
+        let strategy: &dyn crate::context::BlockCompactionStrategy =
+            &crate::context::DefaultBlockCompaction;
+        let current_lid = self.last_loop_id.as_deref().unwrap_or("");
+
+        // Sync messages into the current loop record
+        if let Some(record) = session.get_loop_mut(current_lid) {
+            record.messages = self.messages.clone();
+        }
+
+        crate::context::compact_session_loops(session, current_lid, strategy, comp, max_tokens);
+        self.messages =
+            crate::context::build_context_from_session(session, current_lid, comp, max_tokens);
+
+        let msgs_after = self.messages.len();
+        let tokens_after = crate::context::total_tokens(&self.messages);
+        let chain = session.loop_chain_to(current_lid);
+        let loops_compacted = chain
+            .iter()
+            .filter(|lid| {
+                session
+                    .get_loop(lid)
+                    .map(|r| r.compaction_block.is_some())
+                    .unwrap_or(false)
+            })
+            .count();
+
+        let _ = tx.send(AgentEvent::CompactionEnded {
+            loop_id: loop_id.clone(),
+            messages_before: msgs_before,
+            messages_after: msgs_after,
+            estimated_tokens_before: tokens_before,
+            estimated_tokens_after: tokens_after,
+            loops_compacted,
+            timestamp: chrono::Utc::now(),
+        });
+
+        let _ = tx.send(AgentEvent::AgentEnd {
+            loop_id,
+            messages: vec![],
+            usage: Usage::default(),
+            timestamp: chrono::Utc::now(),
+            rejection: None,
+        });
+    }
+
+    /// Fire-and-forget compaction. Returns the number of loops that received
+    /// new `CompactionBlock`s.
+    ///
+    /// Requires `self.session` to be `Some` and `self.context_config` to be `Some`.
+    /// Returns 0 if `self.session` or `self.context_config` is `None`.
+    pub fn compact_context(&mut self) -> usize {
+        let (Some(session), Some(ctx_config)) =
+            (self.session.as_mut(), self.context_config.as_ref())
+        else {
+            return 0; // No session or config — nothing to compact
+        };
+        let comp = &ctx_config.compaction;
+        let max_tokens = ctx_config.max_context_tokens;
+
+        let strategy: &dyn crate::context::BlockCompactionStrategy =
+            &crate::context::DefaultBlockCompaction;
+        let current_lid = self.last_loop_id.as_deref().unwrap_or("");
+
+        if let Some(record) = session.get_loop_mut(current_lid) {
+            record.messages = self.messages.clone();
+        }
+
+        crate::context::compact_session_loops(session, current_lid, strategy, comp, max_tokens);
+        self.messages =
+            crate::context::build_context_from_session(session, current_lid, comp, max_tokens);
+
+        let chain = session.loop_chain_to(current_lid);
+        chain
+            .iter()
+            .filter(|lid| {
+                session
+                    .get_loop(lid)
+                    .map(|r| r.compaction_block.is_some())
+                    .unwrap_or(false)
+            })
+            .count()
+    }
+
+    // -- Internal --
+
     fn build_config(&self) -> AgentLoopConfig {
         // Clone Arc handles before the move closures capture them
         let steering_queue = self.steering_queue.clone(); // cheap Arc clone
@@ -573,6 +724,7 @@ impl BasicAgent {
             })),
             context_config: self.context_config.clone(),
             compaction_strategy: self.compaction_strategy.clone(),
+            block_compaction_strategy: None,
             execution_limits: self.execution_limits.clone(),
             cache_config: self.cache_config.clone(),
             tool_execution: self.tool_execution.clone(),
@@ -713,12 +865,14 @@ impl Agent for BasicAgent {
             loop_id: Some(loop_id),
             parent_loop_id: None, // origin — no parent
             continuation_kind: None,
+            session: self.session.take(), // Move session into context for block-based compaction
         };
 
         let _new_messages = agent_loop(messages, &mut context, &config, tx, cancel).await;
 
         self.tools = context.tools;
         self.messages = context.messages;
+        self.session = context.session; // Reclaim session after loop
         self.is_streaming = false;
         self.cancel = None;
     }
@@ -754,6 +908,7 @@ impl Agent for BasicAgent {
             ContinuationKind::Default => ContinuationKind::Default,
             ContinuationKind::Rerun { .. } => ContinuationKind::Rerun { tag },
             ContinuationKind::Branch { .. } => ContinuationKind::Branch { tag },
+            ContinuationKind::Compaction => ContinuationKind::Compaction,
         };
 
         // Move tools temporarily into context for the loop; restored after
@@ -766,12 +921,14 @@ impl Agent for BasicAgent {
             loop_id: Some(loop_id),
             parent_loop_id,
             continuation_kind: Some(kind_with_tag),
+            session: self.session.take(),
         };
 
         let _new_messages = agent_loop_continue(&mut context, &config, tx, cancel).await;
 
         self.tools = context.tools;
         self.messages = context.messages;
+        self.session = context.session;
         self.is_streaming = false;
         self.cancel = None;
     }

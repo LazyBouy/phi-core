@@ -221,7 +221,10 @@ fn extract_query_text(prompts: &[AgentMessage]) -> String {
     prompts
         .iter()
         .filter_map(|m| match m {
-            AgentMessage::Llm(Message::User { content, .. }) => Some(content),
+            AgentMessage::Llm(LlmMessage {
+                message: Message::User { content, .. },
+                ..
+            }) => Some(content),
             _ => None,
         })
         .flat_map(|content| {
@@ -238,7 +241,10 @@ fn extract_query_text(prompts: &[AgentMessage]) -> String {
 /// Returns `None` if no user message with text content is found.
 fn extract_last_user_text(messages: &[AgentMessage]) -> Option<String> {
     messages.iter().rev().find_map(|m| match m {
-        AgentMessage::Llm(Message::User { content, .. }) => {
+        AgentMessage::Llm(LlmMessage {
+            message: Message::User { content, .. },
+            ..
+        }) => {
             let text = extract_text_only(content);
             if text.is_empty() {
                 None
@@ -258,20 +264,30 @@ fn format_prior_context(messages: &[AgentMessage]) -> String {
     let mut parts: Vec<String> = Vec::new();
     for m in messages {
         match m {
-            AgentMessage::Llm(Message::User { content, .. }) => {
+            AgentMessage::Llm(LlmMessage {
+                message: Message::User { content, .. },
+                ..
+            }) => {
                 let text = extract_text_only(content);
                 if !text.is_empty() {
                     parts.push(format!("User: {}", text));
                 }
             }
-            AgentMessage::Llm(Message::Assistant { content, .. }) => {
+            AgentMessage::Llm(LlmMessage {
+                message: Message::Assistant { content, .. },
+                ..
+            }) => {
                 let text = extract_text_only(content);
                 if !text.is_empty() {
                     parts.push(format!("Assistant: {}", text));
                 }
             }
-            AgentMessage::Llm(Message::ToolResult {
-                tool_name, content, ..
+            AgentMessage::Llm(LlmMessage {
+                message:
+                    Message::ToolResult {
+                        tool_name, content, ..
+                    },
+                ..
             }) => {
                 let text = extract_text_only(content);
                 if !text.is_empty() {
@@ -292,7 +308,10 @@ fn extract_final_assistant_text(messages: &[AgentMessage]) -> String {
         .iter()
         .rev()
         .find_map(|m| match m {
-            AgentMessage::Llm(Message::Assistant { content, .. }) => {
+            AgentMessage::Llm(LlmMessage {
+                message: Message::Assistant { content, .. },
+                ..
+            }) => {
                 let text = extract_text_only(content);
                 if text.is_empty() {
                     None
@@ -504,9 +523,15 @@ impl EvaluationStrategy for LlmJudgeEvaluation {
         } else {
             // agent_loop_continue mode: query is the last Message::User in the
             // original context. Prior context = everything BEFORE that user message.
-            let last_user_pos = orig_ctx_msgs
-                .iter()
-                .rposition(|m| matches!(m, AgentMessage::Llm(Message::User { .. })));
+            let last_user_pos = orig_ctx_msgs.iter().rposition(|m| {
+                matches!(
+                    m,
+                    AgentMessage::Llm(LlmMessage {
+                        message: Message::User { .. },
+                        ..
+                    })
+                )
+            });
             match last_user_pos {
                 Some(pos) => (
                     extract_last_user_text(&orig_ctx_msgs[pos..pos + 1]).unwrap_or_default(),
@@ -585,9 +610,12 @@ impl EvaluationStrategy for LlmJudgeEvaluation {
             loop_id: None,
             parent_loop_id: None,
             continuation_kind: None,
+            session: None,
         };
 
-        let judge_prompts = vec![AgentMessage::Llm(Message::user(judge_user_text))];
+        let judge_prompts = vec![AgentMessage::Llm(LlmMessage::new(Message::user(
+            judge_user_text,
+        )))];
 
         // ── 5. Run judge loop — forward events and capture usage ──────────────
         //
@@ -637,7 +665,7 @@ mod tests {
     use super::*;
 
     fn make_outcome(loop_id: &str, total_tokens: u64, final_text: &str) -> ParallelLoopOutcome {
-        let msg = AgentMessage::Llm(Message::Assistant {
+        let msg = AgentMessage::Llm(LlmMessage::new(Message::Assistant {
             content: vec![Content::Text {
                 text: final_text.to_string(),
             }],
@@ -650,7 +678,7 @@ mod tests {
             },
             timestamp: 0,
             error_message: None,
-        });
+        }));
         ParallelLoopOutcome {
             config_index: 0,
             loop_id: loop_id.to_string(),
@@ -663,6 +691,7 @@ mod tests {
                 loop_id: None,
                 parent_loop_id: None,
                 continuation_kind: None,
+                session: None,
             },
             new_messages: vec![msg],
             usage: Usage {
@@ -769,18 +798,18 @@ mod tests {
     #[test]
     fn test_extract_query_text() {
         let prompts = vec![
-            AgentMessage::Llm(Message::User {
+            AgentMessage::Llm(LlmMessage::new(Message::User {
                 content: vec![Content::Text {
                     text: "Hello".into(),
                 }],
                 timestamp: 0,
-            }),
-            AgentMessage::Llm(Message::User {
+            })),
+            AgentMessage::Llm(LlmMessage::new(Message::User {
                 content: vec![Content::Text {
                     text: "World".into(),
                 }],
                 timestamp: 0,
-            }),
+            })),
         ];
         let query = extract_query_text(&prompts);
         assert_eq!(query, "Hello\nWorld");
@@ -789,7 +818,7 @@ mod tests {
     #[test]
     fn test_extract_final_assistant_text() {
         let messages = vec![
-            AgentMessage::Llm(Message::Assistant {
+            AgentMessage::Llm(LlmMessage::new(Message::Assistant {
                 content: vec![Content::Text {
                     text: "first".into(),
                 }],
@@ -799,8 +828,8 @@ mod tests {
                 usage: Usage::default(),
                 timestamp: 0,
                 error_message: None,
-            }),
-            AgentMessage::Llm(Message::Assistant {
+            })),
+            AgentMessage::Llm(LlmMessage::new(Message::Assistant {
                 content: vec![Content::Text {
                     text: "final".into(),
                 }],
@@ -810,7 +839,7 @@ mod tests {
                 usage: Usage::default(),
                 timestamp: 0,
                 error_message: None,
-            }),
+            })),
         ];
         assert_eq!(extract_final_assistant_text(&messages), "final");
     }
@@ -818,13 +847,13 @@ mod tests {
     #[test]
     fn test_extract_last_user_text() {
         let messages = vec![
-            AgentMessage::Llm(Message::User {
+            AgentMessage::Llm(LlmMessage::new(Message::User {
                 content: vec![Content::Text {
                     text: "first query".into(),
                 }],
                 timestamp: 0,
-            }),
-            AgentMessage::Llm(Message::Assistant {
+            })),
+            AgentMessage::Llm(LlmMessage::new(Message::Assistant {
                 content: vec![Content::Text {
                     text: "answer".into(),
                 }],
@@ -834,13 +863,13 @@ mod tests {
                 usage: Usage::default(),
                 timestamp: 0,
                 error_message: None,
-            }),
-            AgentMessage::Llm(Message::User {
+            })),
+            AgentMessage::Llm(LlmMessage::new(Message::User {
                 content: vec![Content::Text {
                     text: "follow-up".into(),
                 }],
                 timestamp: 0,
-            }),
+            })),
         ];
         // Should return the LAST user message text.
         assert_eq!(
@@ -858,13 +887,13 @@ mod tests {
     #[test]
     fn test_format_prior_context() {
         let messages = vec![
-            AgentMessage::Llm(Message::User {
+            AgentMessage::Llm(LlmMessage::new(Message::User {
                 content: vec![Content::Text {
                     text: "Hello".into(),
                 }],
                 timestamp: 0,
-            }),
-            AgentMessage::Llm(Message::Assistant {
+            })),
+            AgentMessage::Llm(LlmMessage::new(Message::Assistant {
                 content: vec![Content::Text {
                     text: "Hi there!".into(),
                 }],
@@ -874,7 +903,7 @@ mod tests {
                 usage: Usage::default(),
                 timestamp: 0,
                 error_message: None,
-            }),
+            })),
         ];
         let transcript = format_prior_context(&messages);
         assert!(transcript.contains("User: Hello"));

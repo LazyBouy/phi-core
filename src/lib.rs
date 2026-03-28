@@ -59,7 +59,11 @@ pub mod openapi;
 pub use agent_loop::{agent_loop, agent_loop_continue, agent_loop_parallel};
 pub use agents::SubAgentTool;
 pub use agents::{Agent, BasicAgent, QueueMode};
-pub use context::{CompactionStrategy, DefaultCompaction};
+pub use context::{
+    build_context_from_session, compact_session_loops, BlockCompactionStrategy, CompactedSection,
+    CompactionBlock, CompactionConfig, CompactionScope, CompactionStrategy, ContextConfig,
+    ContextTracker, DefaultBlockCompaction, DefaultCompaction, TurnMap, TurnRange,
+};
 pub use evaluation::{
     ElaborateEvaluation, LlmJudgeEvaluation, PickFirstEvaluation, TokenEfficientEvaluation,
     TransparentEvaluation,

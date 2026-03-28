@@ -1,6 +1,6 @@
 //! Serde round-trip tests for core types.
 
-use phi_core::*;
+use phi_core::{LlmMessage, *};
 
 fn roundtrip<T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug>(
     value: &T,
@@ -75,7 +75,7 @@ fn test_message_tool_result_roundtrip() {
 
 #[test]
 fn test_agent_message_roundtrip() {
-    let am = AgentMessage::Llm(Message::user("test prompt"));
+    let am = AgentMessage::Llm(LlmMessage::new(Message::user("test prompt")));
     roundtrip(&am);
 }
 
@@ -119,8 +119,8 @@ fn test_content_variants_roundtrip() {
 #[test]
 fn test_full_conversation_roundtrip() {
     let conversation: Vec<AgentMessage> = vec![
-        AgentMessage::Llm(Message::user("Read the file")),
-        AgentMessage::Llm(Message::Assistant {
+        AgentMessage::Llm(LlmMessage::new(Message::user("Read the file"))),
+        AgentMessage::Llm(LlmMessage::new(Message::Assistant {
             content: vec![Content::ToolCall {
                 id: "tc-1".into(),
                 name: "read_file".into(),
@@ -132,8 +132,8 @@ fn test_full_conversation_roundtrip() {
             usage: Usage::default(),
             timestamp: 100,
             error_message: None,
-        }),
-        AgentMessage::Llm(Message::ToolResult {
+        })),
+        AgentMessage::Llm(LlmMessage::new(Message::ToolResult {
             tool_call_id: "tc-1".into(),
             tool_name: "read_file".into(),
             content: vec![Content::Text {
@@ -141,8 +141,8 @@ fn test_full_conversation_roundtrip() {
             }],
             is_error: false,
             timestamp: 200,
-        }),
-        AgentMessage::Llm(Message::Assistant {
+        })),
+        AgentMessage::Llm(LlmMessage::new(Message::Assistant {
             content: vec![Content::Text {
                 text: "The file contains a main function.".into(),
             }],
@@ -152,7 +152,7 @@ fn test_full_conversation_roundtrip() {
             usage: Usage::default(),
             timestamp: 300,
             error_message: None,
-        }),
+        })),
         AgentMessage::Extension(ExtensionMessage::new(
             "ui_event",
             serde_json::json!({"action": "scroll"}),

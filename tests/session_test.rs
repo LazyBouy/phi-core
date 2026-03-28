@@ -4,7 +4,7 @@ use phi_core::agent_loop::{agent_loop, agent_loop_continue, agent_loop_parallel,
 use phi_core::evaluation::PickFirstEvaluation;
 use phi_core::provider::{MockProvider, ModelConfig};
 use phi_core::session::*;
-use phi_core::*;
+use phi_core::{LlmMessage, *};
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
@@ -27,6 +27,7 @@ fn make_config(provider: Arc<dyn phi_core::provider::StreamProvider>) -> AgentLo
         get_follow_up_messages: None,
         context_config: None,
         compaction_strategy: None,
+        block_compaction_strategy: None,
         execution_limits: None,
         cache_config: CacheConfig::default(),
         tool_execution: ToolExecutionStrategy::default(),
@@ -79,7 +80,7 @@ async fn test_session_recorder_single_loop() {
     };
 
     agent_loop(
-        vec![AgentMessage::Llm(Message::user("Hello"))],
+        vec![AgentMessage::Llm(LlmMessage::new(Message::user("Hello")))],
         &mut context,
         &config,
         tx,
@@ -105,10 +106,13 @@ async fn test_session_recorder_single_loop() {
     assert!(!lr.messages.is_empty());
     // Usage should be non-zero (MockProvider uses non-zero synthetic tokens).
     // The message should be an assistant message.
-    assert!(lr
-        .messages
-        .iter()
-        .any(|m| matches!(m, AgentMessage::Llm(Message::Assistant { .. }))));
+    assert!(lr.messages.iter().any(|m| matches!(
+        m,
+        AgentMessage::Llm(LlmMessage {
+            message: Message::Assistant { .. },
+            ..
+        })
+    )));
 }
 
 // ---------------------------------------------------------------------------
@@ -131,7 +135,9 @@ async fn test_session_recorder_continuation() {
 
     // First loop.
     agent_loop(
-        vec![AgentMessage::Llm(Message::user("First question"))],
+        vec![AgentMessage::Llm(LlmMessage::new(Message::user(
+            "First question",
+        )))],
         &mut context,
         &config,
         tx1,
@@ -150,7 +156,9 @@ async fn test_session_recorder_continuation() {
     context.continuation_kind = Some(ContinuationKind::Default);
     context
         .messages
-        .push(AgentMessage::Llm(Message::user("Second question")));
+        .push(AgentMessage::Llm(LlmMessage::new(Message::user(
+            "Second question",
+        ))));
 
     let (tx2, rx2) = mpsc::unbounded_channel();
     let cancel2 = CancellationToken::new();
@@ -216,7 +224,9 @@ async fn test_session_recorder_parallel_group() {
     };
 
     agent_loop_parallel(
-        vec![AgentMessage::Llm(Message::user("Compare A vs B"))],
+        vec![AgentMessage::Llm(LlmMessage::new(Message::user(
+            "Compare A vs B",
+        )))],
         base_ctx.clone(),
         vec![config_a, config_b],
         Arc::new(PickFirstEvaluation),
@@ -277,7 +287,9 @@ async fn test_session_recorder_streaming_events() {
     let mut context = AgentContext::default();
 
     agent_loop(
-        vec![AgentMessage::Llm(Message::user("Stream me"))],
+        vec![AgentMessage::Llm(LlmMessage::new(Message::user(
+            "Stream me",
+        )))],
         &mut context,
         &config,
         tx,
@@ -345,7 +357,7 @@ async fn test_session_save_load_roundtrip() {
     };
 
     agent_loop(
-        vec![AgentMessage::Llm(Message::user("save me"))],
+        vec![AgentMessage::Llm(LlmMessage::new(Message::user("save me")))],
         &mut context,
         &config,
         tx,
@@ -526,7 +538,7 @@ async fn test_session_recorder_bidirectional_tree() {
         ..Default::default()
     };
     agent_loop(
-        vec![AgentMessage::Llm(Message::user("parent"))],
+        vec![AgentMessage::Llm(LlmMessage::new(Message::user("parent")))],
         &mut ctx,
         &config,
         tx1,
@@ -547,7 +559,7 @@ async fn test_session_recorder_bidirectional_tree() {
     ctx2.parent_loop_id = Some(parent_lid.clone());
     ctx2.continuation_kind = Some(ContinuationKind::Default);
     ctx2.messages
-        .push(AgentMessage::Llm(Message::user("child1")));
+        .push(AgentMessage::Llm(LlmMessage::new(Message::user("child1"))));
     agent_loop_continue(&mut ctx2, &config2, tx2, CancellationToken::new()).await;
     let child1_lid = ctx2.loop_id.clone().unwrap();
     let events2 = drain(rx2);
@@ -563,7 +575,7 @@ async fn test_session_recorder_bidirectional_tree() {
     ctx3.parent_loop_id = Some(parent_lid.clone());
     ctx3.continuation_kind = Some(ContinuationKind::Default);
     ctx3.messages
-        .push(AgentMessage::Llm(Message::user("child2")));
+        .push(AgentMessage::Llm(LlmMessage::new(Message::user("child2"))));
     agent_loop_continue(&mut ctx3, &config3, tx3, CancellationToken::new()).await;
     let child2_lid = ctx3.loop_id.clone().unwrap();
     let events3 = drain(rx3);
@@ -610,7 +622,7 @@ async fn test_session_recorder_continuation_kind() {
         ..Default::default()
     };
     agent_loop(
-        vec![AgentMessage::Llm(Message::user("origin"))],
+        vec![AgentMessage::Llm(LlmMessage::new(Message::user("origin")))],
         &mut ctx,
         &config,
         tx1,
@@ -631,7 +643,7 @@ async fn test_session_recorder_continuation_kind() {
     ctx2.parent_loop_id = Some(parent_lid.clone());
     ctx2.continuation_kind = Some(ContinuationKind::Rerun { tag: "test".into() });
     ctx2.messages
-        .push(AgentMessage::Llm(Message::user("rerun")));
+        .push(AgentMessage::Llm(LlmMessage::new(Message::user("rerun"))));
     agent_loop_continue(&mut ctx2, &config2, tx2, CancellationToken::new()).await;
     let rerun_lid = ctx2.loop_id.clone().unwrap();
     let events2 = drain(rx2);
@@ -1037,7 +1049,7 @@ async fn test_session_recorder_flush_aborts_open_loop() {
     };
 
     agent_loop(
-        vec![AgentMessage::Llm(Message::user("test"))],
+        vec![AgentMessage::Llm(LlmMessage::new(Message::user("test")))],
         &mut context,
         &config,
         tx,
@@ -1093,7 +1105,7 @@ async fn test_session_recorder_current_loop() {
     };
 
     agent_loop(
-        vec![AgentMessage::Llm(Message::user("test"))],
+        vec![AgentMessage::Llm(LlmMessage::new(Message::user("test")))],
         &mut context,
         &config,
         tx,

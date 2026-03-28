@@ -18,7 +18,7 @@
 //! # Default Implementations
 //!
 //! - `prompt` / `prompt_messages` / `continue_loop` — delegate to the `_with_sender` variants.
-//! - `prompt_with_sender` — wraps text in `AgentMessage::Llm(Message::user(...))`, calls
+//! - `prompt_with_sender` — wraps text in `AgentMessage::Llm(LlmMessage::new(Message::user(...)))`, calls
 //!   `prompt_messages_with_sender`.
 //! - Steering/follow-up queue methods — no-ops. Override to support mid-run interrupts.
 //! - `last_loop_id` — returns `None`. Override if your impl tracks loop identity.
@@ -77,10 +77,10 @@ pub trait Agent: Send {
 
     /// Send a text prompt, streaming events to a caller-provided sender.
     ///
-    /// Default: wraps `text` in `AgentMessage::Llm(Message::user(text))` and calls
+    /// Default: wraps `text` in `AgentMessage::Llm(LlmMessage::new(Message::user(text)))` and calls
     /// `prompt_messages_with_sender`.
     async fn prompt_with_sender(&mut self, text: String, tx: mpsc::UnboundedSender<AgentEvent>) {
-        let msg = AgentMessage::Llm(Message::user(text));
+        let msg = AgentMessage::Llm(LlmMessage::new(Message::user(text)));
         self.prompt_messages_with_sender(vec![msg], tx).await;
     }
 

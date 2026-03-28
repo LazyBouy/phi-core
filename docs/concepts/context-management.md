@@ -92,11 +92,29 @@ For LLM-based summarization (asking the model to summarize old messages), implem
 pub struct ContextConfig {
     pub max_context_tokens: usize,      // Default: 100,000
     pub system_prompt_tokens: usize,    // Default: 4,000
+    pub compaction: CompactionConfig,   // Primary compaction settings
+
+    // Legacy backward-compat fields (prefer CompactionConfig equivalents):
     pub keep_recent: usize,             // Default: 10
-    pub keep_first: usize,              // Default: 2
-    pub tool_output_max_lines: usize,   // Default: 50
+    pub keep_first: usize,             // Default: 2
+    pub tool_output_max_lines: usize,  // Default: 50
+}
+
+pub struct CompactionConfig {
+    // ── WHEN to compact ──
+    pub compact_at_pct: f64,                     // Default: 0.90 (90%)
+    pub compact_budget_threshold_pct: f64,       // Default: 0.05 (5%)
+    pub compaction_scope: CompactionScope,       // FixedCount(3) or TokenBudget
+
+    // ── HOW to compact ──
+    pub keep_first_turns: usize,                 // Default: 2
+    pub keep_recent_turns: usize,                // Default: 10
+    pub max_summary_tokens: usize,               // Default: 2_000 (budget, not per-turn)
+    pub tool_output_max_lines: usize,            // Default: 50
 }
 ```
+
+See [compaction.md](compaction.md) for full details on the non-destructive overlay model.
 
 ## Tiered Compaction
 
