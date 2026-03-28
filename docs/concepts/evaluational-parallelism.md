@@ -280,7 +280,7 @@ the judge proceeds with the compacted context and intact outputs.
 
 If iteration 1 cannot satisfy the budget even at tier 3, the context stays at its most-
 compacted (tier-3) form and branch outputs are now compacted independently through the
-same 3-tier pipeline.
+same tiered compaction pipeline (legacy `compact_messages()`; see [compaction](compaction.md) for the modern CompactionBlock system).
 
 ```
 prior context (tier-3)  +  outputs (tier-1 → 2 → 3)  →  check budget after each tier

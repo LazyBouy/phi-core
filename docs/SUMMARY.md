@@ -20,6 +20,8 @@
 - [Sub-Agents](concepts/sub-agents.md)
 - [State Persistence](concepts/persistence.md)
 - [Lifecycle Callbacks](concepts/callbacks.md)
+- [Sessions](concepts/sessions.md)
+- [Context Compaction](concepts/compaction.md)
 
 # Guides
 
@@ -40,7 +42,14 @@
 - [Built-in Tools](reference/tools.md)
 - [Configuration](reference/configuration.md)
 - [API Reference](reference/api.md)
+- [Glossary & Capabilities](reference/glossary.md)
 
 # Architecture
 
 - [Overview](architecture/overview.md)
+- [Algorithms (Pseudocode)](architecture/algorithms.md)
+
+# Specs
+
+- [Architecture Spec](specs/architecture.md)
+- [Roadmap](specs/roadmap.md)

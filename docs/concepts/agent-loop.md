@@ -200,7 +200,7 @@ let config = AgentLoopConfig {
 
 ## Custom Compaction
 
-By default, when context exceeds the token budget in `ContextConfig`, phi-core runs a 3-level compaction strategy: truncate tool outputs → summarize old turns → drop middle messages. You can replace this with your own `CompactionStrategy`.
+By default, when context exceeds the token budget in `ContextConfig`, phi-core runs a 3-level compaction strategy: truncate tool outputs → summarize old turns → drop middle messages (legacy in-memory path via `compact_messages()`). When a Session is available, the modern system uses non-destructive CompactionBlock overlays — see [compaction](compaction.md). You can replace this with your own `CompactionStrategy`.
 
 > **`CompactionStrategy` vs `BlockCompactionStrategy`**
 >

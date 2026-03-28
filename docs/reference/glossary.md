@@ -8,30 +8,30 @@
 
 | Capability | Source Location |
 |---|---|
-| Multi-turn conversation loop (prompt → LLM → tool call → repeat) | `src/agent_loop.rs` |
+| Multi-turn conversation loop (prompt → LLM → tool call → repeat) | `src/agent_loop/` |
 | Support for 20+ LLM providers via 7 distinct API protocols | `src/provider/` |
-| Real-time event streaming over an async channel | `src/types.rs` (`AgentEvent`), `src/agent_loop.rs` |
-| Parallel, sequential, or batched tool execution | `src/agent_loop.rs:execute_tool_calls()` |
-| Automatic 3-tier context compaction when token budget is exceeded | `src/context.rs:compact_messages()` |
+| Real-time event streaming over an async channel | `src/types/` (`AgentEvent`), `src/agent_loop/` |
+| Parallel, sequential, or batched tool execution | `src/agent_loop/:execute_tool_calls()` |
+| Context compaction via CompactionBlock overlays (legacy: tiered compact_messages()) | `src/context/` — compaction is now modeled via `CompactionBlock` |
 | Built-in coding tools: bash execution, file read/write/edit, directory listing, grep search | `src/tools/` |
 | Sub-agent delegation: run an isolated child agent as a tool | `src/agents/sub_agent.rs` |
 | Model Context Protocol (MCP) client for stdio and HTTP tool servers | `src/mcp/` |
-| AgentSkills system: load instruction sets from directory-based skill files | `src/skills.rs` |
+| AgentSkills system: load instruction sets from directory-based skill files | `src/context/skills.rs` |
 | OpenAPI tool auto-generation from spec files or URLs (optional feature) | `src/openapi/` |
-| JSON serialization of entire conversation history for persistence | `src/types.rs` (all types derive `Serialize`/`Deserialize`) |
-| Exponential-backoff retry for rate-limit and network errors | `src/retry.rs` |
-| Prompt caching hints for compatible providers (Anthropic) | `src/types.rs` (`CacheConfig`) |
-| Extended thinking / reasoning mode | `src/types.rs` (`ThinkingLevel`) |
-| Lifecycle callbacks: before/after each turn, on error | `src/agent_loop.rs` (`BeforeTurnFn`, `AfterTurnFn`, `OnErrorFn`) |
-| Loop-level hooks: setup/teardown around each complete agent run | `src/agent_loop.rs` (`BeforeLoopFn`, `AfterLoopFn`) |
-| Tool-level hooks: intercept each tool execution and streaming update | `src/agent_loop.rs` (`BeforeToolExecutionFn`, `AfterToolExecutionFn`, `BeforeToolExecutionUpdateFn`, `AfterToolExecutionUpdateFn`) |
-| Agent identity: stable `agent_id` / `session_id` / `loop_id` for cross-loop traceability | `src/agents/basic_agent.rs`, `src/types.rs` |
-| Evaluational parallelism: `agent_loop_parallel()` runs N `AgentLoopConfig`s concurrently on the same prompt, evaluates results via the pluggable `EvaluationStrategy` trait, and delivers the best outcome. Built-in strategies: `TransparentEvaluation`, `PickFirstEvaluation`, `TokenEfficientEvaluation`, `ElaborateEvaluation`, `LlmJudgeEvaluation` (with iterative compaction to satisfy judge's comprehension criteria). `ParallelLoopStart`/`ParallelLoopEnd` events bracket execution. Session continuity: `selected_context` feeds directly into `agent_loop_continue()`. | `src/agent_loop.rs` (`agent_loop_parallel`), `src/evaluation.rs`, `src/types.rs` |
-| Continuation kinds: `Rerun` and `Branch` variants for retry vs. explore semantics | `src/types.rs` (`ContinuationKind`), `src/agent_loop.rs` |
-| Input filtering: moderation, PII redaction, injection detection | `src/types.rs` (`InputFilter`) |
-| User steering mid-run: inject messages between tool calls | `src/agents/basic_agent.rs` (steering queue), `src/agent_loop.rs` |
-| Follow-up work queuing: append more tasks after agent would stop | `src/agents/basic_agent.rs` (follow-up queue), `src/agent_loop.rs` |
-| Execution limits: max turns, max total tokens, max duration | `src/context.rs` (`ExecutionLimits`, `ExecutionTracker`) |
+| JSON serialization of entire conversation history for persistence | `src/types/` (all types derive `Serialize`/`Deserialize`) |
+| Exponential-backoff retry for rate-limit and network errors | `src/provider/retry.rs` |
+| Prompt caching hints for compatible providers (Anthropic) | `src/types/` (`CacheConfig`) |
+| Extended thinking / reasoning mode | `src/types/` (`ThinkingLevel`) |
+| Lifecycle callbacks: before/after each turn, on error | `src/agent_loop/` (`BeforeTurnFn`, `AfterTurnFn`, `OnErrorFn`) |
+| Loop-level hooks: setup/teardown around each complete agent run | `src/agent_loop/` (`BeforeLoopFn`, `AfterLoopFn`) |
+| Tool-level hooks: intercept each tool execution and streaming update | `src/agent_loop/` (`BeforeToolExecutionFn`, `AfterToolExecutionFn`, `BeforeToolExecutionUpdateFn`, `AfterToolExecutionUpdateFn`) |
+| Agent identity: stable `agent_id` / `session_id` / `loop_id` for cross-loop traceability | `src/agents/basic_agent.rs`, `src/types/` |
+| Evaluational parallelism: `agent_loop_parallel()` runs N `AgentLoopConfig`s concurrently on the same prompt, evaluates results via the pluggable `EvaluationStrategy` trait, and delivers the best outcome. Built-in strategies: `TransparentEvaluation`, `PickFirstEvaluation`, `TokenEfficientEvaluation`, `ElaborateEvaluation`, `LlmJudgeEvaluation` (with iterative compaction to satisfy judge's comprehension criteria). `ParallelLoopStart`/`ParallelLoopEnd` events bracket execution. Session continuity: `selected_context` feeds directly into `agent_loop_continue()`. | `src/agent_loop/` (`agent_loop_parallel`), `src/agent_loop/evaluation.rs`, `src/types/` |
+| Continuation kinds: `Rerun` and `Branch` variants for retry vs. explore semantics | `src/types/` (`ContinuationKind`), `src/agent_loop/` |
+| Input filtering: moderation, PII redaction, injection detection | `src/types/` (`InputFilter`) |
+| User steering mid-run: inject messages between tool calls | `src/agents/basic_agent.rs` (steering queue), `src/agent_loop/` |
+| Follow-up work queuing: append more tasks after agent would stop | `src/agents/basic_agent.rs` (follow-up queue), `src/agent_loop/` |
+| Execution limits: max turns, max total tokens, max duration | `src/context/` (`ExecutionLimits`, `ExecutionTracker`) |
 
 ## 3. Inputs & Outputs
 
@@ -98,7 +98,7 @@ A child instance of the agent loop spawned internally when a `SubAgentTool` is c
 - **Single event consumer per run.** `agent_loop()` returns a single `UnboundedReceiver<AgentEvent>`. Fan-out to multiple consumers requires application-level bridging.
 - **No agent-to-agent networking.** Sub-agents run in-process only. No remote agent delegation.
 - **No persistent storage.** Conversation state is held in memory. Serialization to disk is the caller's responsibility (the library provides `serialize`/`deserialize` helpers).
-- **No token counting via external libraries.** Token estimation uses the fast heuristic of 4 characters per token (`src/context.rs:estimate_tokens()`). Precision counting (via tiktoken etc.) is a non-goal.
+- **No token counting via external libraries.** Token estimation uses the fast heuristic of 4 characters per token (`src/context/:estimate_tokens()`). Precision counting (via tiktoken etc.) is a non-goal.
 - **No multi-modal generation.** Images can be sent *to* the model (as `Content::Image`), but image *generation* is not supported.
 - **No structured output / JSON mode.** The library passes raw messages; enforcing structured output is the caller's responsibility via system prompt.
 - **Skipped tools on steering.** When steering messages arrive mid-batch, remaining tool calls in that batch are skipped with an error result — their outputs are never computed. This is a documented behavior, not a bug.
@@ -108,24 +108,25 @@ A child instance of the agent loop spawned internally when a `SubAgentTool` is c
 | Term | Definition |
 |---|---|
 | **Agent** | The runtime interface trait (`src/agents/agent.rs`). Programs against this trait to remain independent of the specific implementation. `BasicAgent` (`src/agents/basic_agent.rs`) is the default in-memory implementation: owns conversation history, tools, `ModelConfig` (provider identity + auth + cost), and configuration. Construction: `BasicAgent::new(ModelConfig::anthropic(...))`. The application-facing entry point. |
-| **Agent Loop** | The recursive execution cycle (`src/agent_loop.rs`) that calls the LLM, processes tool calls, checks steering, and repeats until the LLM stops or limits are hit. |
+| **Agent Loop** | The recursive execution cycle (`src/agent_loop/`) that calls the LLM, processes tool calls, checks steering, and repeats until the LLM stops or limits are hit. |
 | **Turn** | One complete LLM call plus the resulting tool executions. Bounded by `TurnStart`/`TurnEnd` events. |
 | **Steering** | A `Vec<AgentMessage>` injected into the running loop between tool executions. Used to redirect the agent mid-task without restarting it. |
 | **Follow-up** | A `Vec<AgentMessage>` queued to be injected after the agent would naturally stop. Extends the run without creating a new `agent_loop()` call. |
 | **ModelConfig** | The single, complete description of a provider connection (`src/provider/model.rs`). Fields: `id` (model name sent to API), `name` (display label), `api: ApiProtocol` (wire-protocol dispatch key), `provider` (logging label), `base_url`, `api_key`, `cost: CostConfig`, `headers`, `compat: Option<OpenAiCompat>`. Factory methods: `anthropic()`, `openai()`, `local()`, `google()`, `openrouter()`. Passed to `BasicAgent::new()`, `SubAgentTool::new()`, and `AgentLoopConfig.model_config`. |
 | **ApiProtocol** | Enum that selects which HTTP wire format to use: `AnthropicMessages`, `OpenAiCompletions`, `OpenAiResponses`, `AzureOpenAiResponses`, `GoogleGenerativeAi`, `GoogleVertex`, `BedrockConverseStream`. Used by `ProviderRegistry` as a dispatch key. |
 | **StreamProvider** | The trait (`src/provider/traits.rs`) that any LLM backend must implement. Has a single method `stream()` that takes a `StreamConfig` and sends `StreamEvent`s. |
-| **AgentTool** | The trait (`src/types.rs`) that any executable tool must implement. Methods: `name()`, `label()`, `description()`, `parameters_schema()`, `execute()`. |
+| **AgentTool** | The trait (`src/types/`) that any executable tool must implement. Methods: `name()`, `label()`, `description()`, `parameters_schema()`, `execute()`. |
 | **ToolContext** | A struct passed to `AgentTool::execute()` containing the call ID, name, cancellation token, and optional progress callbacks. |
 | **AgentEvent** | The streaming event enum emitted to the consumer during a run. Covers agent lifecycle, turn lifecycle, message streaming, and tool execution. |
 | **StreamDelta** | A partial content update emitted during LLM streaming: `Text`, `Thinking`, or `ToolCallDelta`. |
 | **StopReason** | Why the LLM ended its response: `Stop` (natural end), `Length` (token limit), `ToolUse` (returned tool calls), `Error` (failure), `Aborted` (cancellation). |
-| **AgentMessage** | The top-level message enum stored in the conversation history. Either `Llm(Message)` (sent to the LLM) or `Extension(ExtensionMessage)` (app-only metadata). |
+| **AgentMessage** | The top-level message enum stored in the conversation history. Either `Llm(LlmMessage)` (sent to the LLM; LlmMessage wraps Message + optional TurnId for turn tracking) or `Extension(ExtensionMessage)` (app-only metadata). |
 | **Message** | The LLM-protocol message enum: `User`, `Assistant`, or `ToolResult`. |
 | **Content** | A single content block within a message: `Text`, `Image` (base64), `Thinking`, or `ToolCall`. |
 | **Usage** | Token count metadata returned with each `Assistant` message: `input`, `output`, `cache_read`, `cache_write`, `total_tokens`. |
 | **ContextConfig** | Configuration for the automatic context compaction: token budget, lines-to-keep per tool output, number of recent/first messages to preserve. |
 | **CompactionStrategy** | A trait for customizing how messages are compacted when the token budget is exceeded. The default implementation uses 3 tiers. |
+| **CompactionBlock** | The model used by the compaction system to represent compacted message regions. Replaces the previous inline approach in `compact_messages()` with a structured block-based representation. |
 | **ExecutionLimits** | Hard caps on agent execution: `max_turns`, `max_total_tokens`, `max_duration`. When exceeded, the loop appends a system message and stops. |
 | **ToolExecutionStrategy** | How multiple tool calls from one LLM response are dispatched: `Sequential`, `Parallel` (default), or `Batched { size }`. |
 | **CacheConfig** / **CacheStrategy** | Controls prompt caching breakpoint placement for providers that support it (Anthropic). Strategies: `Auto`, `Disabled`, `Manual`. |

@@ -1,6 +1,6 @@
 # Implementation Roadmap
 
-> Generated from: `overview.md`, `architecture.md`, `pseudocode.md`
+> Generated from: `../reference/glossary.md`, `../specs/architecture.md`, `../architecture/algorithms.md`
 > Last updated: 2026-03-17
 > Paradigm: Language-agnostic / Implementation-independent
 
@@ -31,7 +31,7 @@ can be instantiated without error. No LLM call is required to pass Level 1.
   - Depends on: REQ-001, REQ-005, REQ-006
   - Definition of Done: All three variants instantiate; serialization preserves the `role` field with values `"user"`, `"assistant"`, `"toolResult"`.
 
-- [ ] **REQ-003:** Define `AgentMessage` as an untagged enum wrapping `Llm(Message)` and `Extension(ExtensionMessage)`. *(Source: [AR])*
+- [ ] **REQ-003:** Define `AgentMessage` as an untagged enum wrapping `Llm(LlmMessage)` and `Extension(ExtensionMessage)`. *(Source: [AR])*
   - Depends on: REQ-002, REQ-004
   - Definition of Done: Both variants serialize/deserialize correctly; an `Extension` variant round-trips without loss.
 
@@ -170,7 +170,7 @@ can be instantiated without error. No LLM call is required to pass Level 1.
 > well-formed inputs. An agent can accept a prompt, call an LLM, execute
 > tool calls, and return a final response.
 
-**Completion Criteria:** Every primary use case from `overview.md` executes
+**Completion Criteria:** Every primary use case from `../reference/glossary.md` executes
 successfully with valid inputs and a real (or mock) provider: single-turn text
 response, multi-turn tool call cycle, message persistence round-trip, and agent
 reset. The built-in coding tools all execute on valid inputs.
@@ -239,7 +239,7 @@ reset. The built-in coding tools all execute on valid inputs.
   - Depends on: REQ-005, REQ-040, REQ-041
   - Definition of Done: Each stop signal string maps to exactly one `StopReason` variant.
 
-- [ ] **REQ-044:** Filter `Extension` messages out of `AgentMessage` history before building `StreamConfig.messages`. Only `Llm(Message)` variants are sent to the LLM. *(Source: [AR])*
+- [ ] **REQ-044:** Filter `Extension` messages out of `AgentMessage` history before building `StreamConfig.messages`. Only `Llm(LlmMessage)` variants are sent to the LLM (note: `LlmMessage` wraps `Message` + `Option<TurnId>`). *(Source: [AR])*
   - Depends on: REQ-003, REQ-015
   - Definition of Done: An `AgentMessage::Extension` present in `context.messages` does not appear in the `StreamConfig` sent to the provider.
 
@@ -359,7 +359,7 @@ reset. The built-in coding tools all execute on valid inputs.
 > Every `[invariant]` and `ERROR` branch from the pseudocode is implemented.
 
 **Completion Criteria:** No unhandled exception can be triggered by a known
-class of bad input. All error paths from `pseudocode.md` are covered:
+class of bad input. All error paths from `../architecture/algorithms.md` are covered:
 provider failures, tool errors, context overflow, execution limits,
 filter rejections, and cancellation.
 
@@ -768,7 +768,7 @@ boundaries. The system is configurable for production use.
   - Depends on: REQ-039
   - Definition of Done: A `transform_context` hook that adds a prefix message causes that message to appear in every LLM call.
 
-- [ ] **REQ-146:** Implement `Agent::with_compaction_strategy(strategy)` builder; when set, use the custom `CompactionStrategy` instead of the default 3-tier cascade. *(Source: [AR])*
+- [ ] **REQ-146:** Implement `Agent::with_compaction_strategy(strategy)` builder; when set, use the custom `CompactionStrategy` instead of the default tiered cascade. *(Source: [AR])*
   - Depends on: REQ-023, REQ-060
   - Definition of Done: A custom strategy that always returns an empty list causes the LLM to be called with no history.
 
@@ -864,7 +864,7 @@ boundaries. The system is configurable for production use.
   - Depends on: REQ-198
   - Definition of Done: Custom implementations compile by importing from `crate::types` or `crate::evaluation`.
 
-- [x] **REQ-200:** Create `src/evaluation.rs` with five built-in `EvaluationStrategy` implementations: `TransparentEvaluation` (single-branch pass-through), `PickFirstEvaluation` (always index 0), `TokenEfficientEvaluation` (lowest `total_tokens`), `ElaborateEvaluation` (highest `total_tokens`), `LlmJudgeEvaluation { judge_config, system_prompt }`. *(Implemented)*
+- [x] **REQ-200:** Create `src/agent_loop/evaluation.rs` with five built-in `EvaluationStrategy` implementations: `TransparentEvaluation` (single-branch pass-through), `PickFirstEvaluation` (always index 0), `TokenEfficientEvaluation` (lowest `total_tokens`), `ElaborateEvaluation` (highest `total_tokens`), `LlmJudgeEvaluation { judge_config, system_prompt }`. *(Implemented)*
   - Depends on: REQ-199
   - Definition of Done: All five strategies implement `EvaluationStrategy`; unit tests pass for each.
 
@@ -924,7 +924,7 @@ meet or exceed documented expectations.
   - Depends on: REQ-007, REQ-114
   - Definition of Done: All `AgentEvent` variants carry `loop_id`; events from interleaved parallel branches can be unambiguously attributed to the correct `LoopRecord`.
 
-- [x] **REQ-211:** Define `Session`, `LoopRecord`, `LoopEvent`, and `LoopConfigSnapshot` types in `src/session.rs`. `Session` contains an ordered `Vec<LoopRecord>`; `LoopRecord` holds identity fields (`loop_id`, `session_id`, `agent_id`), timing, status, messages (from `AgentEnd.messages`), usage, events, and tree links (`children_loop_ids`, `parent_loop_id`). `LoopConfigSnapshot` stores `model`, `provider`, `config_id`. *(Source: [AR])*
+- [x] **REQ-211:** Define `Session`, `LoopRecord`, `LoopEvent`, and `LoopConfigSnapshot` types in `src/session/`. `Session` contains an ordered `Vec<LoopRecord>`; `LoopRecord` holds identity fields (`loop_id`, `session_id`, `agent_id`), timing, status, messages (from `AgentEnd.messages`), usage, events, and tree links (`children_loop_ids`, `parent_loop_id`). `LoopConfigSnapshot` stores `model`, `provider`, `config_id`. *(Source: [AR])*
   - Depends on: REQ-210
   - Definition of Done: All types serialize/deserialize (JSON round-trip lossless); `Session.total_usage()` sums `LoopRecord.usage` across all loops.
 
@@ -960,7 +960,7 @@ meet or exceed documented expectations.
   - Depends on: REQ-211 – REQ-218
   - Definition of Done: `docs/concepts/sessions.md` exists; covers all listed sections; code examples are syntactically valid Rust.
 
-- [x] **REQ-220:** Update `spec/architecture.md`: add `SessionStore` component section, add `SessionStore` to dependency graph, update `AgentEvent` variant table to document `loop_id: String` on all applicable variants, add `Session`/`LoopRecord`/`SessionRecorder` data model entries, add `new_session()` / `check_and_rotate()` / `last_active_at` to BasicAgent interface table. Update `spec/roadmap.md` with this milestone. *(Source: [AR])*
+- [x] **REQ-220:** Update `docs/specs/architecture.md`: add `SessionStore` component section, add `SessionStore` to dependency graph, update `AgentEvent` variant table to document `loop_id: String` on all applicable variants, add `Session`/`LoopRecord`/`SessionRecorder` data model entries, add `new_session()` / `check_and_rotate()` / `last_active_at` to BasicAgent interface table. Update `docs/specs/roadmap.md` with this milestone. *(Source: [AR])*
   - Depends on: REQ-219
   - Definition of Done: Both spec files updated; all new types and methods are documented.
 
@@ -1108,7 +1108,7 @@ runbooks cover all known failure modes.
 
 ### Milestone 6.3 — Public API Contract and Documentation
 
-- [ ] **REQ-173:** Publish complete API reference documentation for all public types, traits, and functions with usage examples for each primary use case from `overview.md`. *(Source: [OV])*
+- [ ] **REQ-173:** Publish complete API reference documentation for all public types, traits, and functions with usage examples for each primary use case from `../reference/glossary.md`. *(Source: [OV])*
   - Depends on: REQ-001 through REQ-163
   - Definition of Done: A developer with no prior context can build a working coding assistant and CLI REPL from the docs alone.
 

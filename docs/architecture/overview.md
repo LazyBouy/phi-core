@@ -1,5 +1,9 @@
 # Architecture Overview
 
+> For detailed component specifications, trait signatures, sequence diagrams, and data models,
+> see the full [Architecture Spec](../specs/architecture.md).
+> For formal algorithm descriptions, see [Algorithms](algorithms.md).
+
 ## Layered Design
 
 phi-core is organized as three conceptual layers within a single crate. Dependencies flow strictly downward — upper layers use lower layers, never the reverse.
@@ -23,7 +27,7 @@ phi-core is organized as three conceptual layers within a single crate. Dependen
 
 The pure agent loop. No opinions about LLMs, no built-in tools. Just the control flow.
 
-**Modules:** `types/`, `agent_loop.rs`, `provider/traits.rs`
+**Modules:** `types/`, `agent_loop/`, `provider/traits.rs`
 
 **Owns:**
 - `agent_loop()` / `agent_loop_continue()` — the loop itself
@@ -41,7 +45,7 @@ The pure agent loop. No opinions about LLMs, no built-in tools. Just the control
 
 Batteries-included single-agent layer. Most users interact with this.
 
-**Modules:** `agents/`, `context.rs`, `provider/*.rs`, `tools/*.rs`, `mcp/*.rs`
+**Modules:** `agents/`, `context/`, `provider/*.rs`, `tools/*.rs`, `mcp/*.rs`
 
 **Adds on top of Layer 1:**
 - Concrete providers — Anthropic, OpenAI-compat, Google, Azure, Bedrock, Vertex
@@ -92,14 +96,14 @@ phi-core/
 │   │   ├── event.rs            # AgentEvent enum
 │   │   ├── context.rs          # AgentContext
 │   │   └── parallel.rs         # ToolExecutionStrategy
-│   ├── agent_loop.rs           # Core loop: prompt → LLM → tools → repeat
+│   ├── agent_loop/             # Core loop: prompt → LLM → tools → repeat
 │   │
 │   │── Layer 2: Agent + Providers ─────────────
 │   ├── agents/
 │   │   ├── agent.rs            # Agent trait (runtime interface)
 │   │   ├── basic_agent.rs      # BasicAgent struct (default in-memory impl)
 │   │   └── sub_agent.rs        # SubAgentTool (child agent_loop as a tool)
-│   ├── context.rs              # Token estimation, compaction, limits
+│   ├── context/                # Token estimation, compaction, limits
 │   ├── provider/
 │   │   ├── retry.rs            # Retry with exponential backoff
 │   │   ├── traits.rs           # StreamProvider trait, StreamEvent, ProviderError

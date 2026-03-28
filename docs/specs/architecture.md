@@ -35,7 +35,7 @@
 | `last_loop_id` | `Option<String>` | Most recent loop; cleared on `new_session()` |
 | `last_active_at` | `Option<DateTime<Utc>>` | Timestamp of last `prompt_*` call; used by `check_and_rotate()` |
 
-### AgentLoop (`src/agent_loop.rs`)
+### AgentLoop (`src/agent_loop/`)
 **Responsibility:** The core execution engine. Manages the turn loop, tool dispatch, steering injection, follow-up processing, and lifecycle event emission.
 **Public interface:**
 - `agent_loop(prompts, context, config, tx, cancel)` — Start an agent run from new prompt messages, applying input filters, emitting lifecycle events, and returning all new messages produced.
@@ -43,11 +43,11 @@
 - `agent_loop_parallel(prompts, base_context, configs, strategy, tx, cancel) -> ParallelLoopResult` — Run N `AgentLoopConfig`s concurrently and evaluate results via `EvaluationStrategy`. When `prompts` is non-empty, each branch uses `agent_loop`; when `prompts` is empty, each branch uses `agent_loop_continue` (the user query is already the last message in `base_context`). `base_context` is cloned per branch (tools `Arc`-shared; message history deep-copied). All branches share the same `session_id`; each gets a distinct `loop_id`. `ParallelLoopOutcome.original_context_len` marks the base/branch message boundary. Emits `ParallelLoopStart`/`ParallelLoopEnd` events. `selected_context` feeds into `agent_loop_continue()` for normal session resumption.
 - `derive_config_segment(config) -> String` *(pub crate)* — Derives the stable `{config_segment}` portion of a `loop_id` from `config.config_id` or provider/model/thinking fields.
 
-### EvaluationLoop (`src/evaluation.rs`)
-**Responsibility:** Pluggable strategy for selecting among parallel loop outcomes. Decoupled from `agent_loop.rs` to allow custom implementations without a circular dependency (trait is defined in `types.rs`; implementations live here).
+### EvaluationLoop (`src/agent_loop/evaluation.rs`)
+**Responsibility:** Pluggable strategy for selecting among parallel loop outcomes. Decoupled from `src/agent_loop/` to allow custom implementations without a circular dependency (trait is defined in `src/types/`; implementations live here).
 **Public interface:**
-- `EvaluationStrategy` *(trait, defined in `types.rs`)* — `evaluate(prompts, outcomes, tx, cancel) -> (EvaluationDecision, Usage)`
-- `EvaluationDecision` *(enum, defined in `types.rs`)* — `Select(usize)` — 0-based index of the winning outcome.
+- `EvaluationStrategy` *(trait, defined in `src/types/`)* — `evaluate(prompts, outcomes, tx, cancel) -> (EvaluationDecision, Usage)`
+- `EvaluationDecision` *(enum, defined in `src/types/`)* — `Select(usize)` — 0-based index of the winning outcome.
 - `ParallelLoopOutcome.original_context_len: usize` — Number of messages in the cloned context at dispatch time. Allows strategies to split "original context" from "new branch output" messages without separate bookkeeping. Identical across all outcomes (same base context); `outcomes[0]` is the idiomatic source.
 - `TransparentEvaluation` — Single-branch pass-through; panics if `> 1` outcome.
 - `PickFirstEvaluation` — Always selects index 0. Useful for testing.
@@ -55,12 +55,12 @@
 - `ElaborateEvaluation` — Selects the outcome with the highest total token usage.
 - `LlmJudgeEvaluation { judge_config, system_prompt }` — Runs a separate LLM call to select the best branch. Supports both `agent_loop` mode (query from `prompts`) and `agent_loop_continue` mode (query extracted from last `Message::User` in `context.messages[..original_context_len]`). Includes prior conversation context in the judge prompt. Applies **2-iteration compaction**: Iteration 1 compacts only prior context (3 tiers: tail-truncate → paragraph-summary → hard char limit), keeping outputs intact; Iteration 2 (if needed) compacts both context and outputs independently through the same tier pipeline. Budget derived from `judge_config.context_config.max_context_tokens`. Emits a `ProgressMessage` warning if comprehension criteria cannot be satisfied after iteration 2.
 
-### ContextManager (`src/context.rs`)
+### ContextManager (`src/context/`)
 **Responsibility:** Token estimation, tiered context compaction, and execution limit tracking.
 **Public interface:**
 - `estimate_tokens(text)` — Rough token count heuristic: ~4 characters per token.
 - `compact_messages(messages, config)` — Reduce message list to fit token budget using a tiered strategy: truncate tool outputs → summarize old turns → drop middle messages.
-- `CompactionStrategy` *(trait)* — Interface for custom compaction logic; default implementation uses the 3-tier cascade.
+- `CompactionStrategy` *(trait)* — Interface for custom compaction logic; default implementation uses the tiered cascade (legacy `compact_messages()`; modern: CompactionBlock overlays).
 - `ContextTracker` — Tracks context window usage by combining provider-reported token counts with local estimates for recent messages.
 - `ExecutionTracker` — Tracks turns, cumulative tokens, and elapsed time against configured limits; signals when any limit is exceeded.
 - `ContextConfig` — Tuning knobs for compaction: token budget, system-prompt overhead, head/tail message preservation counts, per-tool-output line limit.
@@ -98,7 +98,7 @@
 - `SubAgentTool::with_provider_override(provider)` — Bypass `ProviderRegistry` dispatch; used in tests to inject `MockProvider`.
 - `SubAgentTool::with_parent_loop_id(loop_id)` — Supply the parent loop's `loop_id` so the child `AgentStart` event carries `parent_loop_id`, enabling ancestry tracing across the event stream.
 
-### SkillSystem (`src/skills.rs`)
+### SkillSystem (`src/context/skills.rs`)
 **Responsibility:** Loads `SKILL.md` files from one or more directories, parses YAML frontmatter, and formats them as an XML index injected into the system prompt.
 **Public interface:**
 - `SkillSet::load(dirs)` — Load skills from multiple directories; later entries override earlier ones on name conflict.
@@ -121,7 +121,7 @@
 - `from_str(spec, config, filter)` — Parse an OpenAPI spec from an in-memory string (auto-detects JSON vs YAML) and return one tool adapter per matching operation.
 **Availability:** Only compiled when the `openapi` feature flag is enabled.
 
-### SessionStore (`src/session.rs`)
+### SessionStore (`src/session/`)
 **Responsibility:** Persistent session layer. Records every `AgentEvent` into a structured tree of `Session` + `LoopRecord` objects, and provides load/save/list/delete functions for flat JSON-file persistence.
 **Public interface:**
 - `SessionRecorder::new(config)` — Create a recorder; call `on_event(event)` for every event on the agent's `tx` channel.
@@ -137,7 +137,7 @@
 - `delete_session(session_id, dir)` — Remove `{dir}/{session_id}.json`.
 **File format:** Pretty-printed JSON. Flat directory — one file per session, no index.
 
-### RetryEngine (`src/retry.rs`)
+### RetryEngine (`src/provider/retry.rs`)
 **Responsibility:** Computes exponential-backoff delay with ±20% jitter. Classifies which errors are retryable.
 **Public interface:**
 - `RetryConfig` — Parameters for automatic retry: initial delay, backoff multiplier, max delay, max attempt count.
@@ -152,11 +152,11 @@
 ```mermaid
 graph TD
     App["Application Code"] --> Agent
-    Agent --> AgentLoop["AgentLoop\nagent_loop.rs"]
-    AgentLoop --> ContextManager["ContextManager\ncontext.rs"]
+    Agent --> AgentLoop["AgentLoop\nagent_loop/"]
+    AgentLoop --> ContextManager["ContextManager\ncontext/"]
     AgentLoop --> ProviderRegistry["Provider\ntraits.rs / registry.rs"]
     AgentLoop --> ToolSystem["ToolSystem\ntools/"]
-    AgentLoop --> RetryEngine["RetryEngine\nretry.rs"]
+    AgentLoop --> RetryEngine["RetryEngine\nprovider/retry.rs"]
     ProviderRegistry --> Anthropic["AnthropicProvider"]
     ProviderRegistry --> OpenAI["OpenAiCompatProvider\n(15+ backends)"]
     ProviderRegistry --> OpenAIResp["OpenAiResponsesProvider"]
@@ -165,18 +165,18 @@ graph TD
     ProviderRegistry --> Vertex["GoogleVertexProvider"]
     ProviderRegistry --> Bedrock["BedrockProvider"]
     ProviderRegistry --> Mock["MockProvider\n(tests)"]
-    Agent --> SkillSystem["SkillSystem\nskills.rs"]
+    Agent --> SkillSystem["SkillSystem\ncontext/skills.rs"]
     Agent --> McpClient["McpClient\nmcp/"]
     Agent --> OpenApiAdapter["OpenApiAdapter\nopenapi/ (feature)"]
     McpClient --> ToolSystem
     OpenApiAdapter --> ToolSystem
     SubAgent["SubAgentTool\nsub_agent.rs"] --> AgentLoop
     ToolSystem --> SubAgent
-    Types["types.rs\n(shared types)"] --> Agent
+    Types["types/\n(shared types)"] --> Agent
     Types --> AgentLoop
     Types --> ToolSystem
     Types --> ProviderRegistry
-    SessionStore["SessionStore\nsession.rs"] --> Types
+    SessionStore["SessionStore\nsession/"] --> Types
     App --> SessionStore
 ```
 
@@ -332,7 +332,7 @@ Lifecycle: User messages are created by the caller. Assistant messages are
 ### AgentMessage
 ```
 Entity: AgentMessage (enum, untagged)
-  Variant Llm(Message)          [sent to the LLM; user/assistant/toolResult roles]
+  Variant Llm(LlmMessage)       [sent to the LLM; user/assistant/toolResult roles; LlmMessage wraps Message + Option<TurnId>]
   Variant Extension(ExtensionMessage)  [not sent to LLM; app-only metadata]
 
 Note: stored in Agent.messages and AgentContext.messages
@@ -858,7 +858,7 @@ All fields on `Agent`:
 | `after_turn` | `Option<AfterTurnFn>` | Signature: `fn(&[AgentMessage], &Usage)` |
 | `on_error` | `Option<OnErrorFn>` | Signature: `fn(&str)` |
 | `input_filters` | `Vec<Arc<dyn InputFilter>>` | Applied in order before LLM call |
-| `compaction_strategy` | `Option<Arc<dyn CompactionStrategy>>` | Overrides default 3-tier compaction |
+| `compaction_strategy` | `Option<Arc<dyn CompactionStrategy>>` | Overrides default tiered compaction |
 | `cancel` | `Option<CancellationToken>` | Created when `prompt()` starts, consumed by `abort()` |
 | `is_streaming` | `bool` | Set true on `prompt()` entry, false on exit |
 | `agent_id` | `String` | UUID v4 generated once at `Agent::new()`; stable for the Agent's lifetime. Injected into every `AgentContext` built by this agent. |

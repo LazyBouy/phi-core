@@ -55,7 +55,7 @@ The loop: stream assistant response → extract tool calls → execute tools (pa
 
 - **`Content`** — enum: `Text`, `Image`, `Thinking`, `ToolCall`
 - **`Message`** — enum: `User`, `Assistant`, `ToolResult` — each variant carries its own fields
-- **`AgentMessage`** — `Llm(Message)` | `Extension(ExtensionMessage)` — extension messages (`role`, `kind`, `data`) don't enter LLM context
+- **AgentMessage** — Llm(LlmMessage) | Extension(ExtensionMessage) — LlmMessage wraps Message + optional TurnId for turn tracking; extension messages don't enter LLM context
 - **`AgentEvent`** — full event stream emitted to callers: `AgentStart`, `TurnStart`, `MessageStart/Update/End`, `ToolExecutionStart/Update/End`, `ProgressMessage`, `InputRejected`, `TurnEnd`, `AgentEnd`
 - **`StopReason`** — `Stop`, `Length`, `ToolUse`, `Error`, `Aborted`
 - **`Usage`** — token metrics per turn or accumulated: `input`, `output`, `reasoning` (subset of `output`; non-zero for OpenAI o-series only), `cache_read`, `cache_write`, `total_tokens`. `estimated_cost(&CostConfig)` computes dollar cost. Carried directly on `TurnEnd.usage` and `AgentEnd.usage` (no message destructuring needed).
@@ -65,7 +65,7 @@ The loop: stream assistant response → extract tool calls → execute tools (pa
 The `context` module is split into sub-modules: `token`, `config`, `tracker`, `compaction`, `strategy`, `compact_messages`, `execution`, `orchestration`, `tests`.
 
 - **`ContextTracker`** — hybrid real-usage + estimation for token tracking
-- **`compact_messages()`** — tiered compaction: Level 1 (truncate tool outputs) → Level 2 (summarize old turns) → Level 3 (drop middle turns)
+- **compact_messages()** — legacy in-memory compaction (Level 1/2/3). The modern system uses CompactionBlock overlays via BlockCompactionStrategy — see concepts/compaction.md
 - **`ExecutionLimits`/`ExecutionTracker`** — max turns (50), max tokens (1M), max duration (10 min). Cost tracking is automatic: `Usage::estimated_cost(&model_config.cost)` fires after each turn when rates are non-zero (set `model_config.cost` fields)
 
 ### Tool Execution (`agent_loop/`)

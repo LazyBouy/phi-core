@@ -29,7 +29,7 @@ CONVENTIONS:
 
 ---
 
-### `agent_loop` *(src/agent_loop.rs)*
+### `agent_loop` *(src/agent_loop/)*
 
 **Purpose:** Start a fresh agent run from new prompt messages.
 **Preconditions:** `prompts` is non-empty; `context.messages` may contain prior history.
@@ -122,7 +122,7 @@ END FUNCTION
 
 ---
 
-### `agent_loop_continue` *(src/agent_loop.rs)*
+### `agent_loop_continue` *(src/agent_loop/)*
 
 **Purpose:** Resume an agent run from existing context (no new prompts, continue from last user/tool-result message).
 **Preconditions:** `context.messages` is non-empty; last message is NOT an assistant message; `context.agent_id` and `context.session_id` are `Some`.
@@ -175,7 +175,7 @@ END FUNCTION
 
 ---
 
-### `run_loop` *(src/agent_loop.rs)*
+### `run_loop` *(src/agent_loop/)*
 
 **Purpose:** The shared inner logic for both `agent_loop` and `agent_loop_continue`. Handles the outer follow-up loop and the inner turn-by-tool loop.
 **Preconditions:** Context contains at least one user message.
@@ -350,7 +350,7 @@ END FUNCTION
 
 ---
 
-### `stream_assistant_response` *(src/agent_loop.rs)*
+### `stream_assistant_response` *(src/agent_loop/)*
 
 **Purpose:** Call the LLM with the current context, stream events to the channel, and return the final `Message`. Includes retry logic for transient errors.
 **Preconditions:** `context.messages` has at least one user message.
@@ -470,7 +470,7 @@ END FUNCTION
 
 ---
 
-### `execute_tool_calls` *(src/agent_loop.rs)*
+### `execute_tool_calls` *(src/agent_loop/)*
 
 **Purpose:** Dispatch a list of tool calls using the configured execution strategy.
 **Preconditions:** `tool_calls` is non-empty.
@@ -526,7 +526,7 @@ END FUNCTION
 
 ---
 
-### `execute_sequential` *(src/agent_loop.rs)*
+### `execute_sequential` *(src/agent_loop/)*
 
 **Purpose:** Execute tool calls one at a time, checking for steering between each.
 
@@ -562,7 +562,7 @@ END FUNCTION
 
 ---
 
-### `execute_batch` *(src/agent_loop.rs)*
+### `execute_batch` *(src/agent_loop/)*
 
 **Purpose:** Execute all tool calls in a batch concurrently, then check for steering.
 
@@ -594,7 +594,7 @@ END FUNCTION
 
 ---
 
-### `execute_single_tool` *(src/agent_loop.rs)*
+### `execute_single_tool` *(src/agent_loop/)*
 
 **Purpose:** Execute one tool call, emitting progress events and returning the result as a `ToolResult` message.
 
@@ -682,9 +682,13 @@ END FUNCTION
 
 ---
 
-### `compact_messages` *(src/context.rs)*
+### `compact_messages` *(src/context/)*
 
-**Purpose:** Reduce context size using a 3-tier strategy until messages fit the token budget.
+> **Note:** The algorithm below describes the legacy in-memory compaction (`compact_messages()`).
+> The current system uses a non-destructive overlay model via `CompactionBlock` / `BlockCompactionStrategy`.
+> See [compaction concept](../concepts/compaction.md) for the current design.
+
+**Purpose:** Reduce context size using a 3-level strategy (Level 1 → 2 → 3) until messages fit the token budget.
 **Preconditions:** `messages` is a complete conversation history.
 **Postconditions:** Returns a subset/summary of messages with `total_tokens(result) <= budget`.
 
@@ -721,7 +725,11 @@ END FUNCTION
 
 ---
 
-### `level1_truncate_tool_outputs` *(src/context.rs)*
+### `level1_truncate_tool_outputs` *(src/context/)*
+
+> **Note:** The algorithm below describes the legacy in-memory compaction (`compact_messages()`).
+> The current system uses a non-destructive overlay model via `CompactionBlock` / `BlockCompactionStrategy`.
+> See [compaction concept](../concepts/compaction.md) for the current design.
 
 **Purpose:** Truncate long tool output text to head + tail, preserving message structure.
 
@@ -771,7 +779,11 @@ END FUNCTION
 
 ---
 
-### `level2_summarize_old_turns` *(src/context.rs)*
+### `level2_summarize_old_turns` *(src/context/)*
+
+> **Note:** The algorithm below describes the legacy in-memory compaction (`compact_messages()`).
+> The current system uses a non-destructive overlay model via `CompactionBlock` / `BlockCompactionStrategy`.
+> See [compaction concept](../concepts/compaction.md) for the current design.
 
 **Purpose:** Keep the most recent `keep_recent` messages in full; replace older assistant-plus-tool-result groups with one-line summaries.
 
@@ -834,7 +846,11 @@ END FUNCTION
 
 ---
 
-### `level3_drop_middle` *(src/context.rs)*
+### `level3_drop_middle` *(src/context/)*
+
+> **Note:** The algorithm below describes the legacy in-memory compaction (`compact_messages()`).
+> The current system uses a non-destructive overlay model via `CompactionBlock` / `BlockCompactionStrategy`.
+> See [compaction concept](../concepts/compaction.md) for the current design.
 
 **Purpose:** Keep the first `keep_first` and last `keep_recent` messages; drop everything in between, inserting a marker.
 
@@ -890,7 +906,7 @@ END FUNCTION
 
 ---
 
-### `estimate_tokens` *(src/context.rs)*
+### `estimate_tokens` *(src/context/)*
 
 **Purpose:** Fast heuristic token count for a text string.
 
@@ -931,7 +947,7 @@ END FUNCTION
 
 ---
 
-### `delay_for_attempt` *(src/retry.rs)*
+### `delay_for_attempt` *(src/provider/retry.rs)*
 
 **Purpose:** Compute the sleep duration before a retry attempt using exponential backoff with jitter.
 
@@ -1244,7 +1260,7 @@ END FUNCTION
 
 ---
 
-### `SkillSet::format_for_prompt` *(src/skills.rs)*
+### `SkillSet::format_for_prompt` *(src/context/skills.rs)*
 
 **Purpose:** Format all loaded skills as an XML index for injection into the system prompt.
 **Standard:** Conforms to the AgentSkills open standard (agentskills.io/integrate-skills).
@@ -1284,7 +1300,7 @@ END FUNCTION
 // </available_skills>
 ```
 
-### `SkillSet::load` *(src/skills.rs)*
+### `SkillSet::load` *(src/context/skills.rs)*
 
 **Purpose:** Load skills from one or more directories. Later directories override earlier ones on name collision.
 
@@ -2119,4 +2135,3 @@ FUNCTION OpenApiToolAdapter::execute(params: JSON, ctx: ToolContext) -> Result<T
 
 END FUNCTION
 ```
-

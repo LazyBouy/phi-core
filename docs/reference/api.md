@@ -193,4 +193,6 @@ pub use context::{CompactionStrategy, DefaultCompaction};
 pub use retry::RetryConfig;
 pub use skills::SkillSet;
 pub use types::*;  // Message, Content, AgentMessage, AgentEvent, etc.
+                    // Note: AgentMessage::Llm wraps LlmMessage (which contains
+                    // Message + Option<TurnId>), not Message directly.
 ```

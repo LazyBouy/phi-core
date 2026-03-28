@@ -175,7 +175,7 @@ format, `max_tokens` field name, etc.) without needing a separate provider per s
 |---|---|
 | `Content` | Atomic message unit: `Text`, `Image`, `Thinking`, `ToolCall` |
 | `Message` | LLM conversation turn: `User`, `Assistant`, `ToolResult` |
-| `AgentMessage` | Routing envelope: `Llm(Message)` or `Extension(...)` (app-only, never sent to LLM) |
+| `AgentMessage` | Routing envelope: `Llm(LlmMessage)` or `Extension(...)` (app-only, never sent to LLM). LlmMessage wraps Message + optional TurnId for turn tracking |
 | `AgentEvent` | Real-time event stream emitted to callers |
 | `StreamDelta` | Token-level streaming updates: `Text`, `Thinking`, `ToolCallDelta` |
 | `StopReason` | Why the LLM stopped: `Stop`, `ToolUse`, `Length`, `Error`, `Aborted`, `MaxTurns`, etc. |
@@ -339,6 +339,8 @@ When the budget is approached, compaction runs in tiers:
 1. **Level 1** — Truncate long tool outputs
 2. **Level 2** — Summarize old conversation turns
 3. **Level 3** — Drop middle turns entirely
+
+The modern system uses non-destructive CompactionBlock overlays — see docs/concepts/compaction.md for the current design.
 
 ### Execution limits
 
