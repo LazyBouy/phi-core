@@ -5,6 +5,8 @@ A **Session** is a named container (keyed by `session_id`) that groups all
 structured memory of every agent interaction — suitable for logging, replay,
 branching, and tracing agent-spawning chains.
 
+The `session` module is split into sub-modules: `model`, `recorder`, `storage`, `helpers`.
+
 ```
 Session (session_id)
 ├── LoopRecord (loop_id: A)       ← origin loop

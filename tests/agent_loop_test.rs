@@ -1,9 +1,9 @@
 //! Tests for the core agent loop using MockProvider.
 
-use phi_core::agent_loop::{agent_loop, agent_loop_continue, agent_loop_parallel, AgentLoopConfig};
-use phi_core::evaluation::{
+use phi_core::agent_loop::evaluation::{
     ElaborateEvaluation, PickFirstEvaluation, TokenEfficientEvaluation, TransparentEvaluation,
 };
+use phi_core::agent_loop::{agent_loop, agent_loop_continue, agent_loop_parallel, AgentLoopConfig};
 use phi_core::provider::mock::*;
 use phi_core::provider::{MockProvider, ModelConfig};
 use phi_core::*;
@@ -3206,7 +3206,7 @@ async fn test_parallel_elaborate() {
 /// so branch index 1 is selected.
 #[tokio::test]
 async fn test_parallel_llm_judge() {
-    use phi_core::evaluation::LlmJudgeEvaluation;
+    use phi_core::agent_loop::evaluation::LlmJudgeEvaluation;
 
     let config_a = make_config(Arc::new(MockProvider::text("first branch answer")));
     let config_b = make_config(Arc::new(MockProvider::text("second branch answer")));

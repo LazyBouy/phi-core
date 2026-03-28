@@ -7,10 +7,12 @@
 //! - [`streaming`] — LLM response streaming
 //! - [`tools`] — Tool execution pipeline
 //! - [`parallel`] — Evaluational parallelism (`agent_loop_parallel`)
+//! - [`evaluation`] — Pluggable evaluation strategies for parallel branch selection
 //! - [`helpers`] — Utilities (input filters, config derivation, etc.)
 
 mod config;
 mod core;
+pub mod evaluation;
 mod helpers;
 mod parallel;
 mod run;
@@ -27,6 +29,12 @@ pub use core::{agent_loop, agent_loop_continue};
 
 // Parallel evaluation
 pub use parallel::agent_loop_parallel;
+
+// Evaluation strategies
+pub use evaluation::{
+    ElaborateEvaluation, LlmJudgeEvaluation, PickFirstEvaluation, TokenEfficientEvaluation,
+    TransparentEvaluation,
+};
 
 // Internal utility — used by parallel.rs via super::, kept pub(crate) for future BasicAgent use
 #[allow(unused_imports)]

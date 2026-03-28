@@ -51,7 +51,7 @@ pub struct SubAgentTool {
     max_tokens: Option<u32>,
     cache_config: CacheConfig,
     tool_execution: ToolExecutionStrategy,
-    retry_config: crate::retry::RetryConfig,
+    retry_config: crate::provider::retry::RetryConfig,
     max_turns: usize,
     /// The `loop_id` of the parent agent loop that spawned this sub-agent.
     /// Passed into the child context as `parent_loop_id` so that the full
@@ -74,7 +74,7 @@ impl SubAgentTool {
             max_tokens: None,
             cache_config: CacheConfig::default(),
             tool_execution: ToolExecutionStrategy::default(),
-            retry_config: crate::retry::RetryConfig::default(),
+            retry_config: crate::provider::retry::RetryConfig::default(),
             max_turns: DEFAULT_MAX_TURNS,
             parent_loop_id: None,
         }
@@ -134,7 +134,7 @@ impl SubAgentTool {
         self
     }
 
-    pub fn with_retry_config(mut self, config: crate::retry::RetryConfig) -> Self {
+    pub fn with_retry_config(mut self, config: crate::provider::retry::RetryConfig) -> Self {
         self.retry_config = config;
         self
     }

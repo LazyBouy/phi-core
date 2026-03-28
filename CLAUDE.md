@@ -26,10 +26,10 @@ CI (`RUSTFLAGS="-Dwarnings"`) treats all clippy warnings as errors. Integration 
 
 ### Core Loop Pattern
 
-The central abstraction is a **stateless agent loop** (`agent_loop.rs`) driven by two traits:
+The central abstraction is a **stateless agent loop** (`agent_loop/`) driven by two traits:
 
 - **`StreamProvider`** (`provider/traits.rs`) — streams LLM responses via SSE into an mpsc channel, returning a complete `Message`
-- **`AgentTool`** (`types.rs`) — defines tool name/schema/execution; the primary extension point for custom tools
+- **`AgentTool`** (`types/`) — defines tool name/schema/execution; the primary extension point for custom tools
 
 The loop: stream assistant response → extract tool calls → execute tools (parallel by default) → append results → repeat until `StopReason::Stop` with no follow-ups.
 
@@ -60,13 +60,15 @@ The loop: stream assistant response → extract tool calls → execute tools (pa
 - **`StopReason`** — `Stop`, `Length`, `ToolUse`, `Error`, `Aborted`
 - **`Usage`** — token metrics per turn or accumulated: `input`, `output`, `reasoning` (subset of `output`; non-zero for OpenAI o-series only), `cache_read`, `cache_write`, `total_tokens`. `estimated_cost(&CostConfig)` computes dollar cost. Carried directly on `TurnEnd.usage` and `AgentEnd.usage` (no message destructuring needed).
 
-### Context Management (`context.rs`)
+### Context Management (`context/`)
+
+The `context` module is split into sub-modules: `token`, `config`, `tracker`, `compaction`, `strategy`, `compact_messages`, `execution`, `orchestration`, `tests`.
 
 - **`ContextTracker`** — hybrid real-usage + estimation for token tracking
 - **`compact_messages()`** — tiered compaction: Level 1 (truncate tool outputs) → Level 2 (summarize old turns) → Level 3 (drop middle turns)
 - **`ExecutionLimits`/`ExecutionTracker`** — max turns (50), max tokens (1M), max duration (10 min). Cost tracking is automatic: `Usage::estimated_cost(&model_config.cost)` fires after each turn when rates are non-zero (set `model_config.cost` fields)
 
-### Tool Execution (`agent_loop.rs`)
+### Tool Execution (`agent_loop/`)
 
 `ToolExecutionStrategy` controls concurrency:
 - `Parallel` (default) — `futures::join_all` for all tool calls
@@ -94,6 +96,6 @@ let agent = BasicAgent::new(ModelConfig::anthropic("mock", "mock", "test"))
 
 - Context overflow detection is centralized in `OVERFLOW_PHRASES` (`provider/traits.rs`) covering 15+ provider-specific error strings; both HTTP errors and SSE-embedded errors are classified
 - Tools return stdout/stderr even on failure so the LLM can self-correct
-- Retry logic (`retry.rs`) uses exponential backoff with ±20% jitter; only retries `RateLimited` and `Network` errors
-- The `skills.rs` module loads `<name>/SKILL.md` files with YAML frontmatter per the AgentSkills standard
+- Retry logic (`provider/retry.rs`) uses exponential backoff with ±20% jitter; only retries `RateLimited` and `Network` errors
+- The `context/skills.rs` module loads `<name>/SKILL.md` files with YAML frontmatter per the AgentSkills standard
 - Lifecycle callbacks have three tiers: turn-level (`BeforeTurnFn`/`AfterTurnFn`/`OnErrorFn`), loop-level (`BeforeLoopFn`/`AfterLoopFn` — fire before `AgentStart` / after `AgentEnd`), and tool-level (`BeforeToolExecutionFn`/`AfterToolExecutionFn` — fire around each `ToolExecutionStart`/`ToolExecutionEnd`); `BeforeToolExecutionUpdateFn`/`AfterToolExecutionUpdateFn` additionally wrap each `ToolExecutionUpdate` event. Returning `false` from any `Before*` hook short-circuits the corresponding action. Hook ordering is strictly enforced — hooks fire before their paired event is emitted.

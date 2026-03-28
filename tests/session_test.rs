@@ -1,7 +1,7 @@
 //! Tests for SessionRecorder, Session navigation, persistence, and BasicAgent session management.
 
+use phi_core::agent_loop::evaluation::PickFirstEvaluation;
 use phi_core::agent_loop::{agent_loop, agent_loop_continue, agent_loop_parallel, AgentLoopConfig};
-use phi_core::evaluation::PickFirstEvaluation;
 use phi_core::provider::{MockProvider, ModelConfig};
 use phi_core::session::*;
 use phi_core::{LlmMessage, *};

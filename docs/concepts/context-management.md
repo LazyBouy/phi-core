@@ -2,6 +2,8 @@
 
 Long-running agents accumulate messages that exceed the model's context window. phi-core provides token tracking, overflow detection, tiered compaction, and execution limits.
 
+The `context` module is split into sub-modules: `token`, `config`, `tracker`, `compaction`, `strategy`, `compact_messages`, `execution`, `orchestration`.
+
 ## Token Estimation
 
 Fast estimation without external tokenizer dependencies:

@@ -21,7 +21,8 @@
 // They are re-exported here for ergonomic imports from `crate::evaluation`.
 pub use crate::types::{EvaluationDecision, EvaluationStrategy};
 
-use crate::agent_loop::{agent_loop, AgentLoopConfig};
+use super::config::AgentLoopConfig;
+use super::core::agent_loop;
 use crate::types::*;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;

@@ -8,6 +8,7 @@ pub mod model;
 pub mod openai_compat;
 pub mod openai_responses;
 pub mod registry;
+pub mod retry;
 pub mod sse;
 pub mod traits;
 
@@ -21,4 +22,5 @@ pub use model::{ApiProtocol, CostConfig, ModelConfig, OpenAiCompat};
 pub use openai_compat::OpenAiCompatProvider;
 pub use openai_responses::OpenAiResponsesProvider;
 pub use registry::ProviderRegistry;
+pub use retry::RetryConfig;
 pub use traits::*;

@@ -129,7 +129,7 @@ pub struct AgentLoopConfig {
     pub tool_execution: ToolExecutionStrategy, // from types.rs
 
     /// Retry configuration for transient provider errors.
-    pub retry_config: crate::retry::RetryConfig,
+    pub retry_config: crate::provider::retry::RetryConfig,
 
     //******* Callbacks Turn *******
     /// Called before each LLM turn. Return `false` to abort the turn.

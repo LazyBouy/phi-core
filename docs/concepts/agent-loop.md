@@ -6,6 +6,8 @@ The agent loop is the core of phi-core. It implements the fundamental cycle:
 User prompt → LLM call → Tool execution → LLM call → ... → Final response
 ```
 
+The `agent_loop` module contains the core loop logic in `mod.rs` and the `evaluation` sub-module for evaluational parallelism strategies.
+
 ## How It Works
 
 ```

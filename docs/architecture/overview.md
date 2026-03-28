@@ -23,7 +23,7 @@ phi-core is organized as three conceptual layers within a single crate. Dependen
 
 The pure agent loop. No opinions about LLMs, no built-in tools. Just the control flow.
 
-**Modules:** `types.rs`, `agent_loop.rs`, `provider/traits.rs`
+**Modules:** `types/`, `agent_loop.rs`, `provider/traits.rs`
 
 **Owns:**
 - `agent_loop()` / `agent_loop_continue()` — the loop itself
@@ -41,7 +41,7 @@ The pure agent loop. No opinions about LLMs, no built-in tools. Just the control
 
 Batteries-included single-agent layer. Most users interact with this.
 
-**Modules:** `agents/`, `context.rs`, `retry.rs`, `provider/*.rs`, `tools/*.rs`, `mcp/*.rs`
+**Modules:** `agents/`, `context.rs`, `provider/*.rs`, `tools/*.rs`, `mcp/*.rs`
 
 **Adds on top of Layer 1:**
 - Concrete providers — Anthropic, OpenAI-compat, Google, Azure, Bedrock, Vertex
@@ -82,7 +82,16 @@ phi-core/
 │   ├── lib.rs                  # Public re-exports
 │   │
 │   │── Layer 1: Core Loop ─────────────────────
-│   ├── types.rs                # Message, Content, AgentTool, AgentEvent
+│   ├── types/
+│   │   ├── mod.rs              # Re-exports, Message, AgentMessage
+│   │   ├── content.rs          # Content enum (Text, Image, Thinking, ToolCall)
+│   │   ├── extension.rs        # ExtensionMessage
+│   │   ├── agent_message.rs    # AgentMessage enum
+│   │   ├── usage.rs            # Usage (token metrics)
+│   │   ├── tool.rs             # AgentTool trait, ToolDefinition
+│   │   ├── event.rs            # AgentEvent enum
+│   │   ├── context.rs          # AgentContext
+│   │   └── parallel.rs         # ToolExecutionStrategy
 │   ├── agent_loop.rs           # Core loop: prompt → LLM → tools → repeat
 │   │
 │   │── Layer 2: Agent + Providers ─────────────
@@ -91,8 +100,8 @@ phi-core/
 │   │   ├── basic_agent.rs      # BasicAgent struct (default in-memory impl)
 │   │   └── sub_agent.rs        # SubAgentTool (child agent_loop as a tool)
 │   ├── context.rs              # Token estimation, compaction, limits
-│   ├── retry.rs                # Retry with exponential backoff
 │   ├── provider/
+│   │   ├── retry.rs            # Retry with exponential backoff
 │   │   ├── traits.rs           # StreamProvider trait, StreamEvent, ProviderError
 │   │   ├── model.rs            # ModelConfig, ApiProtocol, OpenAiCompat
 │   │   ├── registry.rs         # ProviderRegistry (protocol → provider)

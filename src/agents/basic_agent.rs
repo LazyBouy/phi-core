@@ -112,7 +112,7 @@ pub struct BasicAgent {
     pub execution_limits: Option<ExecutionLimits>,
     pub cache_config: CacheConfig,
     pub tool_execution: ToolExecutionStrategy,
-    pub retry_config: crate::retry::RetryConfig,
+    pub retry_config: crate::provider::retry::RetryConfig,
 
     // Lifecycle callbacks
     before_turn: Option<BeforeTurnFn>,
@@ -184,7 +184,7 @@ impl BasicAgent {
             execution_limits: Some(ExecutionLimits::default()), // enabled by default
             cache_config: CacheConfig::default(),
             tool_execution: ToolExecutionStrategy::default(), // Parallel
-            retry_config: crate::retry::RetryConfig::default(), // 3 retries
+            retry_config: crate::provider::retry::RetryConfig::default(), // 3 retries
             before_turn: None,
             after_turn: None,
             on_error: None,
@@ -283,7 +283,7 @@ impl BasicAgent {
         self
     }
 
-    pub fn with_retry_config(mut self, config: crate::retry::RetryConfig) -> Self {
+    pub fn with_retry_config(mut self, config: crate::provider::retry::RetryConfig) -> Self {
         self.retry_config = config;
         self
     }
@@ -293,7 +293,7 @@ impl BasicAgent {
     /// The skills index is appended as XML per the [AgentSkills standard](https://agentskills.io).
     /// The agent can then read individual SKILL.md files using the `read_file` tool
     /// when it decides a skill is relevant.
-    pub fn with_skills(mut self, skills: crate::skills::SkillSet) -> Self {
+    pub fn with_skills(mut self, skills: crate::context::skills::SkillSet) -> Self {
         let prompt_fragment = skills.format_for_prompt();
         if !prompt_fragment.is_empty() {
             if self.system_prompt.is_empty() {

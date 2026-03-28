@@ -127,7 +127,7 @@ tracing_subscriber::fmt::init();
 
 // Or filter to just retries
 tracing_subscriber::fmt()
-    .with_env_filter("phi-core::retry=warn")
+    .with_env_filter("phi_core::provider::retry=warn")
     .init();
 ```
 

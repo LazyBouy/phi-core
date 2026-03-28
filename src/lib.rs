@@ -40,14 +40,13 @@ Everything a library user needs should be reachable without knowing internal mod
 pub mod agent_loop;
 pub mod agents;
 pub mod context;
-pub mod evaluation;
 pub mod mcp;
 pub mod provider;
-pub mod retry;
 pub mod session;
-pub mod skills;
 pub mod tools;
 pub mod types;
+// retry.rs moved to provider/retry.rs
+// skills.rs moved to context/skills.rs
 
 // Feature-gated OpenAPI integration. Enabled with: cargo build --features openapi
 #[cfg(feature = "openapi")]
@@ -56,23 +55,23 @@ pub mod openapi;
 // Re-export the most-used types at the crate root for ergonomic imports.
 // Users write `use phi_core::Agent` / `use phi_core::BasicAgent` instead of
 // navigating internal module paths.
+pub use agent_loop::evaluation::{
+    ElaborateEvaluation, LlmJudgeEvaluation, PickFirstEvaluation, TokenEfficientEvaluation,
+    TransparentEvaluation,
+};
 pub use agent_loop::{agent_loop, agent_loop_continue, agent_loop_parallel};
 pub use agents::SubAgentTool;
 pub use agents::{Agent, BasicAgent, QueueMode};
+pub use context::skills::SkillSet;
 pub use context::{
     build_context_from_session, compact_session_loops, BlockCompactionStrategy, CompactedSection,
     CompactionBlock, CompactionConfig, CompactionScope, CompactionStrategy, ContextConfig,
     ContextTracker, DefaultBlockCompaction, DefaultCompaction, TurnMap, TurnRange,
 };
-pub use evaluation::{
-    ElaborateEvaluation, LlmJudgeEvaluation, PickFirstEvaluation, TokenEfficientEvaluation,
-    TransparentEvaluation,
-};
-pub use retry::RetryConfig;
+pub use provider::retry::RetryConfig;
 pub use session::{
     delete_session, list_session_ids, load_session, load_sessions_for_agent, save_session,
     ChildLoopRef, LoopConfigSnapshot, LoopEvent, LoopRecord, LoopStatus, ParallelGroupRecord,
     Session, SessionError, SessionFormation, SessionRecorder, SessionRecorderConfig, SpawnRef,
 };
-pub use skills::SkillSet;
 pub use types::*; // glob re-export: ALL public items from types become top-level exports

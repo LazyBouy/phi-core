@@ -143,7 +143,7 @@ Arc::new(ElaborateEvaluation)
 Uses a separate LLM call to evaluate which branch produced the best response.
 
 ```rust
-use phi_core::evaluation::LlmJudgeEvaluation;
+use phi_core::LlmJudgeEvaluation;
 
 Arc::new(LlmJudgeEvaluation {
     judge_config: AgentLoopConfig {
@@ -406,7 +406,7 @@ use phi_core::{
     AgentContext, AgentLoopConfig, AgentMessage, AgentEvent, Message,
 };
 use phi_core::context::ContextConfig;
-use phi_core::evaluation::LlmJudgeEvaluation;
+use phi_core::LlmJudgeEvaluation;
 use phi_core::provider::ModelConfig;
 use std::sync::Arc;
 use tokio::sync::mpsc;

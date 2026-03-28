@@ -151,7 +151,7 @@ pub(super) async fn stream_assistant_response(
                     .unwrap_or_else(|| retry.delay_for_attempt(attempt));
                 // unwrap_or_else takes a CLOSURE (lazy evaluation) — the delay is only computed
                 // if retry_after() returns None. Saves computing an unused value.
-                crate::retry::log_retry(attempt, retry.max_retries, &delay, e);
+                crate::provider::retry::log_retry(attempt, retry.max_retries, &delay, e);
                 tokio::time::sleep(delay).await;
                 continue; // jump back to top of loop
             }

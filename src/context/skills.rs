@@ -15,7 +15,7 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use phi_core::skills::SkillSet;
+//! use phi_core::SkillSet;
 //!
 //! let skills = SkillSet::load(&["./skills", "~/.phi-core/skills"]).unwrap();
 //! println!("{}", skills.format_for_prompt());
