@@ -18,7 +18,7 @@ Loop [EXISTS — LoopRecord]
 │   ├── config [EXISTS] — LoopConfigSnapshot
 │   ├── usage, compaction_block [EXISTS]
 │   └── Callbacks: before_loop / after_loop / on_error [EXISTS]
-├── LINE ITEMS: Turns [EXISTS as events; PLANNED as struct]
+├── LINE ITEMS: Turns [EXISTS as events and struct]
 ├── LINE ITEMS: Same-session children, Sub-agent spawns [EXISTS]
 ├── LINE ITEMS: Parallel group [EXISTS]
 └── LINE ITEMS: Events [EXISTS]
@@ -94,13 +94,14 @@ Pending -> Running -> Completed
 
 ---
 
-## LINE ITEMS: Turns (Steps) `[EXISTS]` as events; `[PLANNED]` as struct
+## LINE ITEMS: Turns (Steps) `[EXISTS]` as events and struct
 
-Turns exist as `TurnStart` / `TurnEnd` event pairs in the loop's event stream. See [turn.md](turn.md).
+Turns exist as `TurnStart` / `TurnEnd` event pairs in the loop's event stream, and as materialized `Turn` structs on `LoopRecord.turns`. See [turn.md](turn.md).
 
 | Field | Type | Status | Description |
 |-------|------|--------|-------------|
-| (derived from events) | — | `[EXISTS]` as event pairs | Each turn is bounded by `TurnStart` and `TurnEnd` events in `self.events`. |
+| `turns` | `Vec<Turn>` | `[EXISTS]` | Materialized turn records. Built by `SessionRecorder` from event pairs. Empty for old sessions (backward compat via `#[serde(default)]`). |
+| (event-pair) | — | `[EXISTS]` | Each turn is also bounded by `TurnStart` and `TurnEnd` events in `self.events`. |
 
 ---
 
@@ -191,5 +192,5 @@ Each `LoopEvent` has:
 ## Conceptual Notes
 
 - **Session-level model override** is not yet implemented. The fallback chain is currently Loop -> Agent default. Adding a Session layer would make it Loop -> Session -> Agent default, matching the conceptual hierarchy.
-- **Turns as a struct** within LoopRecord is planned but not yet materialized. Currently turns are reconstructed from `TurnStart` / `TurnEnd` event pairs in the `events` vec. A future `Turn` struct on LoopRecord would make turn-level querying more direct.
+- **Turns as a struct** are materialized on `LoopRecord.turns` as `Vec<Turn>`. Built by `SessionRecorder` from `TurnStart`/`TurnEnd` event pairs. The flat `messages` field is kept independently for compaction and context building. Old sessions without `turns` deserialize with an empty vec.
 - **LoopConfigSnapshot** intentionally does not store the full `AgentLoopConfig` because it contains API keys and non-serializable hook closures. The snapshot captures just enough for cost attribution, replay identification, and parallel branch differentiation.

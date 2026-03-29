@@ -34,7 +34,7 @@
            │              │
            │         ┌────▼─────┐
            │         │   Turn   │
-           │         │  [E/P]   │
+           │         │   [E]    │
            │         └────┬─────┘
            │              │
            │    ┌─────────┼──────────┐
@@ -78,7 +78,7 @@ If the Loop has no model specified, it falls back to the Session's model. If the
 | Agent Profile | scattered fields | `[CONCEPTUAL]` as struct | [agent.md](agent.md) |
 | Session | `session/model.rs` | `[EXISTS]` | [session.md](session.md) |
 | Loop (LoopRecord) | `session/model.rs` | `[EXISTS]` | [loop.md](loop.md) |
-| Turn | event-pair TurnStart/End | `[EXISTS]` events; `[PLANNED]` struct | [turn.md](turn.md) |
+| Turn | `session/model.rs` + event-pair | `[EXISTS]` events; `[EXISTS]` struct | [turn.md](turn.md) |
 | Message | `types/content.rs` | `[EXISTS]` | [message.md](message.md) |
 | AgentMessage | `types/agent_message.rs` | `[EXISTS]` | [message.md](message.md) |
 | Tool | `types/tool.rs` | `[EXISTS]` | [tool.md](tool.md) |
@@ -120,7 +120,6 @@ These are places where the conceptual model differs from current code. They repr
 | temperature | On BasicAgent | Should be Session-level (task attribute) |
 | Session model | No model field on Session | Session should carry model override |
 | Session scope | Not in code | Ephemeral vs Persistent (Introspection mandatory for Persistent) |
-| Turn struct | Implicit (TurnStart/TurnEnd events) | Explicit `Turn` struct in session model |
 | SystemPromptStrategy | Static string | Dynamic trait with layered composition |
 | Compaction config | Split across ContextConfig + AgentLoopConfig | Single CompactionConfig location |
 | before_task / after_task | Not in code (before_loop exists) | Session-level callbacks |

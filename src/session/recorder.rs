@@ -28,6 +28,15 @@ struct PartialParallelGroup {
     all_loop_ids: Vec<String>,
 }
 
+/// Partial turn state accumulated between `TurnStart` and `TurnEnd`.
+/// Finalized into a [`Turn`] when `TurnEnd` is received.
+struct PartialTurn {
+    turn_id: TurnId,
+    triggered_by: TurnTrigger,
+    started_at: chrono::DateTime<chrono::Utc>,
+    input_messages: Vec<AgentMessage>,
+}
+
 // ---------------------------------------------------------------------------
 // SessionRecorder
 // ---------------------------------------------------------------------------
@@ -78,6 +87,9 @@ pub struct SessionRecorder {
 
     /// Parallel groups announced by ParallelLoopStart but not yet closed.
     partial_groups: HashMap<String, PartialParallelGroup>,
+
+    /// Turns being accumulated between `TurnStart` and `TurnEnd`, keyed by `loop_id`.
+    partial_turns: HashMap<String, PartialTurn>,
 }
 
 impl SessionRecorder {
@@ -89,6 +101,7 @@ impl SessionRecorder {
             open_sessions: HashMap::new(),
             open_loops: HashMap::new(),
             partial_groups: HashMap::new(),
+            partial_turns: HashMap::new(),
         }
     }
 
@@ -166,6 +179,7 @@ impl SessionRecorder {
                     rejection: None,
                     config: None,
                     messages: Vec::new(),
+                    turns: Vec::new(),
                     usage: Usage::default(),
                     metadata: metadata.clone(),
                     events: Vec::new(),
@@ -192,6 +206,8 @@ impl SessionRecorder {
                 rejection,
             } => {
                 self.append_event(loop_id, event.clone());
+                // Discard any orphaned partial turn for this loop.
+                self.partial_turns.remove(loop_id.as_str());
                 if let Some(mut open) = self.open_loops.remove(loop_id) {
                     open.record.ended_at = Some(*timestamp);
                     open.record.status = if rejection.is_some() {
@@ -249,11 +265,72 @@ impl SessionRecorder {
                 }
             }
 
-            // ── TurnEnd — extract config snapshot ─────────────────────────
-            AgentEvent::TurnEnd {
+            // ── TurnStart — begin accumulating a partial turn ────────────
+            AgentEvent::TurnStart {
+                loop_id,
+                turn_index,
+                timestamp,
+                triggered_by,
+            } => {
+                self.partial_turns.insert(
+                    loop_id.clone(),
+                    PartialTurn {
+                        turn_id: TurnId {
+                            loop_id: loop_id.clone(),
+                            turn_index: *turn_index,
+                        },
+                        triggered_by: triggered_by.clone(),
+                        started_at: *timestamp,
+                        input_messages: Vec::new(),
+                    },
+                );
+                self.append_event(loop_id, event.clone());
+            }
+
+            // ── MessageEnd — capture non-assistant messages as turn input ─
+            AgentEvent::MessageEnd {
                 loop_id, message, ..
             } => {
+                if message.role() != "assistant" {
+                    if let Some(partial) = self.partial_turns.get_mut(loop_id.as_str()) {
+                        partial.input_messages.push(message.clone());
+                    }
+                }
                 self.append_event(loop_id, event.clone());
+            }
+
+            // ── TurnEnd — finalize turn + extract config snapshot ─────────
+            AgentEvent::TurnEnd {
+                loop_id,
+                message,
+                usage,
+                timestamp,
+                tool_results,
+            } => {
+                self.append_event(loop_id, event.clone());
+
+                // Finalize the partial turn into a materialized Turn.
+                if let Some(partial) = self.partial_turns.remove(loop_id.as_str()) {
+                    let tid = Some(partial.turn_id.clone());
+                    let turn = Turn {
+                        turn_id: partial.turn_id,
+                        triggered_by: partial.triggered_by,
+                        usage: usage.clone(),
+                        input_messages: partial.input_messages,
+                        output_message: message.clone(),
+                        tool_results: tool_results
+                            .iter()
+                            .map(|m| AgentMessage::from(m.clone()).with_turn_id(tid.clone()))
+                            .collect(),
+                        started_at: partial.started_at,
+                        ended_at: *timestamp,
+                    };
+                    if let Some(open) = self.open_loops.get_mut(loop_id.as_str()) {
+                        open.record.turns.push(turn);
+                    }
+                }
+
+                // Extract config snapshot from assistant message.
                 if let Some(open) = self.open_loops.get_mut(loop_id.as_str()) {
                     if open.record.config.is_none() {
                         open.record.config =
@@ -389,6 +466,9 @@ impl SessionRecorder {
     ///
     /// Call before saving or on process shutdown.
     pub fn flush(&mut self) {
+        // Discard orphaned partial turns (TurnStart received but no TurnEnd).
+        self.partial_turns.clear();
+
         let loop_ids: Vec<String> = self.open_loops.keys().cloned().collect();
         for lid in loop_ids {
             if let Some(mut open) = self.open_loops.remove(&lid) {

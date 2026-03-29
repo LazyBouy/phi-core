@@ -214,6 +214,7 @@ pub(super) async fn run_loop(
                                 rejection: None,
                                 config: None,
                                 messages: context.messages.clone(),
+                                turns: Vec::new(),
                                 usage: Usage::default(),
                                 metadata: None,
                                 events: Vec::new(),

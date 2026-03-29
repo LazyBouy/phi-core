@@ -2,12 +2,12 @@
 
 A single LLM call-and-response cycle within a Loop. One Loop may have many Turns: the initial response plus one per tool-call round-trip or steering message injection.
 
-**Important**: Turn is `[PLANNED]` as a first-class struct but `[EXISTS]` as an event-pair (`TurnStart` / `TurnEnd`). Turn data is currently reconstructed from the event stream rather than stored as a struct on `LoopRecord`.
+**Status**: Turn `[EXISTS]` as both a first-class struct (`Turn` on `LoopRecord.turns`) and as an event-pair (`TurnStart` / `TurnEnd`). The `SessionRecorder` materializes `Turn` structs from the event stream.
 
 ## Concept Overview
 
 ```
-Turn [PLANNED as struct; EXISTS as event-pair TurnStart/TurnEnd]
+Turn [EXISTS as struct on LoopRecord.turns; EXISTS as event-pair TurnStart/TurnEnd]
 ├── HEADER
 │   ├── TurnId [EXISTS] — { loop_id, turn_index }
 │   ├── triggered_by [EXISTS] — User/SubAgent/FollowUp/Branch
@@ -114,12 +114,14 @@ before_turn hook  ->  TurnStart event
 | `src/agent_loop/run.rs` | `run_loop` function — implements the turn cycle. `TurnStart` / `TurnEnd` event emission, `before_turn` / `after_turn` hook invocation, turn trigger determination, usage accumulation, tool call extraction and execution. |
 | `src/types/event.rs` | `TurnTrigger` enum, `AgentEvent::TurnStart` and `AgentEvent::TurnEnd` variants, `StreamDelta` enum. |
 | `src/types/agent_message.rs` | `TurnId` struct — `{ loop_id, turn_index }`. Carried on `LlmMessage.turn_id`. |
+| `src/session/model.rs` | `Turn` struct — materialized turn record on `LoopRecord.turns`. Fields: `turn_id`, `triggered_by`, `usage`, `input_messages`, `output_message`, `tool_results`, `started_at`, `ended_at`. |
+| `src/session/recorder.rs` | `SessionRecorder` — builds `Turn` structs from `TurnStart`/`MessageEnd`/`TurnEnd` event pairs. |
 
 ---
 
 ## Conceptual Notes
 
-- **Turn as a first-class struct** is planned but not implemented. Currently, turn data is reconstructed from `TurnStart` / `TurnEnd` event pairs in the `LoopRecord.events` vec. A materialized `Turn` struct on `LoopRecord` would contain: `turn_id`, `triggered_by`, `usage`, `input_messages`, `output_message`, `tool_results`, `timestamps`. This would make turn-level querying and analysis significantly easier.
+- **Turn as a first-class struct** is implemented. The `Turn` struct on `LoopRecord.turns` contains: `turn_id`, `triggered_by`, `usage`, `input_messages`, `output_message`, `tool_results`, `started_at`, `ended_at`. Built by `SessionRecorder` from `TurnStart`/`TurnEnd` event pairs. The flat `LoopRecord.messages` is kept independently for backward compatibility and use by compaction/context building. Old sessions without `turns` deserialize with an empty vec via `#[serde(default)]`.
 - **Turn lifecycle** is entirely within a single Loop. A turn never spans loops. The inner loop in `run_loop` continues when there are tool calls or pending steering messages; each iteration is one turn.
 - **Execution limits** are checked BEFORE `before_turn` fires, so hooks are not invoked for impossible turns. If a limit is reached, a system message (`[Agent stopped: ...]`) is emitted and the loop returns.
 - **Compaction** can occur within a turn (after `TurnStart`, before the LLM call), making a single turn potentially include a compaction event in its span.

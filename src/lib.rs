@@ -73,5 +73,6 @@ pub use session::{
     delete_session, list_session_ids, load_session, load_sessions_for_agent, save_session,
     ChildLoopRef, LoopConfigSnapshot, LoopEvent, LoopRecord, LoopStatus, ParallelGroupRecord,
     Session, SessionError, SessionFormation, SessionRecorder, SessionRecorderConfig, SpawnRef,
+    Turn,
 };
 pub use types::*; // glob re-export: ALL public items from types become top-level exports

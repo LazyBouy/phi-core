@@ -46,6 +46,7 @@ fn make_loop_record(loop_id: &str, num_turns: u32, parent: Option<&str>) -> Loop
         rejection: None,
         config: None,
         messages,
+        turns: Vec::new(),
         usage: Usage::default(),
         metadata: None,
         events: Vec::new(),

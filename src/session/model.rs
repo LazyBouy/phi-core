@@ -192,6 +192,78 @@ pub struct LoopEvent {
 }
 
 // ---------------------------------------------------------------------------
+// Turn
+// ---------------------------------------------------------------------------
+
+/// A materialized record of one LLM turn within a loop.
+///
+/// Each turn represents one LLM call-response cycle plus any tool executions
+/// that followed. Built by [`SessionRecorder`] from `TurnStart`/`TurnEnd`
+/// event pairs.
+///
+/// ## Message partitioning
+///
+/// - `input_messages` — user prompts, steering messages, and follow-ups injected
+///   at the start of this turn (between `TurnStart` and the assistant response).
+/// - `output_message` — the assistant's streamed response (from `TurnEnd.message`).
+/// - `tool_results` — tool result messages executed this turn (from `TurnEnd.tool_results`).
+///   Empty when no tool calls were made (`StopReason::Stop`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Turn {
+    /// Identifies this turn: `loop_id` + `turn_index`.
+    pub turn_id: TurnId,
+
+    /// What caused this turn to begin.
+    pub triggered_by: TurnTrigger,
+
+    /// Per-turn token usage (from `TurnEnd.usage`).
+    pub usage: Usage,
+
+    /// Messages injected at the start of this turn (user prompts, steering
+    /// messages, follow-ups). Empty for continuation turns that only have
+    /// tool results from the prior turn feeding back in.
+    pub input_messages: Vec<AgentMessage>,
+
+    /// The assistant message produced by the LLM this turn.
+    pub output_message: AgentMessage,
+
+    /// Tool result messages from this turn. Empty when no tool calls were made.
+    pub tool_results: Vec<AgentMessage>,
+
+    /// Wall-clock time when this turn began (from `TurnStart.timestamp`).
+    pub started_at: DateTime<Utc>,
+
+    /// Wall-clock time when this turn completed (from `TurnEnd.timestamp`).
+    pub ended_at: DateTime<Utc>,
+}
+
+impl Turn {
+    /// The zero-based turn index within its loop.
+    pub fn index(&self) -> u32 {
+        self.turn_id.turn_index
+    }
+
+    /// Duration of this turn.
+    pub fn duration(&self) -> chrono::Duration {
+        self.ended_at - self.started_at
+    }
+
+    /// Whether this turn included tool calls.
+    pub fn has_tool_calls(&self) -> bool {
+        !self.tool_results.is_empty()
+    }
+
+    /// All messages in this turn in chronological order:
+    /// input_messages, then output_message, then tool_results.
+    pub fn all_messages(&self) -> Vec<&AgentMessage> {
+        let mut msgs: Vec<&AgentMessage> = self.input_messages.iter().collect();
+        msgs.push(&self.output_message);
+        msgs.extend(self.tool_results.iter());
+        msgs
+    }
+}
+
+// ---------------------------------------------------------------------------
 // LoopRecord
 // ---------------------------------------------------------------------------
 
@@ -265,6 +337,15 @@ pub struct LoopRecord {
     /// (prior loop messages + these) and call `agent_loop_continue`.
     pub messages: Vec<AgentMessage>,
 
+    // ── Turns ────────────────────────────────────────────────────────────
+    /// Materialized turn records, one per LLM call-response cycle.
+    ///
+    /// Built by [`SessionRecorder`] from `TurnStart`/`TurnEnd` event pairs.
+    /// Empty for old sessions that predate turn materialization, or for loops
+    /// that ended before any turn completed (rejected, aborted).
+    #[serde(default)]
+    pub turns: Vec<Turn>,
+
     // ── Usage ─────────────────────────────────────────────────────────────
     /// Token usage from `AgentEnd.usage`.
     pub usage: Usage,
@@ -306,6 +387,19 @@ pub struct LoopRecord {
     /// remain untouched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction_block: Option<crate::context::CompactionBlock>,
+}
+
+impl LoopRecord {
+    /// Get a turn by its index. Returns `None` if turns are not materialized
+    /// or the index is out of range.
+    pub fn get_turn(&self, turn_index: u32) -> Option<&Turn> {
+        self.turns.get(turn_index as usize)
+    }
+
+    /// Number of materialized turns. Returns 0 if turns are not materialized.
+    pub fn turn_count(&self) -> usize {
+        self.turns.len()
+    }
 }
 
 // ---------------------------------------------------------------------------

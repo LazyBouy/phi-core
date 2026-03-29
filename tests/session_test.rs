@@ -1313,3 +1313,384 @@ fn test_malformed_loop_id_handling() {
         );
     }
 }
+
+// ===========================================================================
+// Turn materialization tests
+// ===========================================================================
+
+/// Single-turn loop: recorder produces exactly one Turn with correct fields.
+#[tokio::test]
+async fn test_turn_materialization_single_turn() {
+    let provider = Arc::new(MockProvider::text("Hello!"));
+    let config = make_config(provider);
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    let mut context = AgentContext {
+        system_prompt: "You are helpful.".into(),
+        agent_id: Some("agent-turn".into()),
+        session_id: Some("session-turn".into()),
+        ..Default::default()
+    };
+
+    agent_loop(
+        vec![AgentMessage::Llm(LlmMessage::new(Message::user("Hi")))],
+        &mut context,
+        &config,
+        tx,
+        cancel,
+    )
+    .await;
+
+    let events = drain(rx);
+    let mut recorder = SessionRecorder::new(SessionRecorderConfig::default());
+    feed(&mut recorder, events);
+    recorder.flush();
+
+    let sessions: Vec<_> = recorder.sessions().collect();
+    let lr = &sessions[0].loops[0];
+
+    // Should have exactly one turn.
+    assert_eq!(lr.turn_count(), 1);
+
+    let turn = lr.get_turn(0).expect("turn 0 should exist");
+    assert_eq!(turn.index(), 0);
+    assert!(matches!(turn.triggered_by, TurnTrigger::User));
+    assert!(!turn.has_tool_calls());
+
+    // input_messages should contain the user message.
+    assert!(
+        !turn.input_messages.is_empty(),
+        "expected at least one input message (user prompt)"
+    );
+    assert_eq!(turn.input_messages[0].role(), "user");
+
+    // output_message should be an assistant message.
+    assert_eq!(turn.output_message.role(), "assistant");
+
+    // Timestamps should be reasonable.
+    assert!(turn.ended_at >= turn.started_at);
+    assert!(turn.duration() >= chrono::Duration::zero());
+}
+
+/// Multi-turn loop with tool calls: recorder produces multiple turns.
+#[tokio::test]
+async fn test_turn_materialization_multi_turn() {
+    use phi_core::provider::mock::{MockResponse, MockToolCall};
+
+    // Define a simple tool inline.
+    struct TestTool;
+
+    #[async_trait::async_trait]
+    impl phi_core::AgentTool for TestTool {
+        fn name(&self) -> &str {
+            "test_tool"
+        }
+        fn label(&self) -> &str {
+            "Test Tool"
+        }
+        fn description(&self) -> &str {
+            "A test tool"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: phi_core::ToolContext,
+        ) -> Result<phi_core::ToolResult, phi_core::ToolError> {
+            Ok(phi_core::ToolResult {
+                content: vec![Content::Text { text: "ok".into() }],
+                details: serde_json::Value::Null,
+                child_loop_id: None,
+            })
+        }
+    }
+
+    // MockProvider with tool call then text response → 2 turns.
+    let provider = Arc::new(MockProvider::new(vec![
+        MockResponse::ToolCalls(vec![MockToolCall {
+            name: "test_tool".into(),
+            arguments: serde_json::json!({}),
+        }]),
+        MockResponse::Text("Done!".into()),
+    ]));
+    let config = make_config(provider);
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    let mut context = AgentContext {
+        system_prompt: "You are helpful.".into(),
+        agent_id: Some("agent-mt".into()),
+        session_id: Some("session-mt".into()),
+        tools: vec![Arc::new(TestTool)],
+        ..Default::default()
+    };
+
+    agent_loop(
+        vec![AgentMessage::Llm(LlmMessage::new(Message::user(
+            "Do something",
+        )))],
+        &mut context,
+        &config,
+        tx,
+        cancel,
+    )
+    .await;
+
+    let events = drain(rx);
+    let mut recorder = SessionRecorder::new(SessionRecorderConfig::default());
+    feed(&mut recorder, events);
+    recorder.flush();
+
+    let sessions: Vec<_> = recorder.sessions().collect();
+    let lr = &sessions[0].loops[0];
+
+    // Should have 2 turns: tool call turn + final text turn.
+    assert_eq!(lr.turn_count(), 2);
+
+    // Turn 0: triggered by User, has tool calls.
+    let t0 = lr.get_turn(0).unwrap();
+    assert_eq!(t0.index(), 0);
+    assert!(matches!(t0.triggered_by, TurnTrigger::User));
+    assert!(t0.has_tool_calls());
+    assert!(!t0.tool_results.is_empty());
+
+    // Turn 1: triggered by FollowUp, no tool calls.
+    let t1 = lr.get_turn(1).unwrap();
+    assert_eq!(t1.index(), 1);
+    assert!(matches!(t1.triggered_by, TurnTrigger::FollowUp));
+    assert!(!t1.has_tool_calls());
+
+    // all_messages covers everything.
+    let all = t0.all_messages();
+    assert!(all.len() >= 2); // at least input + output
+}
+
+/// Turn serde roundtrip.
+#[test]
+fn test_turn_serde_roundtrip() {
+    use phi_core::Turn;
+
+    let turn = Turn {
+        turn_id: TurnId {
+            loop_id: "loop-1".into(),
+            turn_index: 0,
+        },
+        triggered_by: TurnTrigger::User,
+        usage: Usage::default(),
+        input_messages: vec![AgentMessage::from(Message::user("Hi"))],
+        output_message: AgentMessage::from(Message::Assistant {
+            content: vec![Content::Text {
+                text: "Hello".into(),
+            }],
+            stop_reason: StopReason::Stop,
+            model: "test".into(),
+            provider: "test".into(),
+            usage: Usage::default(),
+            timestamp: 0,
+            error_message: None,
+        }),
+        tool_results: vec![],
+        started_at: chrono::Utc::now(),
+        ended_at: chrono::Utc::now(),
+    };
+
+    let json = serde_json::to_string(&turn).expect("serialize");
+    let roundtripped: Turn = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(roundtripped.turn_id.loop_id, "loop-1");
+    assert_eq!(roundtripped.turn_id.turn_index, 0);
+    assert_eq!(roundtripped.output_message.role(), "assistant");
+}
+
+/// LoopRecord without `turns` field deserializes with empty turns (backward compat).
+#[test]
+fn test_loop_record_backward_compat_no_turns() {
+    // Minimal LoopRecord JSON without the `turns` field.
+    let json = r#"{
+        "loop_id": "test-loop",
+        "session_id": "test-session",
+        "agent_id": "test-agent",
+        "parent_loop_id": null,
+        "continuation_kind": null,
+        "started_at": "2025-01-01T00:00:00Z",
+        "ended_at": null,
+        "status": "Running",
+        "rejection": null,
+        "config": null,
+        "messages": [],
+        "usage": {"input": 0, "output": 0, "reasoning": 0, "cache_read": 0, "cache_write": 0, "total_tokens": 0},
+        "metadata": null,
+        "events": [],
+        "children_loop_ids": [],
+        "child_loop_refs": [],
+        "parallel_group": null
+    }"#;
+
+    let lr: phi_core::LoopRecord = serde_json::from_str(json).expect("deserialize");
+    assert_eq!(lr.loop_id, "test-loop");
+    assert!(lr.turns.is_empty(), "turns should default to empty vec");
+    assert_eq!(lr.turn_count(), 0);
+    assert!(lr.get_turn(0).is_none());
+}
+
+/// Tool results on Turn carry the correct turn_id (consistency with LoopRecord.messages).
+#[tokio::test]
+async fn test_turn_tool_results_carry_turn_id() {
+    use phi_core::provider::mock::{MockResponse, MockToolCall};
+
+    struct EchoTool;
+
+    #[async_trait::async_trait]
+    impl phi_core::AgentTool for EchoTool {
+        fn name(&self) -> &str {
+            "echo"
+        }
+        fn label(&self) -> &str {
+            "Echo"
+        }
+        fn description(&self) -> &str {
+            "echo"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: phi_core::ToolContext,
+        ) -> Result<phi_core::ToolResult, phi_core::ToolError> {
+            Ok(phi_core::ToolResult {
+                content: vec![Content::Text {
+                    text: "echoed".into(),
+                }],
+                details: serde_json::Value::Null,
+                child_loop_id: None,
+            })
+        }
+    }
+
+    let provider = Arc::new(MockProvider::new(vec![
+        MockResponse::ToolCalls(vec![MockToolCall {
+            name: "echo".into(),
+            arguments: serde_json::json!({}),
+        }]),
+        MockResponse::Text("Done".into()),
+    ]));
+    let config = make_config(provider);
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        agent_id: Some("a".into()),
+        session_id: Some("s".into()),
+        tools: vec![Arc::new(EchoTool)],
+        ..Default::default()
+    };
+
+    agent_loop(
+        vec![AgentMessage::Llm(LlmMessage::new(Message::user("go")))],
+        &mut context,
+        &config,
+        tx,
+        cancel,
+    )
+    .await;
+
+    let events = drain(rx);
+    let mut recorder = SessionRecorder::new(SessionRecorderConfig::default());
+    feed(&mut recorder, events);
+    recorder.flush();
+
+    let sessions: Vec<_> = recorder.sessions().collect();
+    let lr = &sessions[0].loops[0];
+    let t0 = lr.get_turn(0).expect("turn 0");
+
+    // Tool results should carry the same turn_id as the turn itself.
+    assert!(t0.has_tool_calls());
+    for tr in &t0.tool_results {
+        let tid = tr.turn_id().expect("tool result should have turn_id");
+        assert_eq!(tid.loop_id, t0.turn_id.loop_id);
+        assert_eq!(tid.turn_index, t0.turn_id.turn_index);
+    }
+
+    // output_message should also carry the turn_id.
+    let out_tid = t0
+        .output_message
+        .turn_id()
+        .expect("output_message should have turn_id");
+    assert_eq!(out_tid.turn_index, 0);
+}
+
+/// Recorder handles aborted loop gracefully — partial turns are discarded on flush.
+#[test]
+fn test_turn_aborted_loop_partial_turn_discarded() {
+    let now = chrono::Utc::now();
+    let mut recorder = SessionRecorder::new(SessionRecorderConfig::default());
+
+    // Simulate AgentStart → TurnStart → (no TurnEnd) → flush.
+    recorder.on_event(AgentEvent::AgentStart {
+        agent_id: "a".into(),
+        session_id: "s".into(),
+        loop_id: "loop-abort".into(),
+        parent_loop_id: None,
+        continuation_kind: None,
+        timestamp: now,
+        metadata: None,
+    });
+    recorder.on_event(AgentEvent::TurnStart {
+        loop_id: "loop-abort".into(),
+        turn_index: 0,
+        timestamp: now,
+        triggered_by: TurnTrigger::User,
+    });
+    // No TurnEnd or AgentEnd — simulate crash/abort.
+    recorder.flush();
+
+    let sessions: Vec<_> = recorder.sessions().collect();
+    assert_eq!(sessions.len(), 1);
+    let lr = &sessions[0].loops[0];
+    assert_eq!(lr.status, LoopStatus::Aborted);
+    // Turns should be empty — the partial turn was discarded.
+    assert_eq!(lr.turn_count(), 0);
+}
+
+/// Recorder handles AgentEnd arriving while a partial turn is open.
+#[test]
+fn test_turn_agent_end_cleans_orphaned_partial_turn() {
+    let now = chrono::Utc::now();
+    let mut recorder = SessionRecorder::new(SessionRecorderConfig::default());
+
+    // AgentStart → TurnStart → AgentEnd (without TurnEnd).
+    recorder.on_event(AgentEvent::AgentStart {
+        agent_id: "a".into(),
+        session_id: "s".into(),
+        loop_id: "loop-orphan".into(),
+        parent_loop_id: None,
+        continuation_kind: None,
+        timestamp: now,
+        metadata: None,
+    });
+    recorder.on_event(AgentEvent::TurnStart {
+        loop_id: "loop-orphan".into(),
+        turn_index: 0,
+        timestamp: now,
+        triggered_by: TurnTrigger::User,
+    });
+    // AgentEnd without TurnEnd (abnormal termination).
+    recorder.on_event(AgentEvent::AgentEnd {
+        loop_id: "loop-orphan".into(),
+        messages: vec![],
+        usage: Usage::default(),
+        timestamp: now,
+        rejection: None,
+    });
+    recorder.flush();
+
+    let sessions: Vec<_> = recorder.sessions().collect();
+    let lr = &sessions[0].loops[0];
+    // No turns should be materialized.
+    assert_eq!(lr.turn_count(), 0);
+}
