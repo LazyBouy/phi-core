@@ -49,6 +49,20 @@
 - [Overview](architecture/overview.md)
 - [Algorithms (Pseudocode)](architecture/algorithms.md)
 
+# Developer
+
+- [Conceptual Hierarchy](developer/overview.md)
+- [Agent](developer/agent.md)
+- [Session](developer/session.md)
+- [Loop](developer/loop.md)
+- [Turn](developer/turn.md)
+- [Message](developer/message.md)
+- [Tool](developer/tool.md)
+- [Provider](developer/provider.md)
+- [Event](developer/event.md)
+- [Compaction](developer/compaction.md)
+- [Configuration](developer/config.md)
+
 # Specs
 
 - [Architecture Spec](specs/architecture.md)
