@@ -129,6 +129,49 @@ These are places where the conceptual model differs from current code. They repr
 
 ---
 
+## Core Gaps
+
+Prioritized list of features that belong in phi-core (per [First Principles](../../architecture/overview.md#first-principles-core-vs-external)) but are not yet implemented. Each gap is derived from `[CONCEPTUAL]` items in the entity specs.
+
+### Priority 1 — Small, High-Value
+
+| ID | Feature | Why Core | Effort | Spec Ref |
+|----|---------|----------|--------|----------|
+| **G1** | Compaction callbacks (`before_compaction_start` / `after_compaction_end`) | Compaction runs deep inside `run_loop`. Only way for consumers to index discarded content or verify compaction quality. | ~30 LOC | `config.md`, callback ownership table above |
+| **G4** | Session model override (`model: Option<ModelConfig>` on Session) | Completes model fallback chain: Loop → Session → Agent. Without it, per-task model selection requires separate `AgentLoopConfig` per loop. | ~10 LOC | `session.md`, hierarchy above |
+| **G3** | Agent Profile struct | Agent identity (name, description, default model, system prompt) scattered across `BasicAgent` fields. Dedicated struct enables profile sharing, serialization, UI display. | ~50 LOC | `agent.md`, misalignment table above |
+| **G7** | Session scope (`SessionScope::Ephemeral \| Persistent`) | Determines session retention and whether introspection is mandatory. Foundational metadata for session lifecycle. | ~20 LOC | `session.md` |
+| **G9** | Session task attributes (`thinking_level`, `temperature` on Session) | Currently on `BasicAgent` (global). Different tasks need different reasoning depths. Resolution: Loop → Session → Agent default. | ~30 LOC | `session.md`, `agent.md`, misalignment table above |
+
+### Priority 2 — Medium Refactors
+
+| ID | Feature | Why Core | Effort | Spec Ref |
+|----|---------|----------|--------|----------|
+| **G5** | Compaction config consolidation | Currently split across `ContextConfig` + `AgentLoopConfig`. Consumers must wire both correctly. Single config reduces misuse. | ~100 LOC | `config.md`, misalignment table above |
+| **G2** | Session-level callbacks (`before_task` / `after_task`) | Session-level lifecycle events needed for task-level metrics, billing, audit. A session may span multiple loops. | ~80 LOC | callback ownership table above |
+| **G6** | SystemPromptStrategy trait | Static string is insufficient. Dynamic composition (personality + task + skills + memory) needed by non-trivial agents. Define trait now, full 5-layer impl later. | ~100 LOC | `agent.md` |
+
+### Priority 3 — Needs Design
+
+| ID | Feature | Why Core | Effort | Spec Ref |
+|----|---------|----------|--------|----------|
+| **G8** | ContextTranslationStrategy | Mid-session provider switching requires translating context between provider formats. Touches message pipeline inside the loop. | ~150 LOC | `provider.md`, misalignment table above |
+
+### External — Not Core
+
+These are explicitly **not** core gaps. They can be built on top of phi-core using existing extension points:
+
+| Item | Extension Point |
+|------|----------------|
+| Introspection / Memory | External crate using G1 compaction callbacks + session data |
+| Permissions | `InputFilter` + `BeforeToolExecutionFn` |
+| Multi-agent orchestration | `agent_loop` / `agent_loop_continue` / `agent_loop_parallel` |
+| Model fallback chains | Custom `StreamProvider` wrapping multiple providers |
+| Observability backends | `AgentEvent` stream |
+| Domain tools | `AgentTool` trait |
+
+---
+
 ## Deep Dive Files
 
 Each entity has its own deep dive document in this folder:

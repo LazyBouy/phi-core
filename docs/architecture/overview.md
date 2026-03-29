@@ -187,3 +187,22 @@ Tools receive a `CancellationToken` child token — they should check it for coo
 - **Layer 1 is stable.** The core loop and traits change rarely. New features are added in Layer 2 or 3.
 - **Build what's needed.** Layer 3 is designed but not implemented. It will be built when a use case demands it, not speculatively.
 - **Simple over clever.** A straightforward loop with good defaults beats an elegant abstraction nobody can debug.
+
+## First Principles: Core vs External
+
+phi-core is a library, not a framework. These principles determine what belongs inside the crate and what should be built on top of it by consumers.
+
+### A feature belongs in phi-core if:
+
+1. **All agents need it** — every consumer would re-implement it independently. The agent loop, message types, event stream, and tool trait are universal primitives.
+2. **Requires deep loop integration** — it needs hooks inside the turn cycle that callbacks alone can't provide cleanly. Compaction, execution limits, and streaming are examples.
+3. **Defines the contract** — traits and interfaces that standardize how consumers extend the system. `StreamProvider`, `AgentTool`, `CompactionStrategy`, and `InputFilter` are extension contracts.
+4. **Fragmentation risk** — if consumers implement it differently, interoperability breaks. Session format, event vocabulary, and message types must be shared.
+5. **Cross-cutting** — it touches multiple modules and can't be layered on top without forking the crate.
+
+### A feature should be external if:
+
+1. **Application-specific** — workflows, domain tools, business logic, UI patterns.
+2. **Infrastructure** — databases, web servers, authentication, deployment, CI/CD.
+3. **Opinionated** — reasonable projects would choose differently. Vector databases, tracing backends, embedding models, and memory strategies are consumer choices.
+4. **Implementable via existing extension points** — it can be built cleanly using the traits and callbacks already in core. Permissions (via `InputFilter` + `BeforeToolExecutionFn`), model fallback chains (via custom `StreamProvider`), and observability backends (via `AgentEvent` stream) are examples.
