@@ -5,8 +5,12 @@
 //! pattern; the runtime interface is provided by the [`Agent`](super::Agent) trait.
 
 use super::agent::{Agent, QueueMode};
+use super::profile::AgentProfile;
 use crate::agent_loop::{
-    agent_loop, agent_loop_continue, AfterTurnFn, AgentLoopConfig, BeforeTurnFn, OnErrorFn,
+    agent_loop, agent_loop_continue, AfterCompactionEndFn, AfterLoopFn, AfterToolExecutionFn,
+    AfterToolExecutionUpdateFn, AfterTurnFn, AgentLoopConfig, BeforeCompactionStartFn,
+    BeforeLoopFn, BeforeToolExecutionFn, BeforeToolExecutionUpdateFn, BeforeTurnFn, ConvertToLlmFn,
+    OnErrorFn, TransformContextFn,
 };
 use crate::context::{CompactionStrategy, ContextConfig, ExecutionLimits};
 use crate::mcp::{McpClient, McpError, McpToolAdapter};
@@ -44,7 +48,11 @@ returning the same value. This chains naturally and avoids separate calls.
 Python analogy: it's like a fluent API but ownership-safe.
 */
 
-/// The default in-memory agent. Owns conversation state, tools, and provider.
+/// Reference implementation of the [`Agent`] trait.
+///
+/// Custom agents should implement the `Agent` trait directly. New generic agent
+/// methods should be defined on the `Agent` trait first, then implemented here —
+/// never add public methods to `BasicAgent` without the corresponding trait method.
 ///
 /// Configuration is done via the builder pattern before any prompting. The runtime
 /// interface (prompting, state access, control) is provided via the [`Agent`] trait.
@@ -125,6 +133,23 @@ pub struct BasicAgent {
     // Custom compaction strategy
     compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
 
+    // ── Hook/callback fields (wired into build_config) ──────────────────
+    before_loop: Option<BeforeLoopFn>,
+    after_loop: Option<AfterLoopFn>,
+    before_tool_execution: Option<BeforeToolExecutionFn>,
+    after_tool_execution: Option<AfterToolExecutionFn>,
+    before_tool_execution_update: Option<BeforeToolExecutionUpdateFn>,
+    after_tool_execution_update: Option<AfterToolExecutionUpdateFn>,
+    convert_to_llm: Option<ConvertToLlmFn>,
+    transform_context: Option<TransformContextFn>,
+    block_compaction_strategy: Option<Arc<dyn crate::context::BlockCompactionStrategy>>,
+    before_compaction_start: Option<BeforeCompactionStartFn>,
+    after_compaction_end: Option<AfterCompactionEndFn>,
+
+    // ── Profile and config identity ─────────────────────────────────────
+    config_id: Option<String>,
+    profile: Option<AgentProfile>,
+
     // Control — cancel token is Some during a streaming call, None otherwise
     cancel: Option<CancellationToken>,
     is_streaming: bool, // guard against concurrent prompt() calls
@@ -190,6 +215,19 @@ impl BasicAgent {
             on_error: None,
             input_filters: Vec::new(),
             compaction_strategy: None,
+            before_loop: None,
+            after_loop: None,
+            before_tool_execution: None,
+            after_tool_execution: None,
+            before_tool_execution_update: None,
+            after_tool_execution_update: None,
+            convert_to_llm: None,
+            transform_context: None,
+            block_compaction_strategy: None,
+            before_compaction_start: None,
+            after_compaction_end: None,
+            config_id: None,
+            profile: None,
             cancel: None,
             is_streaming: false,
             agent_id: uuid::Uuid::new_v4().to_string(),
@@ -210,11 +248,6 @@ impl BasicAgent {
     /// Take the session out of the agent, returning ownership.
     pub fn take_session(&mut self) -> Option<crate::session::Session> {
         self.session.take()
-    }
-
-    /// Borrow the session immutably.
-    pub fn session(&self) -> Option<&crate::session::Session> {
-        self.session.as_ref()
     }
 
     /*
@@ -361,6 +394,151 @@ impl BasicAgent {
     /// `compact_messages()` call during context compaction.
     pub fn with_compaction_strategy(mut self, strategy: impl CompactionStrategy + 'static) -> Self {
         self.compaction_strategy = Some(Arc::new(strategy));
+        self
+    }
+
+    /// Set the agent profile blueprint. Also copies profile fields into this agent's
+    /// public fields for backward compatibility (profile values act as defaults;
+    /// existing field values take precedence if already set).
+    pub fn with_profile(mut self, profile: AgentProfile) -> Self {
+        // Copy profile defaults into pub fields (only if not already set)
+        if let Some(ref prompt) = profile.system_prompt {
+            if self.system_prompt.is_empty() {
+                self.system_prompt = prompt.clone();
+            }
+        }
+        if let Some(level) = profile.thinking_level {
+            if self.thinking_level == ThinkingLevel::Off {
+                self.thinking_level = level;
+            }
+        }
+        if let Some(temp) = profile.temperature {
+            if self.temperature.is_none() {
+                self.temperature = Some(temp);
+            }
+        }
+        if let Some(max) = profile.max_tokens {
+            if self.max_tokens.is_none() {
+                self.max_tokens = Some(max);
+            }
+        }
+        if let Some(ref id) = profile.config_id {
+            if self.config_id.is_none() {
+                self.config_id = Some(id.clone());
+            }
+        }
+        self.profile = Some(profile);
+        self
+    }
+
+    /// Set the temperature for LLM calls.
+    pub fn with_temperature(mut self, temp: f32) -> Self {
+        self.temperature = Some(temp);
+        self
+    }
+
+    /// Set the config identity, used as the middle segment of `loop_id`.
+    pub fn with_config_id(mut self, id: impl Into<String>) -> Self {
+        self.config_id = Some(id.into());
+        self
+    }
+
+    /// Set the before-loop hook. Return `false` to abort the loop.
+    pub fn on_before_loop(
+        mut self,
+        f: impl Fn(&[AgentMessage], usize) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.before_loop = Some(Arc::new(f));
+        self
+    }
+
+    /// Set the after-loop hook.
+    pub fn on_after_loop(
+        mut self,
+        f: impl Fn(&[AgentMessage], &Usage) + Send + Sync + 'static,
+    ) -> Self {
+        self.after_loop = Some(Arc::new(f));
+        self
+    }
+
+    /// Set the before-tool-execution hook. Return `false` to skip the tool call.
+    pub fn on_before_tool_execution(
+        mut self,
+        f: impl Fn(&str, &str, &serde_json::Value) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.before_tool_execution = Some(Arc::new(f));
+        self
+    }
+
+    /// Set the after-tool-execution hook.
+    pub fn on_after_tool_execution(
+        mut self,
+        f: impl Fn(&str, &str, bool) + Send + Sync + 'static,
+    ) -> Self {
+        self.after_tool_execution = Some(Arc::new(f));
+        self
+    }
+
+    /// Set the before-tool-execution-update hook. Return `false` to suppress the event.
+    pub fn on_before_tool_execution_update(
+        mut self,
+        f: impl Fn(&str, &str, &str) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.before_tool_execution_update = Some(Arc::new(f));
+        self
+    }
+
+    /// Set the after-tool-execution-update hook.
+    pub fn on_after_tool_execution_update(
+        mut self,
+        f: impl Fn(&str, &str, &str) + Send + Sync + 'static,
+    ) -> Self {
+        self.after_tool_execution_update = Some(Arc::new(f));
+        self
+    }
+
+    /// Set a custom convert-to-LLM function.
+    pub fn with_convert_to_llm(
+        mut self,
+        f: impl Fn(&[AgentMessage]) -> Vec<Message> + Send + Sync + 'static,
+    ) -> Self {
+        self.convert_to_llm = Some(Arc::new(f));
+        self
+    }
+
+    /// Set a custom transform-context function.
+    pub fn with_transform_context(
+        mut self,
+        f: impl Fn(Vec<AgentMessage>) -> Vec<AgentMessage> + Send + Sync + 'static,
+    ) -> Self {
+        self.transform_context = Some(Arc::new(f));
+        self
+    }
+
+    /// Set a custom block compaction strategy for Session-aware compaction.
+    pub fn with_block_compaction_strategy(
+        mut self,
+        strategy: impl crate::context::BlockCompactionStrategy + 'static,
+    ) -> Self {
+        self.block_compaction_strategy = Some(Arc::new(strategy));
+        self
+    }
+
+    /// Set the before-compaction-start hook (G1). Return `false` to skip compaction.
+    pub fn on_before_compaction_start(
+        mut self,
+        f: impl Fn(usize, usize) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.before_compaction_start = Some(Arc::new(f));
+        self
+    }
+
+    /// Set the after-compaction-end hook (G1).
+    pub fn on_after_compaction_end(
+        mut self,
+        f: impl Fn(usize, usize, usize, usize) + Send + Sync + 'static,
+    ) -> Self {
+        self.after_compaction_end = Some(Arc::new(f));
         self
     }
 
@@ -705,8 +883,8 @@ impl BasicAgent {
             thinking_level: self.thinking_level,
             max_tokens: self.max_tokens,
             temperature: self.temperature,
-            convert_to_llm: None,
-            transform_context: None,
+            convert_to_llm: self.convert_to_llm.clone(),
+            transform_context: self.transform_context.clone(),
             get_steering_messages: Some(Box::new(move || {
                 // This closure runs each time the agent loop checks for steering messages.
                 // `move` captured: steering_queue (Arc clone), steering_mode (Copy)
@@ -724,7 +902,7 @@ impl BasicAgent {
             })),
             context_config: self.context_config.clone(),
             compaction_strategy: self.compaction_strategy.clone(),
-            block_compaction_strategy: None,
+            block_compaction_strategy: self.block_compaction_strategy.clone(),
             execution_limits: self.execution_limits.clone(),
             cache_config: self.cache_config.clone(),
             tool_execution: self.tool_execution.clone(),
@@ -744,16 +922,18 @@ impl BasicAgent {
             })),
             before_turn: self.before_turn.clone(),
             after_turn: self.after_turn.clone(),
-            before_loop: None,
-            after_loop: None,
-            before_tool_execution: None,
-            after_tool_execution: None,
-            before_tool_execution_update: None,
-            after_tool_execution_update: None,
+            before_loop: self.before_loop.clone(),
+            after_loop: self.after_loop.clone(),
+            before_tool_execution: self.before_tool_execution.clone(),
+            after_tool_execution: self.after_tool_execution.clone(),
+            before_tool_execution_update: self.before_tool_execution_update.clone(),
+            after_tool_execution_update: self.after_tool_execution_update.clone(),
+            before_compaction_start: self.before_compaction_start.clone(),
+            after_compaction_end: self.after_compaction_end.clone(),
             on_error: self.on_error.clone(),
             input_filters: self.input_filters.clone(),
             first_turn_trigger: TurnTrigger::User,
-            config_id: None, // auto-derived in next_loop_id() from provider + model + thinking_level
+            config_id: self.config_id.clone(),
         }
     }
 
@@ -1038,5 +1218,106 @@ impl Agent for BasicAgent {
 
     fn set_follow_up_mode(&mut self, mode: QueueMode) {
         self.follow_up_mode = mode;
+    }
+
+    // ── Configuration access ─────────────────────────────────────────────
+
+    fn profile(&self) -> Option<&AgentProfile> {
+        self.profile.as_ref()
+    }
+
+    fn system_prompt(&self) -> &str {
+        &self.system_prompt
+    }
+
+    fn model_config(&self) -> Option<&ModelConfig> {
+        Some(&self.model_config)
+    }
+
+    fn thinking_level(&self) -> ThinkingLevel {
+        self.thinking_level
+    }
+
+    fn temperature(&self) -> Option<f32> {
+        self.temperature
+    }
+
+    fn max_tokens(&self) -> Option<u32> {
+        self.max_tokens
+    }
+
+    fn context_config(&self) -> Option<&ContextConfig> {
+        self.context_config.as_ref()
+    }
+
+    fn execution_limits(&self) -> Option<&ExecutionLimits> {
+        self.execution_limits.as_ref()
+    }
+
+    fn cache_config(&self) -> CacheConfig {
+        self.cache_config.clone()
+    }
+
+    fn tool_execution(&self) -> ToolExecutionStrategy {
+        self.tool_execution.clone()
+    }
+
+    fn retry_config(&self) -> crate::provider::retry::RetryConfig {
+        self.retry_config.clone()
+    }
+
+    // ── Session ──────────────────────────────────────────────────────────
+
+    fn session(&self) -> Option<&crate::session::Session> {
+        self.session.as_ref()
+    }
+
+    // ── Hook setters ─────────────────────────────────────────────────────
+
+    fn set_before_loop(&mut self, f: Option<BeforeLoopFn>) {
+        self.before_loop = f;
+    }
+
+    fn set_after_loop(&mut self, f: Option<AfterLoopFn>) {
+        self.after_loop = f;
+    }
+
+    fn set_before_tool_execution(&mut self, f: Option<BeforeToolExecutionFn>) {
+        self.before_tool_execution = f;
+    }
+
+    fn set_after_tool_execution(&mut self, f: Option<AfterToolExecutionFn>) {
+        self.after_tool_execution = f;
+    }
+
+    fn set_before_tool_execution_update(&mut self, f: Option<BeforeToolExecutionUpdateFn>) {
+        self.before_tool_execution_update = f;
+    }
+
+    fn set_after_tool_execution_update(&mut self, f: Option<AfterToolExecutionUpdateFn>) {
+        self.after_tool_execution_update = f;
+    }
+
+    fn set_convert_to_llm(&mut self, f: Option<ConvertToLlmFn>) {
+        self.convert_to_llm = f;
+    }
+
+    fn set_transform_context(&mut self, f: Option<TransformContextFn>) {
+        self.transform_context = f;
+    }
+
+    fn set_block_compaction_strategy(
+        &mut self,
+        s: Option<Arc<dyn crate::context::BlockCompactionStrategy>>,
+    ) {
+        self.block_compaction_strategy = s;
+    }
+
+    fn set_before_compaction_start(&mut self, f: Option<BeforeCompactionStartFn>) {
+        self.before_compaction_start = f;
+    }
+
+    fn set_after_compaction_end(&mut self, f: Option<AfterCompactionEndFn>) {
+        self.after_compaction_end = f;
     }
 }

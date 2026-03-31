@@ -8,9 +8,9 @@ use std::sync::Arc;
 /// and stored without lifetime complications. `Box<dyn Fn>` would suffice for single-owner
 /// cases but `Arc` makes it trivially cheap to share across async tasks.
 /// Converts `AgentMessage[]` → `Message[]` before each LLM call.
-pub type ConvertToLlmFn = Box<dyn Fn(&[AgentMessage]) -> Vec<Message> + Send + Sync>;
+pub type ConvertToLlmFn = Arc<dyn Fn(&[AgentMessage]) -> Vec<Message> + Send + Sync>;
 /// Transforms the full context before `convert_to_llm` (for pruning, reordering, injection).
-pub type TransformContextFn = Box<dyn Fn(Vec<AgentMessage>) -> Vec<AgentMessage> + Send + Sync>;
+pub type TransformContextFn = Arc<dyn Fn(Vec<AgentMessage>) -> Vec<AgentMessage> + Send + Sync>;
 /// Returns pending messages (steering interrupts or follow-up work) when polled.
 pub type GetMessagesFn = Box<dyn Fn() -> Vec<AgentMessage> + Send + Sync>;
 
@@ -67,6 +67,17 @@ pub type AfterToolExecutionUpdateFn = Arc<dyn Fn(&str, &str, &str) + Send + Sync
 
 /// Called when the LLM returns `StopReason::Error`. Argument: the error message string.
 pub type OnErrorFn = Arc<dyn Fn(&str) + Send + Sync>;
+
+// ── Compaction hooks (G1) ───────────────────────────────────────────────────
+/// Called before compaction starts.
+///
+/// Arguments: `(estimated_tokens, message_count)`.
+/// Return `false` to skip compaction for this cycle.
+pub type BeforeCompactionStartFn = Arc<dyn Fn(usize, usize) -> bool + Send + Sync>;
+/// Called after compaction completes.
+///
+/// Arguments: `(messages_before, messages_after, tokens_before, tokens_after)`.
+pub type AfterCompactionEndFn = Arc<dyn Fn(usize, usize, usize, usize) + Send + Sync>;
 
 /// All static settings for a single [`agent_loop`] / [`agent_loop_continue`] call.
 ///
@@ -155,6 +166,12 @@ pub struct AgentLoopConfig {
 
     /// Called when the LLM returns a `StopReason::Error`.
     pub on_error: Option<OnErrorFn>,
+
+    //******* Callbacks Compaction (G1) *******
+    /// Called before compaction starts. Return `false` to skip compaction.
+    pub before_compaction_start: Option<BeforeCompactionStartFn>,
+    /// Called after compaction completes.
+    pub after_compaction_end: Option<AfterCompactionEndFn>,
 
     /// Input filters applied to user messages before the LLM call.
     /// Filters run in order; first `Reject` wins and discards any accumulated

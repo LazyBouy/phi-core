@@ -156,6 +156,7 @@ Prioritized list of features that belong in phi-core (per [First Principles](../
 | ID | Feature | Why Core | Effort | Spec Ref |
 |----|---------|----------|--------|----------|
 | **G8** | ContextTranslationStrategy | Mid-session provider switching requires translating context between provider formats. Touches message pipeline inside the loop. | ~150 LOC | `provider.md`, misalignment table above |
+| **G10** | Tool Registry | Map tool names in config to tool instances at runtime. Currently config specifies tool names but caller must register instances via `.set_tools()`. Requires a registry pattern. | ~200 LOC | `config.md` |
 
 ### External — Not Core
 

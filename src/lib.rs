@@ -48,6 +48,8 @@ pub mod types;
 // retry.rs moved to provider/retry.rs
 // skills.rs moved to context/skills.rs
 
+pub mod config;
+
 // Feature-gated OpenAPI integration. Enabled with: cargo build --features openapi
 #[cfg(feature = "openapi")]
 pub mod openapi;
@@ -61,7 +63,10 @@ pub use agent_loop::evaluation::{
 };
 pub use agent_loop::{agent_loop, agent_loop_continue, agent_loop_parallel};
 pub use agents::SubAgentTool;
-pub use agents::{Agent, BasicAgent, QueueMode};
+pub use agents::{Agent, AgentProfile, BasicAgent, QueueMode};
+pub use config::{
+    agent_from_config, parse_config, parse_config_file, AgentConfig, ConfigError, ConfigFormat,
+};
 pub use context::skills::SkillSet;
 pub use context::{
     build_context_from_session, compact_session_loops, BlockCompactionStrategy, CompactedSection,
@@ -72,7 +77,7 @@ pub use provider::retry::RetryConfig;
 pub use session::{
     delete_session, list_session_ids, load_session, load_sessions_for_agent, save_session,
     ChildLoopRef, LoopConfigSnapshot, LoopEvent, LoopRecord, LoopStatus, ParallelGroupRecord,
-    Session, SessionError, SessionFormation, SessionRecorder, SessionRecorderConfig, SpawnRef,
-    Turn,
+    Session, SessionError, SessionFormation, SessionRecorder, SessionRecorderConfig, SessionScope,
+    SpawnRef, Turn,
 };
 pub use types::*; // glob re-export: ALL public items from types become top-level exports

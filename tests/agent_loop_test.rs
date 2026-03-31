@@ -38,6 +38,8 @@ fn make_config(provider: Arc<dyn phi_core::provider::StreamProvider>) -> AgentLo
         after_tool_execution: None,
         before_tool_execution_update: None,
         after_tool_execution_update: None,
+        before_compaction_start: None,
+        after_compaction_end: None,
         input_filters: vec![],
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
@@ -840,6 +842,8 @@ async fn test_retry_on_rate_limit_succeeds() {
         after_tool_execution: None,
         before_tool_execution_update: None,
         after_tool_execution_update: None,
+        before_compaction_start: None,
+        after_compaction_end: None,
         input_filters: vec![],
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
@@ -921,6 +925,8 @@ async fn test_retry_exhausted_returns_error() {
         after_tool_execution: None,
         before_tool_execution_update: None,
         after_tool_execution_update: None,
+        before_compaction_start: None,
+        after_compaction_end: None,
         input_filters: vec![],
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
@@ -1008,6 +1014,8 @@ async fn test_no_retry_on_auth_error() {
         after_tool_execution: None,
         before_tool_execution_update: None,
         after_tool_execution_update: None,
+        before_compaction_start: None,
+        after_compaction_end: None,
         input_filters: vec![],
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
@@ -1079,6 +1087,8 @@ async fn test_retry_none_disables_retries() {
         after_tool_execution: None,
         before_tool_execution_update: None,
         after_tool_execution_update: None,
+        before_compaction_start: None,
+        after_compaction_end: None,
         input_filters: vec![],
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
@@ -1343,6 +1353,8 @@ async fn test_on_error_fires_on_provider_error() {
         after_tool_execution: None,
         before_tool_execution_update: None,
         after_tool_execution_update: None,
+        before_compaction_start: None,
+        after_compaction_end: None,
         input_filters: vec![],
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
@@ -2733,6 +2745,8 @@ async fn test_custom_compaction_strategy_is_called() {
         after_tool_execution: None,
         before_tool_execution_update: None,
         after_tool_execution_update: None,
+        before_compaction_start: None,
+        after_compaction_end: None,
         input_filters: vec![],
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
@@ -2834,6 +2848,8 @@ async fn test_none_compaction_strategy_uses_default() {
         after_tool_execution: None,
         before_tool_execution_update: None,
         after_tool_execution_update: None,
+        before_compaction_start: None,
+        after_compaction_end: None,
         input_filters: vec![],
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
@@ -3313,4 +3329,145 @@ async fn test_parallel_continue_mode() {
     assert!(events
         .iter()
         .any(|e| matches!(e, AgentEvent::ParallelLoopEnd { .. })));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// New builder methods and hook tests (Phase 1 invocation layer)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_new_builder_methods_compile() {
+    // Verify all new builder methods chain correctly (compile-time check)
+    let _agent = phi_core::BasicAgent::new(ModelConfig::anthropic("mock", "mock", "test"))
+        .with_system_prompt("test")
+        .with_temperature(0.7)
+        .with_config_id("test-config")
+        .on_before_loop(|_msgs, _n| true)
+        .on_after_loop(|_msgs, _usage| {})
+        .on_before_tool_execution(|_name, _id, _args| true)
+        .on_after_tool_execution(|_name, _id, _error| {})
+        .on_before_tool_execution_update(|_name, _id, _text| true)
+        .on_after_tool_execution_update(|_name, _id, _text| {})
+        .with_convert_to_llm(|msgs| msgs.iter().filter_map(|m| m.as_llm().cloned()).collect())
+        .with_transform_context(|msgs| msgs)
+        .on_before_compaction_start(|_tokens, _count| true)
+        .on_after_compaction_end(|_before, _after, _tok_before, _tok_after| {});
+}
+
+#[tokio::test]
+async fn test_before_loop_hook_fires() {
+    let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let fired_clone = fired.clone();
+
+    let provider = Arc::new(MockProvider::texts(vec!["hello"]));
+    let mut config = make_config(provider);
+    config.before_loop = Some(Arc::new(move |_msgs, _n| {
+        fired_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        true // allow loop to proceed
+    }));
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    let msg = AgentMessage::Llm(LlmMessage::new(Message::user("test")));
+
+    let mut context = AgentContext {
+        system_prompt: String::new(),
+        messages: Vec::new(),
+        tools: vec![],
+        agent_id: Some("test".to_string()),
+        session_id: Some("test".to_string()),
+        loop_id: Some("test.loop.1".to_string()),
+        parent_loop_id: None,
+        continuation_kind: None,
+        session: None,
+    };
+
+    agent_loop(vec![msg], &mut context, &config, tx, cancel).await;
+    let events = collect_events(rx);
+
+    assert!(fired.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::AgentEnd { .. })));
+}
+
+#[tokio::test]
+async fn test_after_loop_hook_fires() {
+    let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let fired_clone = fired.clone();
+
+    let provider = Arc::new(MockProvider::texts(vec!["hello"]));
+    let mut config = make_config(provider);
+    config.after_loop = Some(Arc::new(move |_msgs, _usage| {
+        fired_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+    }));
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    let msg = AgentMessage::Llm(LlmMessage::new(Message::user("test")));
+
+    let mut context = AgentContext {
+        system_prompt: String::new(),
+        messages: Vec::new(),
+        tools: vec![],
+        agent_id: Some("test".to_string()),
+        session_id: Some("test".to_string()),
+        loop_id: Some("test.loop.1".to_string()),
+        parent_loop_id: None,
+        continuation_kind: None,
+        session: None,
+    };
+
+    agent_loop(vec![msg], &mut context, &config, tx, cancel).await;
+    let _events = collect_events(rx);
+
+    assert!(fired.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn test_tool_execution_hooks_fire() {
+    let before_fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let after_fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let before_clone = before_fired.clone();
+    let after_clone = after_fired.clone();
+
+    // Create a mock that returns a tool call, then a final response
+    let provider = Arc::new(MockProvider::new(vec![
+        MockResponse::ToolCalls(vec![MockToolCall {
+            name: "bash".to_string(),
+            arguments: serde_json::json!({"command": "echo hi"}),
+        }]),
+        MockResponse::Text("done".to_string()),
+    ]));
+    let mut config = make_config(provider);
+    config.before_tool_execution = Some(Arc::new(move |_name, _id, _args| {
+        before_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        true
+    }));
+    config.after_tool_execution = Some(Arc::new(move |_name, _id, _err| {
+        after_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+    }));
+
+    let tool = phi_core::tools::BashTool::default();
+    let (tx, rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    let msg = AgentMessage::Llm(LlmMessage::new(Message::user("run echo hi")));
+
+    let mut context = AgentContext {
+        system_prompt: String::new(),
+        messages: Vec::new(),
+        tools: vec![Arc::new(tool)],
+        agent_id: Some("test".to_string()),
+        session_id: Some("test".to_string()),
+        loop_id: Some("test.loop.1".to_string()),
+        parent_loop_id: None,
+        continuation_kind: None,
+        session: None,
+    };
+
+    agent_loop(vec![msg], &mut context, &config, tx, cancel).await;
+    let _events = collect_events(rx);
+
+    assert!(before_fired.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(after_fired.load(std::sync::atomic::Ordering::SeqCst));
 }

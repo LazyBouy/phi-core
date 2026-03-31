@@ -1,0 +1,43 @@
+# Sub-agent configuration
+# Demonstrates a parent agent that delegates to specialised sub-agents.
+# Each sub-agent has its own model, tools, and system prompt.
+
+# ── Parent agent ────────────────────────────────────────────────────────────
+
+[agent.profile]
+name = "orchestrator"
+system_prompt = """You coordinate work between specialised sub-agents.
+Use the researcher for information gathering and the code_writer for implementation."""
+thinking_level = "medium"
+
+# ── Default provider (parent agent uses this) ──────────────────────────────
+
+[provider]
+model = "claude-sonnet-4-20250514"
+api_key = "${ANTHROPIC_API_KEY}"
+
+# ── Sub-agents ──────────────────────────────────────────────────────────────
+
+[[sub_agents.instances]]
+name = "researcher"
+description = "Gathers information from files and search results"
+system_prompt = """You are a research assistant. Search thoroughly, summarise
+findings concisely, and cite file paths or sources."""
+model = "claude-sonnet-4-20250514"  # Can use the same or different model
+max_turns = 20                      # Limit sub-agent turn budget
+tools = ["search", "file_read"]     # Only the tools this sub-agent needs
+
+[[sub_agents.instances]]
+name = "code_writer"
+description = "Writes and tests code changes"
+system_prompt = """You are an expert coder. Make minimal, correct changes.
+Always run tests after modifying code."""
+model = "claude-sonnet-4-20250514"
+max_turns = 30
+tools = ["file_read", "file_write", "bash"]
+
+# ── Execution limits (apply to parent agent) ────────────────────────────────
+
+[execution]
+max_turns = 50
+max_cost = 10.0               # Combined budget for parent + sub-agents

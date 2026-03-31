@@ -1,0 +1,62 @@
+# Full coding agent configuration
+# Demonstrates agent profile, provider, tools, compaction, and execution limits.
+
+# ── Agent profile ───────────────────────────────────────────────────────────
+
+[agent.profile]
+name = "coding-agent"
+description = "A coding assistant with file and shell access"
+system_prompt = """You are an expert software engineer. You read code carefully,
+make minimal targeted changes, and always verify your work by running tests."""
+thinking_level = "high"       # "off", "minimal", "low", "medium", "high"
+temperature = 0.2             # Low temperature for precise code generation
+max_tokens = 16384            # Max output tokens per response
+
+# ── Provider ────────────────────────────────────────────────────────────────
+
+[provider]
+model = "claude-sonnet-4-20250514"
+api_key = "${ANTHROPIC_API_KEY}"
+api = "anthropic_messages"    # Explicit protocol (auto-detected from model if omitted)
+
+[provider.cost]
+input_per_million = 3.0       # Cost rates for budget tracking
+output_per_million = 15.0
+cache_read_per_million = 0.3
+cache_write_per_million = 3.75
+
+# ── Tools ───────────────────────────────────────────────────────────────────
+
+[tools]
+# Tool names resolved by the caller's tool registry at runtime
+enabled = ["bash", "file_read", "file_write", "search"]
+tool_strategy = "parallel"    # "sequential", "parallel", or "batched"
+
+# ── Compaction ──────────────────────────────────────────────────────────────
+
+[compaction]
+max_context_tokens = 200000   # Model context window
+system_prompt_tokens = 4000   # Tokens reserved for system prompt
+compact_at_pct = 0.85         # Start compaction at 85% capacity
+keep_first_turns = 2          # Always keep first 2 turns verbatim
+keep_recent_turns = 4         # Keep last 4 turns verbatim
+max_summary_tokens = 8000     # Budget for summarised middle section
+tool_output_max_lines = 100   # Truncate tool output in kept turns
+
+# ── Execution limits ────────────────────────────────────────────────────────
+
+[execution]
+max_turns = 50                # Maximum LLM turns per loop
+max_total_tokens = 1000000    # Total token budget across all turns
+max_duration_secs = 600       # 10-minute wall-clock limit
+max_cost = 5.0                # $5 cost cap
+
+[execution.retry]
+max_retries = 3               # Retry transient provider errors
+initial_delay_ms = 1000       # 1 second initial delay
+backoff_multiplier = 2.0      # Exponential backoff
+max_delay_ms = 30000          # 30 second max delay
+
+[execution.cache]
+enabled = true
+strategy = "auto"             # "auto", "disabled"

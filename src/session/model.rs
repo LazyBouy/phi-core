@@ -1,3 +1,4 @@
+use crate::provider::ModelConfig;
 use crate::types::*;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -403,6 +404,22 @@ impl LoopRecord {
 }
 
 // ---------------------------------------------------------------------------
+// SessionScope
+// ---------------------------------------------------------------------------
+
+/// Whether session data is kept in memory only or persisted to disk.
+///
+/// - `Ephemeral` (default): session exists only in memory for the process lifetime.
+/// - `Persistent`: session data is written to a store and survives restarts.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionScope {
+    #[default]
+    Ephemeral,
+    Persistent,
+}
+
+// ---------------------------------------------------------------------------
 // Session
 // ---------------------------------------------------------------------------
 
@@ -448,6 +465,27 @@ pub struct Session {
     /// `AgentStart` carries a `parent_loop_id` that belongs to a different
     /// `session_id`.
     pub parent_spawn_ref: Option<SpawnRef>,
+
+    // ── Session-level config overrides (G4, G7, G9) ────────────────────────
+    /// Session-level model config override (G4).
+    /// When set, this model is used for all loops in this session instead of the
+    /// agent's default.
+    #[serde(default)]
+    pub model_config: Option<ModelConfig>,
+
+    /// Session-level thinking level override (G9).
+    /// Takes precedence over the agent profile's thinking_level.
+    #[serde(default)]
+    pub thinking_level: Option<ThinkingLevel>,
+
+    /// Session-level temperature override (G9).
+    /// Takes precedence over the agent profile's temperature.
+    #[serde(default)]
+    pub temperature: Option<f32>,
+
+    /// Session scope — ephemeral (in-memory only) or persistent (written to store) (G7).
+    #[serde(default)]
+    pub scope: SessionScope,
 
     /// All completed and in-progress [`LoopRecord`]s, ordered by [`LoopRecord::started_at`].
     pub loops: Vec<LoopRecord>,

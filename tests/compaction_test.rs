@@ -2,7 +2,7 @@
 
 use chrono::Utc;
 use phi_core::context::*;
-use phi_core::session::{LoopRecord, LoopStatus, Session, SessionFormation};
+use phi_core::session::{LoopRecord, LoopStatus, Session, SessionFormation, SessionScope};
 use phi_core::*;
 
 // ---------------------------------------------------------------------------
@@ -66,6 +66,10 @@ fn make_session(loops: Vec<LoopRecord>) -> Session {
         last_active_at: now,
         formation: SessionFormation::Explicit { timestamp: now },
         parent_spawn_ref: None,
+        model_config: None,
+        thinking_level: None,
+        temperature: None,
+        scope: SessionScope::Ephemeral,
         loops,
     }
 }

@@ -1,0 +1,7 @@
+{
+  "_comment": "Minimal phi-core agent configuration in JSON format. Equivalent to minimal.toml.",
+  "provider": {
+    "model": "claude-sonnet-4-20250514",
+    "api_key": "${ANTHROPIC_API_KEY}"
+  }
+}

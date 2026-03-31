@@ -23,6 +23,14 @@
 //! - Steering/follow-up queue methods — no-ops. Override to support mid-run interrupts.
 //! - `last_loop_id` — returns `None`. Override if your impl tracks loop identity.
 
+use crate::agent_loop::{
+    AfterCompactionEndFn, AfterLoopFn, AfterToolExecutionFn, AfterToolExecutionUpdateFn,
+    AgentLoopConfig, BeforeCompactionStartFn, BeforeLoopFn, BeforeToolExecutionFn,
+    BeforeToolExecutionUpdateFn, ConvertToLlmFn, TransformContextFn,
+};
+use crate::agents::AgentProfile;
+use crate::context::{ContextConfig, ExecutionLimits};
+use crate::provider::ModelConfig;
 use crate::types::*;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -195,4 +203,161 @@ pub trait Agent: Send {
 
     /// Set how follow-up messages are delivered. Default: no-op.
     fn set_follow_up_mode(&mut self, _mode: QueueMode) {}
+
+    // ── Configuration access (defaulted) ──────────────────────────────────
+
+    /// The agent's profile blueprint. Default: `None`.
+    fn profile(&self) -> Option<&AgentProfile> {
+        None
+    }
+
+    /// The agent's system prompt. Default: empty string.
+    fn system_prompt(&self) -> &str {
+        ""
+    }
+
+    /// The agent's model configuration. Default: `None`.
+    fn model_config(&self) -> Option<&ModelConfig> {
+        None
+    }
+
+    /// The agent's thinking level. Default: `ThinkingLevel::Off`.
+    fn thinking_level(&self) -> ThinkingLevel {
+        ThinkingLevel::Off
+    }
+
+    /// The agent's temperature setting. Default: `None`.
+    fn temperature(&self) -> Option<f32> {
+        None
+    }
+
+    /// The agent's max tokens setting. Default: `None`.
+    fn max_tokens(&self) -> Option<u32> {
+        None
+    }
+
+    /// The agent's context config. Default: `None`.
+    fn context_config(&self) -> Option<&ContextConfig> {
+        None
+    }
+
+    /// The agent's execution limits. Default: `None`.
+    fn execution_limits(&self) -> Option<&ExecutionLimits> {
+        None
+    }
+
+    /// The agent's cache config. Default: `CacheConfig::default()`.
+    fn cache_config(&self) -> CacheConfig {
+        CacheConfig::default()
+    }
+
+    /// The agent's tool execution strategy. Default: `ToolExecutionStrategy::default()`.
+    fn tool_execution(&self) -> ToolExecutionStrategy {
+        ToolExecutionStrategy::default()
+    }
+
+    /// The agent's retry config. Default: `RetryConfig::default()`.
+    fn retry_config(&self) -> crate::provider::retry::RetryConfig {
+        crate::provider::retry::RetryConfig::default()
+    }
+
+    // ── Session (defaulted) ───────────────────────────────────────────────
+
+    /// The agent's current session. Default: `None`.
+    fn session(&self) -> Option<&crate::session::Session> {
+        None
+    }
+
+    // ── Hook setters (defaulted — no-ops) ─────────────────────────────────
+
+    /// Set the before-loop hook. Default: no-op.
+    fn set_before_loop(&mut self, _f: Option<BeforeLoopFn>) {}
+
+    /// Set the after-loop hook. Default: no-op.
+    fn set_after_loop(&mut self, _f: Option<AfterLoopFn>) {}
+
+    /// Set the before-tool-execution hook. Default: no-op.
+    fn set_before_tool_execution(&mut self, _f: Option<BeforeToolExecutionFn>) {}
+
+    /// Set the after-tool-execution hook. Default: no-op.
+    fn set_after_tool_execution(&mut self, _f: Option<AfterToolExecutionFn>) {}
+
+    /// Set the before-tool-execution-update hook. Default: no-op.
+    fn set_before_tool_execution_update(&mut self, _f: Option<BeforeToolExecutionUpdateFn>) {}
+
+    /// Set the after-tool-execution-update hook. Default: no-op.
+    fn set_after_tool_execution_update(&mut self, _f: Option<AfterToolExecutionUpdateFn>) {}
+
+    /// Set the convert-to-LLM function. Default: no-op.
+    fn set_convert_to_llm(&mut self, _f: Option<ConvertToLlmFn>) {}
+
+    /// Set the transform-context function. Default: no-op.
+    fn set_transform_context(&mut self, _f: Option<TransformContextFn>) {}
+
+    /// Set the block compaction strategy. Default: no-op.
+    fn set_block_compaction_strategy(
+        &mut self,
+        _s: Option<Arc<dyn crate::context::BlockCompactionStrategy>>,
+    ) {
+    }
+
+    /// Set the before-compaction-start hook (G1). Default: no-op.
+    fn set_before_compaction_start(&mut self, _f: Option<BeforeCompactionStartFn>) {}
+
+    /// Set the after-compaction-end hook (G1). Default: no-op.
+    fn set_after_compaction_end(&mut self, _f: Option<AfterCompactionEndFn>) {}
+
+    // ── Config assembly (defaulted) ───────────────────────────────────────
+
+    /// Assemble an [`AgentLoopConfig`] from this agent's current settings.
+    ///
+    /// The default implementation builds a config from the trait's accessor methods.
+    /// `BasicAgent` overrides this to additionally wire steering queues, hooks, and
+    /// other implementation-specific state.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `model_config()` returns `None`. Override `build_config()` or
+    /// implement `model_config()` to avoid this.
+    fn build_config(&self) -> AgentLoopConfig {
+        let model_config = self
+            .model_config()
+            .expect(
+                "build_config() requires model_config(); \
+                 override build_config() or implement model_config()",
+            )
+            .clone();
+        AgentLoopConfig {
+            model_config,
+            provider_override: None,
+            thinking_level: self.thinking_level(),
+            max_tokens: self.max_tokens(),
+            temperature: self.temperature(),
+            convert_to_llm: None,
+            transform_context: None,
+            get_steering_messages: None,
+            get_follow_up_messages: None,
+            context_config: self.context_config().cloned(),
+            compaction_strategy: None,
+            block_compaction_strategy: None,
+            execution_limits: self.execution_limits().cloned(),
+            cache_config: self.cache_config(),
+            tool_execution: self.tool_execution(),
+            retry_config: self.retry_config(),
+            before_turn: None,
+            after_turn: None,
+            before_loop: None,
+            after_loop: None,
+            before_tool_execution: None,
+            after_tool_execution: None,
+            before_tool_execution_update: None,
+            after_tool_execution_update: None,
+            before_compaction_start: None,
+            after_compaction_end: None,
+            on_error: None,
+            input_filters: vec![],
+            first_turn_trigger: TurnTrigger::User,
+            config_id: None,
+        }
+    }
 }

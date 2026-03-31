@@ -41,6 +41,8 @@ fn make_config(provider: Arc<dyn phi_core::provider::StreamProvider>) -> AgentLo
         after_tool_execution: None,
         before_tool_execution_update: None,
         after_tool_execution_update: None,
+        before_compaction_start: None,
+        after_compaction_end: None,
         input_filters: vec![],
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
@@ -403,6 +405,10 @@ async fn test_session_list_ids() {
             timestamp: chrono::Utc::now(),
         },
         parent_spawn_ref: None,
+        model_config: None,
+        thinking_level: None,
+        temperature: None,
+        scope: SessionScope::Ephemeral,
         loops: Vec::new(),
     };
 
@@ -435,6 +441,10 @@ fn test_session_delete() {
             timestamp: chrono::Utc::now(),
         },
         parent_spawn_ref: None,
+        model_config: None,
+        thinking_level: None,
+        temperature: None,
+        scope: SessionScope::Ephemeral,
         loops: Vec::new(),
     };
     save_session(&session, dir.path()).unwrap();
@@ -1156,6 +1166,10 @@ async fn test_load_sessions_for_agent() {
                 timestamp: chrono::Utc::now(),
             },
             parent_spawn_ref: None,
+            model_config: None,
+            thinking_level: None,
+            temperature: None,
+            scope: SessionScope::Ephemeral,
             loops: Vec::new(),
         })
         .collect();
@@ -1168,6 +1182,10 @@ async fn test_load_sessions_for_agent() {
             timestamp: chrono::Utc::now(),
         },
         parent_spawn_ref: None,
+        model_config: None,
+        thinking_level: None,
+        temperature: None,
+        scope: SessionScope::Ephemeral,
         loops: Vec::new(),
     };
 
@@ -1693,4 +1711,68 @@ fn test_turn_agent_end_cleans_orphaned_partial_turn() {
     let lr = &sessions[0].loops[0];
     // No turns should be materialized.
     assert_eq!(lr.turn_count(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// test_session_scope_serde_roundtrip
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_session_scope_serde_roundtrip() {
+    use phi_core::session::SessionScope;
+
+    // Persistent round-trip
+    let persistent = SessionScope::Persistent;
+    let json = serde_json::to_string(&persistent).unwrap();
+    let deserialized: SessionScope = serde_json::from_str(&json).unwrap();
+    assert_eq!(deserialized, SessionScope::Persistent);
+
+    // Ephemeral round-trip
+    let ephemeral = SessionScope::Ephemeral;
+    let json = serde_json::to_string(&ephemeral).unwrap();
+    let deserialized: SessionScope = serde_json::from_str(&json).unwrap();
+    assert_eq!(deserialized, SessionScope::Ephemeral);
+}
+
+// ---------------------------------------------------------------------------
+// test_session_new_fields_backward_compat
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_session_new_fields_backward_compat() {
+    use phi_core::session::{Session, SessionScope};
+
+    // A Session JSON with NO model_config, thinking_level, temperature, or scope fields.
+    // This simulates loading a session persisted before those fields were added.
+    let json = serde_json::json!({
+        "session_id": "s-compat",
+        "agent_id": "a-1",
+        "created_at": "2025-01-01T00:00:00Z",
+        "last_active_at": "2025-01-01T00:00:00Z",
+        "formation": { "FirstLoop": { "timestamp": "2025-01-01T00:00:00Z" } },
+        "parent_spawn_ref": null,
+        "loops": []
+    });
+
+    let session: Session =
+        serde_json::from_value(json).expect("backward-compat deserialization should succeed");
+
+    assert_eq!(session.session_id, "s-compat");
+    assert!(
+        session.model_config.is_none(),
+        "model_config should default to None"
+    );
+    assert!(
+        session.thinking_level.is_none(),
+        "thinking_level should default to None"
+    );
+    assert!(
+        session.temperature.is_none(),
+        "temperature should default to None"
+    );
+    assert_eq!(
+        session.scope,
+        SessionScope::Ephemeral,
+        "scope should default to Ephemeral"
+    );
 }

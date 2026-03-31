@@ -1,0 +1,33 @@
+# Multi-provider configuration
+# Demonstrates defining multiple provider instances alongside a default.
+# The default [provider] is used unless an agent or sub-agent references
+# a named instance by name.
+
+# ── Default provider (used when no instance is specified) ───────────────────
+
+[provider]
+model = "claude-sonnet-4-20250514"
+api_key = "${ANTHROPIC_API_KEY}"
+api = "anthropic_messages"
+provider = "anthropic"
+
+# ── Named provider instances ────────────────────────────────────────────────
+
+[[provider.instances]]
+name = "openai"               # Reference this as provider = "openai" in sub-agents
+model = "gpt-4o"
+api_key = "${OPENAI_API_KEY}"
+api = "openai_completions"
+
+[[provider.instances]]
+name = "local"                # Local model via OpenAI-compatible API
+model = "qwen2.5-coder-32b"
+api = "openai_completions"
+base_url = "http://localhost:11434/v1"
+# No api_key needed for local models
+
+# ── Agent ───────────────────────────────────────────────────────────────────
+
+[agent.profile]
+name = "multi-provider-agent"
+system_prompt = "You are a helpful assistant."

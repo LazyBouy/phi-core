@@ -188,94 +188,118 @@ pub(super) async fn run_loop(
                 if headroom < comp.compact_budget_threshold_pct {
                     let msgs_before = context.messages.len();
 
-                    tx.send(AgentEvent::CompactionStarted {
-                        loop_id: loop_id.clone(),
-                        estimated_tokens: estimated,
-                        message_count: msgs_before,
-                        timestamp: Utc::now(),
-                    })
-                    .ok();
+                    // G1: before_compaction_start hook — skip compaction if returns false
+                    let compaction_allowed = config
+                        .before_compaction_start
+                        .as_ref()
+                        .map_or(true, |hook| hook(estimated, msgs_before));
 
-                    if let Some(ref mut session) = context.session {
-                        // Block-based compaction path (Session available)
-                        let lid = context.loop_id.as_deref().unwrap_or("");
+                    if compaction_allowed {
+                        tx.send(AgentEvent::CompactionStarted {
+                            loop_id: loop_id.clone(),
+                            estimated_tokens: estimated,
+                            message_count: msgs_before,
+                            timestamp: Utc::now(),
+                        })
+                        .ok();
 
-                        // Ensure current loop exists in session with up-to-date messages
-                        if session.get_loop(lid).is_none() {
-                            session.loops.push(crate::session::LoopRecord {
-                                loop_id: lid.to_string(),
-                                session_id: context.session_id.clone().unwrap_or_default(),
-                                agent_id: context.agent_id.clone().unwrap_or_default(),
-                                parent_loop_id: context.parent_loop_id.clone(),
-                                continuation_kind: context.continuation_kind.clone(),
-                                started_at: Utc::now(),
-                                ended_at: None,
-                                status: crate::session::LoopStatus::Running,
-                                rejection: None,
-                                config: None,
-                                messages: context.messages.clone(),
-                                turns: Vec::new(),
-                                usage: Usage::default(),
-                                metadata: None,
-                                events: Vec::new(),
-                                children_loop_ids: Vec::new(),
-                                child_loop_refs: Vec::new(),
-                                parallel_group: None,
-                                compaction_block: None,
-                            });
-                        } else if let Some(record) = session.get_loop_mut(lid) {
-                            record.messages = context.messages.clone();
-                        }
+                        if let Some(ref mut session) = context.session {
+                            // Block-based compaction path (Session available)
+                            let lid = context.loop_id.as_deref().unwrap_or("");
 
-                        let block_strategy: &dyn BlockCompactionStrategy = config
-                            .block_compaction_strategy
-                            .as_deref()
-                            .unwrap_or(&DefaultBlockCompaction);
-                        compact_session_loops(session, lid, block_strategy, comp, max_tokens);
-                        context.messages =
-                            build_context_from_session(session, lid, comp, max_tokens);
+                            // Ensure current loop exists in session with up-to-date messages
+                            if session.get_loop(lid).is_none() {
+                                session.loops.push(crate::session::LoopRecord {
+                                    loop_id: lid.to_string(),
+                                    session_id: context.session_id.clone().unwrap_or_default(),
+                                    agent_id: context.agent_id.clone().unwrap_or_default(),
+                                    parent_loop_id: context.parent_loop_id.clone(),
+                                    continuation_kind: context.continuation_kind.clone(),
+                                    started_at: Utc::now(),
+                                    ended_at: None,
+                                    status: crate::session::LoopStatus::Running,
+                                    rejection: None,
+                                    config: None,
+                                    messages: context.messages.clone(),
+                                    turns: Vec::new(),
+                                    usage: Usage::default(),
+                                    metadata: None,
+                                    events: Vec::new(),
+                                    children_loop_ids: Vec::new(),
+                                    child_loop_refs: Vec::new(),
+                                    parallel_group: None,
+                                    compaction_block: None,
+                                });
+                            } else if let Some(record) = session.get_loop_mut(lid) {
+                                record.messages = context.messages.clone();
+                            }
 
-                        let chain = session.loop_chain_to(lid);
-                        let loops_compacted = chain
-                            .iter()
-                            .filter(|l| {
-                                session
-                                    .get_loop(l)
-                                    .map(|r| r.compaction_block.is_some())
-                                    .unwrap_or(false)
+                            let block_strategy: &dyn BlockCompactionStrategy = config
+                                .block_compaction_strategy
+                                .as_deref()
+                                .unwrap_or(&DefaultBlockCompaction);
+                            compact_session_loops(session, lid, block_strategy, comp, max_tokens);
+                            context.messages =
+                                build_context_from_session(session, lid, comp, max_tokens);
+
+                            let chain = session.loop_chain_to(lid);
+                            let loops_compacted = chain
+                                .iter()
+                                .filter(|l| {
+                                    session
+                                        .get_loop(l)
+                                        .map(|r| r.compaction_block.is_some())
+                                        .unwrap_or(false)
+                                })
+                                .count();
+
+                            let messages_after = context.messages.len();
+                            let tokens_after = total_tokens(&context.messages);
+
+                            tx.send(AgentEvent::CompactionEnded {
+                                loop_id: loop_id.clone(),
+                                messages_before: msgs_before,
+                                messages_after,
+                                estimated_tokens_before: estimated,
+                                estimated_tokens_after: tokens_after,
+                                loops_compacted,
+                                timestamp: Utc::now(),
                             })
-                            .count();
+                            .ok();
 
-                        tx.send(AgentEvent::CompactionEnded {
-                            loop_id: loop_id.clone(),
-                            messages_before: msgs_before,
-                            messages_after: context.messages.len(),
-                            estimated_tokens_before: estimated,
-                            estimated_tokens_after: total_tokens(&context.messages),
-                            loops_compacted,
-                            timestamp: Utc::now(),
-                        })
-                        .ok();
-                    } else {
-                        // In-memory fallback (no Session — sub-agents, tests, etc.)
-                        let strategy: &dyn CompactionStrategy = config
-                            .compaction_strategy
-                            .as_deref()
-                            .unwrap_or(&DefaultCompaction);
-                        context.messages =
-                            strategy.compact(std::mem::take(&mut context.messages), ctx_config);
+                            // G1: after_compaction_end hook
+                            if let Some(ref hook) = config.after_compaction_end {
+                                hook(msgs_before, messages_after, estimated, tokens_after);
+                            }
+                        } else {
+                            // In-memory fallback (no Session — sub-agents, tests, etc.)
+                            let strategy: &dyn CompactionStrategy = config
+                                .compaction_strategy
+                                .as_deref()
+                                .unwrap_or(&DefaultCompaction);
+                            context.messages =
+                                strategy.compact(std::mem::take(&mut context.messages), ctx_config);
 
-                        tx.send(AgentEvent::CompactionEnded {
-                            loop_id: loop_id.clone(),
-                            messages_before: msgs_before,
-                            messages_after: context.messages.len(),
-                            estimated_tokens_before: estimated,
-                            estimated_tokens_after: total_tokens(&context.messages),
-                            loops_compacted: 0,
-                            timestamp: Utc::now(),
-                        })
-                        .ok();
-                    }
+                            let messages_after = context.messages.len();
+                            let tokens_after = total_tokens(&context.messages);
+
+                            tx.send(AgentEvent::CompactionEnded {
+                                loop_id: loop_id.clone(),
+                                messages_before: msgs_before,
+                                messages_after,
+                                estimated_tokens_before: estimated,
+                                estimated_tokens_after: tokens_after,
+                                loops_compacted: 0,
+                                timestamp: Utc::now(),
+                            })
+                            .ok();
+
+                            // G1: after_compaction_end hook
+                            if let Some(ref hook) = config.after_compaction_end {
+                                hook(msgs_before, messages_after, estimated, tokens_after);
+                            }
+                        }
+                    } // if compaction_allowed
                 }
             }
 

@@ -1,0 +1,54 @@
+# MCP (Model Context Protocol) tools configuration
+# Demonstrates MCP server integration alongside built-in tools.
+# MCP servers expose tools that are transparently wrapped as AgentTool instances.
+
+# ── Provider ────────────────────────────────────────────────────────────────
+
+[provider]
+model = "claude-sonnet-4-20250514"
+api_key = "${ANTHROPIC_API_KEY}"
+
+# ── Agent ───────────────────────────────────────────────────────────────────
+
+[agent.profile]
+name = "mcp-agent"
+system_prompt = """You are a development assistant with access to GitHub and
+the local filesystem via MCP servers, plus built-in coding tools."""
+
+# ── Built-in tools ──────────────────────────────────────────────────────────
+
+[tools]
+enabled = ["bash", "file_read", "file_write"]
+tool_strategy = "parallel"
+
+# ── MCP tool instances ──────────────────────────────────────────────────────
+# Each MCP server is declared as a tool instance with connection config.
+# The MCP client discovers available tools from each server at startup.
+
+[[tools.instances]]
+name = "github"
+enabled = true
+
+[tools.instances.config]
+# MCP transport: "stdio" launches a subprocess, "http" connects to a URL
+transport = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+
+[tools.instances.config.env]
+GITHUB_PERSONAL_ACCESS_TOKEN = "${GITHUB_TOKEN}"
+
+[[tools.instances]]
+name = "filesystem"
+enabled = true
+
+[tools.instances.config]
+transport = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/projects"]
+
+# ── Execution ───────────────────────────────────────────────────────────────
+
+[execution]
+max_turns = 30
+max_cost = 5.0

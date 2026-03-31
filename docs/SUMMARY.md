@@ -25,6 +25,7 @@
 
 # Guides
 
+- [Configuration](guides/configuration.md)
 - [MCP Integration](guides/mcp.md)
 - [OpenAPI Tools](guides/openapi.md)
 

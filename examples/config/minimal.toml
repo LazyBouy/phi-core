@@ -1,0 +1,7 @@
+# Minimal phi-core agent configuration
+# Only requires [provider] with model and api_key.
+# All other sections use sensible defaults.
+
+[provider]
+model = "claude-sonnet-4-20250514"
+api_key = "${ANTHROPIC_API_KEY}"

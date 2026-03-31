@@ -146,6 +146,10 @@ impl SessionRecorder {
                         last_active_at: now,
                         formation: SessionFormation::FirstLoop { timestamp: now },
                         parent_spawn_ref: None,
+                        model_config: None,
+                        thinking_level: None,
+                        temperature: None,
+                        scope: SessionScope::Ephemeral,
                         loops: Vec::new(),
                     });
                 session.last_active_at = now;

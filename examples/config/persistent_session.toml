@@ -1,0 +1,47 @@
+# Persistent session configuration
+# Demonstrates session scope, thinking level override, and strict execution limits
+# with cost tracking.
+
+# ── Provider ────────────────────────────────────────────────────────────────
+
+[provider]
+model = "claude-sonnet-4-20250514"
+api_key = "${ANTHROPIC_API_KEY}"
+
+[provider.cost]
+input_per_million = 3.0       # Required for cost tracking / max_cost enforcement
+output_per_million = 15.0
+cache_read_per_million = 0.3
+cache_write_per_million = 3.75
+
+# ── Session ─────────────────────────────────────────────────────────────────
+
+[session]
+scope = "persistent"          # "ephemeral" (default) or "persistent"
+thinking_level = "high"       # Session-level override (takes precedence over profile)
+temperature = 0.3             # Session-level temperature override
+
+# ── Agent profile ───────────────────────────────────────────────────────────
+
+[agent.profile]
+name = "persistent-agent"
+system_prompt = "You are a long-running assistant that maintains context across sessions."
+thinking_level = "medium"     # Profile default — overridden by session.thinking_level
+
+# ── Execution limits (strict) ──────────────────────────────────────────────
+
+[execution]
+max_turns = 100               # Higher limit for persistent sessions
+max_total_tokens = 2000000    # 2M token budget
+max_duration_secs = 1800      # 30-minute wall-clock limit
+max_cost = 20.0               # $20 cost cap — enforced via provider.cost rates
+
+[execution.retry]
+max_retries = 5               # More retries for long-running sessions
+initial_delay_ms = 2000
+backoff_multiplier = 2.0
+max_delay_ms = 60000          # 1-minute max delay
+
+[execution.cache]
+enabled = true
+strategy = "auto"
