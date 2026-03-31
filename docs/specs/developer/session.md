@@ -17,7 +17,7 @@ Session [EXISTS]
 │   ├── Model override [CONCEPTUAL]
 │   ├── thinking_level, temperature [CONCEPTUAL on Session]
 │   ├── Task Name, Task Status [CONCEPTUAL]
-│   └── Callbacks: before_task / after_task [CONCEPTUAL]
+│   └── Callbacks: before_task / after_task [EXISTS]
 ├── LINE ITEMS: Loops [EXISTS]
 ├── LINE ITEMS: Input Filters [EXISTS]
 └── SUMMARY: total_usage(), loop_chain_to() [EXISTS]
@@ -52,12 +52,14 @@ How the session was initially created. Enum `SessionFormation`:
 | `FirstLoop { timestamp }` | `[EXISTS]` | Created automatically when a new `session_id` first appeared in an `AgentStart` event. |
 | `InactivityTimeout { threshold_secs, previous_session_id, timestamp }` | `[EXISTS]` | New session opened because the agent was idle longer than the threshold. Requires prior `session_id` rotation via `BasicAgent::check_and_rotate`. |
 
-### Callbacks `[CONCEPTUAL]`
+### Callbacks `[EXISTS]`
 
-| Callback | Status | Description |
-|----------|--------|-------------|
-| `before_task` | `[CONCEPTUAL]` | Fires before the first loop in a session. Blank by default. |
-| `after_task` | `[CONCEPTUAL]` | Fires after the session's last loop completes. Blank by default. |
+Callbacks are configured on `SessionRecorderConfig`, not on the `Session` struct directly.
+
+| Callback | Type | Status | Description |
+|----------|------|--------|-------------|
+| `before_task` | `Option<BeforeTaskFn>` | `[EXISTS]` | Fires on the first `AgentStart` event with a new `session_id`. Blank by default. |
+| `after_task` | `Option<AfterTaskFn>` | `[EXISTS]` | Fires on `flush()`. Blank by default. |
 
 ---
 
@@ -119,4 +121,4 @@ Methods on the `Session` struct for querying and aggregating.
 - **Model override at Session level** is not implemented. The fallback hierarchy is currently Loop -> Agent default. Adding Session-level override would make it Loop -> Session -> Agent default.
 - **thinking_level and temperature** live on `BasicAgent` today. They are conceptually per-task (Session) attributes since different tasks may need different reasoning depths.
 - **Task Name and Task Status** would give sessions first-class task identity, enabling task dashboards and workflow tracking.
-- **before_task / after_task callbacks** would mirror the existing before_loop/after_loop and before_turn/after_turn callback pattern at the Session level. `AgentEvent::AgentStart` / `AgentEnd` should trigger these.
+- **before_task / after_task callbacks** now exist on `SessionRecorderConfig`. `before_task` fires on the first `AgentStart` with a new `session_id`; `after_task` fires on `flush()`. This mirrors the existing before_loop/after_loop and before_turn/after_turn callback pattern at the Session level.

@@ -234,8 +234,8 @@ pub(super) async fn run_loop(
                                 record.messages = context.messages.clone();
                             }
 
-                            let block_strategy: &dyn BlockCompactionStrategy = config
-                                .block_compaction_strategy
+                            let block_strategy: &dyn BlockCompactionStrategy = comp
+                                .block_strategy
                                 .as_deref()
                                 .unwrap_or(&DefaultBlockCompaction);
                             compact_session_loops(session, lid, block_strategy, comp, max_tokens);
@@ -273,8 +273,8 @@ pub(super) async fn run_loop(
                             }
                         } else {
                             // In-memory fallback (no Session — sub-agents, tests, etc.)
-                            let strategy: &dyn CompactionStrategy = config
-                                .compaction_strategy
+                            let strategy: &dyn CompactionStrategy = comp
+                                .in_memory_strategy
                                 .as_deref()
                                 .unwrap_or(&DefaultCompaction);
                             context.messages =

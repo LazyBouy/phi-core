@@ -130,9 +130,6 @@ pub struct BasicAgent {
     // Input filters
     input_filters: Vec<Arc<dyn InputFilter>>,
 
-    // Custom compaction strategy
-    compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
-
     // ── Hook/callback fields (wired into build_config) ──────────────────
     before_loop: Option<BeforeLoopFn>,
     after_loop: Option<AfterLoopFn>,
@@ -142,13 +139,13 @@ pub struct BasicAgent {
     after_tool_execution_update: Option<AfterToolExecutionUpdateFn>,
     convert_to_llm: Option<ConvertToLlmFn>,
     transform_context: Option<TransformContextFn>,
-    block_compaction_strategy: Option<Arc<dyn crate::context::BlockCompactionStrategy>>,
     before_compaction_start: Option<BeforeCompactionStartFn>,
     after_compaction_end: Option<AfterCompactionEndFn>,
 
-    // ── Profile and config identity ─────────────────────────────────────
+    // ── Profile, config identity, and workspace ──────────────────────────
     config_id: Option<String>,
     profile: Option<AgentProfile>,
+    workspace: Option<std::path::PathBuf>,
 
     // Control — cancel token is Some during a streaming call, None otherwise
     cancel: Option<CancellationToken>,
@@ -214,7 +211,6 @@ impl BasicAgent {
             after_turn: None,
             on_error: None,
             input_filters: Vec::new(),
-            compaction_strategy: None,
             before_loop: None,
             after_loop: None,
             before_tool_execution: None,
@@ -223,11 +219,11 @@ impl BasicAgent {
             after_tool_execution_update: None,
             convert_to_llm: None,
             transform_context: None,
-            block_compaction_strategy: None,
             before_compaction_start: None,
             after_compaction_end: None,
             config_id: None,
             profile: None,
+            workspace: None,
             cancel: None,
             is_streaming: false,
             agent_id: uuid::Uuid::new_v4().to_string(),
@@ -390,10 +386,13 @@ impl BasicAgent {
         self
     }
 
-    /// Set a custom compaction strategy. When set, replaces the default
-    /// `compact_messages()` call during context compaction.
+    /// Set a custom in-memory compaction strategy on the context config.
+    /// When set, replaces `DefaultCompaction` during context compaction
+    /// for sessionless runs. (G5: stored on CompactionConfig, not BasicAgent.)
     pub fn with_compaction_strategy(mut self, strategy: impl CompactionStrategy + 'static) -> Self {
-        self.compaction_strategy = Some(Arc::new(strategy));
+        if let Some(ref mut ctx) = self.context_config {
+            ctx.compaction.in_memory_strategy = Some(Arc::new(strategy));
+        }
         self
     }
 
@@ -440,6 +439,13 @@ impl BasicAgent {
     /// Set the config identity, used as the middle segment of `loop_id`.
     pub fn with_config_id(mut self, id: impl Into<String>) -> Self {
         self.config_id = Some(id.into());
+        self
+    }
+
+    /// Set the agent workspace directory. File paths in system prompt blocks
+    /// resolve relative to this directory.
+    pub fn with_workspace(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.workspace = Some(path.into());
         self
     }
 
@@ -516,11 +522,14 @@ impl BasicAgent {
     }
 
     /// Set a custom block compaction strategy for Session-aware compaction.
+    /// (G5: stored on CompactionConfig, not BasicAgent.)
     pub fn with_block_compaction_strategy(
         mut self,
         strategy: impl crate::context::BlockCompactionStrategy + 'static,
     ) -> Self {
-        self.block_compaction_strategy = Some(Arc::new(strategy));
+        if let Some(ref mut ctx) = self.context_config {
+            ctx.compaction.block_strategy = Some(Arc::new(strategy));
+        }
         self
     }
 
@@ -901,8 +910,6 @@ impl BasicAgent {
                 }
             })),
             context_config: self.context_config.clone(),
-            compaction_strategy: self.compaction_strategy.clone(),
-            block_compaction_strategy: self.block_compaction_strategy.clone(),
             execution_limits: self.execution_limits.clone(),
             cache_config: self.cache_config.clone(),
             tool_execution: self.tool_execution.clone(),
@@ -1272,6 +1279,10 @@ impl Agent for BasicAgent {
         self.session.as_ref()
     }
 
+    fn workspace(&self) -> Option<&std::path::Path> {
+        self.workspace.as_deref()
+    }
+
     // ── Hook setters ─────────────────────────────────────────────────────
 
     fn set_before_loop(&mut self, f: Option<BeforeLoopFn>) {
@@ -1310,7 +1321,10 @@ impl Agent for BasicAgent {
         &mut self,
         s: Option<Arc<dyn crate::context::BlockCompactionStrategy>>,
     ) {
-        self.block_compaction_strategy = s;
+        // G5: delegate to context_config.compaction
+        if let Some(ref mut ctx) = self.context_config {
+            ctx.compaction.block_strategy = s;
+        }
     }
 
     fn set_before_compaction_start(&mut self, f: Option<BeforeCompactionStartFn>) {

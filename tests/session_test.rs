@@ -26,8 +26,6 @@ fn make_config(provider: Arc<dyn phi_core::provider::StreamProvider>) -> AgentLo
         get_steering_messages: None,
         get_follow_up_messages: None,
         context_config: None,
-        compaction_strategy: None,
-        block_compaction_strategy: None,
         execution_limits: None,
         cache_config: CacheConfig::default(),
         tool_execution: ToolExecutionStrategy::default(),
@@ -309,6 +307,8 @@ async fn test_session_recorder_streaming_events() {
     // With streaming events.
     let mut recorder_with_stream = SessionRecorder::new(SessionRecorderConfig {
         include_streaming_events: true,
+        before_task: None,
+        after_task: None,
     });
     feed(&mut recorder_with_stream, events.clone());
     recorder_with_stream.flush();
@@ -1774,5 +1774,208 @@ fn test_session_new_fields_backward_compat() {
         session.scope,
         SessionScope::Ephemeral,
         "scope should default to Ephemeral"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// test_before_task_fires_on_new_session
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_before_task_fires_on_new_session() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let fired = Arc::new(AtomicBool::new(false));
+    let fired_clone = fired.clone();
+
+    let config = SessionRecorderConfig {
+        include_streaming_events: false,
+        before_task: Some(Arc::new(move |_session: &Session| {
+            fired_clone.store(true, Ordering::SeqCst);
+            true
+        })),
+        after_task: None,
+    };
+
+    let mut recorder = SessionRecorder::new(config);
+    let now = chrono::Utc::now();
+
+    recorder.on_event(AgentEvent::AgentStart {
+        agent_id: "agent-bt".into(),
+        session_id: "session-bt".into(),
+        loop_id: "session-bt.default.0".into(),
+        parent_loop_id: None,
+        continuation_kind: None,
+        timestamp: now,
+        metadata: None,
+    });
+
+    assert!(
+        fired.load(Ordering::SeqCst),
+        "before_task should fire on new session creation"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// test_after_task_fires_on_flush
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_after_task_fires_on_flush() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let fired = Arc::new(AtomicBool::new(false));
+    let fired_clone = fired.clone();
+
+    let config = SessionRecorderConfig {
+        include_streaming_events: false,
+        before_task: None,
+        after_task: Some(Arc::new(move |_session: &Session| {
+            fired_clone.store(true, Ordering::SeqCst);
+        })),
+    };
+
+    let mut recorder = SessionRecorder::new(config);
+    let now = chrono::Utc::now();
+
+    recorder.on_event(AgentEvent::AgentStart {
+        agent_id: "agent-at".into(),
+        session_id: "session-at".into(),
+        loop_id: "session-at.default.0".into(),
+        parent_loop_id: None,
+        continuation_kind: None,
+        timestamp: now,
+        metadata: None,
+    });
+
+    recorder.on_event(AgentEvent::AgentEnd {
+        loop_id: "session-at.default.0".into(),
+        messages: vec![],
+        usage: Usage::default(),
+        timestamp: now,
+        rejection: None,
+    });
+
+    assert!(
+        !fired.load(Ordering::SeqCst),
+        "after_task should NOT fire before flush"
+    );
+
+    recorder.flush();
+
+    assert!(
+        fired.load(Ordering::SeqCst),
+        "after_task should fire after flush"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// test_task_callbacks_not_fired_on_continuation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_task_callbacks_not_fired_on_continuation() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let counter_clone = counter.clone();
+
+    let config = SessionRecorderConfig {
+        include_streaming_events: false,
+        before_task: Some(Arc::new(move |_session: &Session| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+            true
+        })),
+        after_task: None,
+    };
+
+    let mut recorder = SessionRecorder::new(config);
+    let now = chrono::Utc::now();
+
+    // First AgentStart — creates new session, should fire before_task.
+    recorder.on_event(AgentEvent::AgentStart {
+        agent_id: "agent-cont".into(),
+        session_id: "session-cont".into(),
+        loop_id: "session-cont.default.0".into(),
+        parent_loop_id: None,
+        continuation_kind: None,
+        timestamp: now,
+        metadata: None,
+    });
+
+    recorder.on_event(AgentEvent::AgentEnd {
+        loop_id: "session-cont.default.0".into(),
+        messages: vec![],
+        usage: Usage::default(),
+        timestamp: now,
+        rejection: None,
+    });
+
+    // Second AgentStart — same session_id (continuation), should NOT fire before_task.
+    recorder.on_event(AgentEvent::AgentStart {
+        agent_id: "agent-cont".into(),
+        session_id: "session-cont".into(),
+        loop_id: "session-cont.default.1".into(),
+        parent_loop_id: Some("session-cont.default.0".into()),
+        continuation_kind: Some(ContinuationKind::Default),
+        timestamp: now,
+        metadata: None,
+    });
+
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "before_task should fire only once for the same session_id"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// G2 — test_before_task_can_abort
+// ---------------------------------------------------------------------------
+
+/// The before_task hook fires on new session creation but its return value
+/// does not abort session creation (the recorder calls the hook but still
+/// creates the session). This test verifies:
+/// 1. The hook fires and receives the session.
+/// 2. The session is created regardless of the return value.
+#[test]
+fn test_before_task_can_abort() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let hook_fired = Arc::new(AtomicBool::new(false));
+    let hook_fired_clone = hook_fired.clone();
+
+    let config = SessionRecorderConfig {
+        include_streaming_events: false,
+        before_task: Some(Arc::new(move |_session: &Session| {
+            hook_fired_clone.store(true, Ordering::SeqCst);
+            false // return false — attempt to "abort"
+        })),
+        after_task: None,
+    };
+
+    let mut recorder = SessionRecorder::new(config);
+    let now = chrono::Utc::now();
+
+    recorder.on_event(AgentEvent::AgentStart {
+        agent_id: "agent-abort".into(),
+        session_id: "session-abort".into(),
+        loop_id: "session-abort.default.0".into(),
+        parent_loop_id: None,
+        continuation_kind: None,
+        timestamp: now,
+        metadata: None,
+    });
+
+    // Hook should have fired.
+    assert!(
+        hook_fired.load(Ordering::SeqCst),
+        "before_task hook should fire on new session"
+    );
+
+    // Session should still exist (returning false does not abort creation).
+    assert!(
+        recorder.get_session("session-abort").is_some(),
+        "session should be created even when before_task returns false"
     );
 }

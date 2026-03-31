@@ -97,6 +97,13 @@ All return `Self` for chaining (unless noted as `Result`).
 | `async with_openapi_url(url, config, filter) -> Result<Self, OpenApiError>` | Fetch spec from URL and add tools *(requires `openapi` feature)* |
 | `with_openapi_spec(spec_str, config, filter) -> Result<Self, OpenApiError>` | Parse spec string and add tools *(requires `openapi` feature)* |
 
+**Workspace & System Prompt**
+
+| Method | Description |
+|--------|-------------|
+| `with_workspace(path: impl Into<PathBuf>) -> Self` | Set the agent's workspace directory |
+| `with_system_prompt_strategy(strategy: SystemPromptStrategy) -> Self` | Set a system prompt strategy for dynamic prompt assembly |
+
 **Context & Limits**
 
 | Method | Description |
@@ -129,6 +136,8 @@ All return `Self` for chaining (unless noted as `Result`).
 | `on_after_tool_execution(f: Fn(&str, &str, bool)) -> Self` | Called after each tool call `(name, call_id, is_error)` |
 | `on_before_tool_execution_update(f: Fn(&str, &str, &str) -> bool) -> Self` | Called before each streaming tool update `(name, call_id, text)`; return `false` to suppress the event |
 | `on_after_tool_execution_update(f: Fn(&str, &str, &str)) -> Self` | Called after each streaming tool update `(name, call_id, text)` |
+| `on_before_compaction_start(f: Fn(usize, usize) -> bool) -> Self` | Called before compaction begins `(estimated_tokens, message_count)`; return `false` to skip compaction |
+| `on_after_compaction_end(f: Fn(usize, usize, usize, usize)) -> Self` | Called after compaction completes `(messages_before, messages_after, tokens_before, tokens_after)` |
 
 ### Prompting
 
@@ -150,6 +159,7 @@ All return `Self` for chaining (unless noted as `Result`).
 | `agent_id() -> &str` | Stable UUID assigned at construction; included in every `AgentStart` event |
 | `session_id() -> &str` | Stable UUID assigned at construction; groups all loops from this `Agent` instance |
 | `last_loop_id() -> Option<&str>` | The `loop_id` of the most recently started loop; `None` before first run |
+| `workspace() -> Option<&Path>` | The agent's workspace directory, if set (Agent trait method) |
 
 ### State Mutation
 
@@ -180,6 +190,15 @@ All return `Self` for chaining (unless noted as `Result`).
 |--------|-------------|
 | `abort()` | Cancel the current run via `CancellationToken` |
 | `reset()` | Clear all state (messages, queues, streaming flag) |
+
+## Session Callback Types
+
+| Type | Signature | Description |
+|------|-----------|-------------|
+| `BeforeTaskFn` | `Arc<dyn Fn(&str) + Send + Sync>` | Called on first `AgentStart` with a new `session_id`. Parameter is the session ID. |
+| `AfterTaskFn` | `Arc<dyn Fn(&Session) + Send + Sync>` | Called in `flush()` when the session is finalized. Parameter is the completed `Session`. |
+
+These are set on `SessionRecorderConfig` and fire at the session level (not per-loop). See [Sessions](../concepts/sessions.md#session-lifecycle-callbacks) for usage.
 
 ## Re-exports
 

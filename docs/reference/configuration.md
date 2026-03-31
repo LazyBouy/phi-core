@@ -20,7 +20,6 @@ pub struct AgentLoopConfig {
     pub get_steering_messages: Option<GetMessagesFn>,
     pub get_follow_up_messages: Option<GetMessagesFn>,
     pub context_config: Option<ContextConfig>,
-    pub compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
     pub execution_limits: Option<ExecutionLimits>,
     pub cache_config: CacheConfig,
     pub tool_execution: ToolExecutionStrategy,
@@ -38,6 +37,8 @@ pub struct AgentLoopConfig {
     pub first_turn_trigger: TurnTrigger,
 }
 ```
+
+> **Note:** `compaction_strategy` and `block_compaction_strategy` fields were previously on `AgentLoopConfig` but have been moved to `CompactionConfig` as `in_memory_strategy` and `block_strategy` respectively. All compaction configuration (policy and strategies) is now consolidated in `CompactionConfig`.
 
 ## StreamConfig
 

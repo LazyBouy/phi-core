@@ -1,11 +1,12 @@
 # Lifecycle Callbacks
 
-phi-core provides three tiers of lifecycle callbacks that let you observe and control the agent loop without modifying its internals. All callbacks are set on `AgentLoopConfig` (or via `Agent` builder methods).
+phi-core provides four tiers of lifecycle callbacks that let you observe and control the agent loop without modifying its internals. Loop-level, turn-level, and tool-level callbacks are set on `AgentLoopConfig` (or via `Agent` builder methods). Session-level callbacks (`before_task` / `after_task`) are set on `SessionRecorderConfig`.
 
 ## Tiers Overview
 
 | Tier | Hooks | Scope |
 |------|-------|-------|
+| **Session-level** | `before_task`, `after_task` | Once per session (on `SessionRecorderConfig`) |
 | **Loop-level** | `before_loop`, `after_loop` | Once per `agent_loop()` / `agent_loop_continue()` call |
 | **Turn-level** | `before_turn`, `after_turn`, `on_error` | Once per LLM call (every turn) |
 | **Tool-level** | `before_tool_execution`, `after_tool_execution`, `before_tool_execution_update`, `after_tool_execution_update` | Once per tool call |
@@ -139,6 +140,16 @@ let agent = BasicAgent::new(ModelConfig::anthropic("claude-sonnet-4-20250514", "
         // e.g., log streaming updates to a file
     });
 ```
+
+---
+
+## Script Callbacks
+
+In addition to Rust closures, callbacks can be implemented as external shell or Python scripts. This allows non-Rust consumers to hook into the agent lifecycle without compiling Rust code.
+
+Script callbacks are specified as command strings (e.g., `"./scripts/on_task_start.sh"` or `"python3 scripts/after_turn.py"`). The agent loop spawns the script as a subprocess, passing relevant context (such as session ID, turn number, or tool name) as environment variables or arguments. The script's exit code determines whether the action proceeds (0 = continue, non-zero = abort, for `Before*` hooks).
+
+Script callbacks can be configured in the `[callbacks]` section of the config file or set programmatically via the `Agent` trait.
 
 ---
 

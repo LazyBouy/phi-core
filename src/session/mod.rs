@@ -13,5 +13,5 @@ pub mod storage;
 
 // Re-export all public items for backward compatibility
 pub use model::*;
-pub use recorder::{SessionRecorder, SessionRecorderConfig};
+pub use recorder::{AfterTaskFn, BeforeTaskFn, SessionRecorder, SessionRecorderConfig};
 pub use storage::*;

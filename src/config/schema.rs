@@ -25,6 +25,12 @@ pub struct AgentConfig {
     pub hooks: HooksSection,
     pub compaction: CompactionSection,
     pub execution: ExecutionSection,
+    /// System prompt strategy templates (G6).
+    pub system_prompt_strategy: SystemPromptStrategySection,
+    /// System prompt instances — content for strategy templates (G6).
+    pub system_prompt: SystemPromptSection,
+    /// Default workspace directory for all agents.
+    pub default_workspace: Option<String>,
 }
 
 // ── Agent section ───────────────────────────────────────────────────────────
@@ -40,6 +46,8 @@ pub struct AgentSection {
     pub profile: ProfileSection,
     /// Named agent instances (for multi-agent configs).
     pub instances: Vec<AgentInstanceSection>,
+    /// Agent-level workspace directory override.
+    pub workspace: Option<String>,
 }
 
 /// Profile section — the reusable agent blueprint.
@@ -66,6 +74,40 @@ pub struct ProfileSection {
     pub config_id: Option<String>,
     /// Skill names loaded via SkillSet from SKILL.md files (NOT tools).
     pub skills: Vec<String>,
+    /// Named profile instances (variations of this profile blueprint).
+    /// Each instance overrides specific fields from the profile defaults.
+    pub instances: Vec<ProfileInstanceSection>,
+}
+
+/// A named profile instance — a variation of the profile blueprint.
+///
+/// The `id` field uses the `{{...}}` reference protocol:
+/// - `{{%name%}}` — no recreation if exists
+/// - `{{name}}` — recreate
+/// - `{{#system_id#}}` — literal system ID
+///
+/// Fields set here override the parent `ProfileSection` defaults.
+#[derive(Debug, Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct ProfileInstanceSection {
+    /// Instance ID using the `{{...}}` reference protocol.
+    pub id: String,
+    /// Description used for existence check queries (with `%` references).
+    pub description: Option<String>,
+    /// Override name.
+    pub name: Option<String>,
+    /// Override system prompt.
+    pub system_prompt: Option<String>,
+    /// Override thinking level.
+    pub thinking_level: Option<String>,
+    /// Override temperature.
+    pub temperature: Option<f32>,
+    /// Override max tokens.
+    pub max_tokens: Option<u32>,
+    /// Override config identity.
+    pub config_id: Option<String>,
+    /// Override skills.
+    pub skills: Vec<String>,
 }
 
 /// A named agent instance that can reference or override a profile.
@@ -74,11 +116,14 @@ pub struct ProfileSection {
 pub struct AgentInstanceSection {
     /// Instance name (for identification).
     pub name: Option<String>,
-    /// Override profile for this instance.
+    /// Reference to a profile instance via `{{...}}` protocol
+    /// (e.g., `"{{agent_profile.coder}}"` or `"{{coder}}"`).
+    pub agent_profile: Option<String>,
+    /// Override profile for this instance (inline, not a reference).
     pub profile: Option<ProfileSection>,
     /// Override system prompt for this instance.
     pub system_prompt: Option<String>,
-    /// Override provider reference for this instance.
+    /// Override provider reference for this instance (supports `{{...}}` protocol).
     pub provider: Option<String>,
 }
 
@@ -97,6 +142,8 @@ pub struct ProviderSection {
     /// "bedrock_converse_stream".
     pub api: Option<String>,
     /// Base URL for API requests (without trailing slash).
+    /// Also accepted as `url` in config files.
+    #[serde(alias = "url")]
     pub base_url: Option<String>,
     /// Provider name (e.g. "anthropic", "openai", "xai").
     pub provider: Option<String>,
@@ -140,13 +187,22 @@ pub struct CompatSection {
 }
 
 /// A named provider instance with overrides.
+///
+/// The `id` field uses the `{{...}}` reference protocol for cross-referencing.
 #[derive(Debug, Deserialize, Default, Clone)]
 #[serde(default)]
 pub struct ProviderInstance {
+    /// Instance ID using the `{{...}}` reference protocol.
+    pub id: Option<String>,
+    /// Display name (kept for backward compat; `id` is preferred for references).
     pub name: Option<String>,
+    /// Description used for existence check queries (with `%` references).
+    pub description: Option<String>,
     pub model: Option<String>,
     pub api_key: Option<String>,
     pub api: Option<String>,
+    /// Base URL. Also accepted as `url` in config files.
+    #[serde(alias = "url")]
     pub base_url: Option<String>,
     pub provider: Option<String>,
 }
@@ -214,9 +270,12 @@ pub struct SubAgentsSection {
 #[derive(Debug, Deserialize, Default, Clone)]
 #[serde(default)]
 pub struct SubAgentInstance {
+    /// Instance ID using the `{{...}}` reference protocol.
+    pub id: Option<String>,
     pub name: Option<String>,
     pub description: Option<String>,
     pub system_prompt: Option<String>,
+    /// Provider reference (supports `{{...}}` protocol).
     pub provider: Option<String>,
     pub model: Option<String>,
     pub max_turns: Option<usize>,
@@ -315,4 +374,65 @@ pub struct CacheSection {
     pub enabled: Option<bool>,
     /// Cache strategy: "auto", "disabled", or a manual config.
     pub strategy: Option<String>,
+}
+
+// ── System Prompt Strategy section (G6) ─────────────────────────────────
+
+/// System prompt strategy configuration.
+#[derive(Debug, Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct SystemPromptStrategySection {
+    /// Named strategy instances (structure templates).
+    pub instances: Vec<StrategyInstanceSection>,
+}
+
+/// A system prompt strategy instance — defines block structure.
+#[derive(Debug, Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct StrategyInstanceSection {
+    /// Instance ID using `{{...}}` reference protocol.
+    pub id: String,
+    /// Description for existence check queries.
+    pub description: Option<String>,
+    /// Block definitions (name, order, max_length).
+    pub blocks: Vec<StrategyBlockSection>,
+}
+
+/// A block definition within a strategy template.
+#[derive(Debug, Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct StrategyBlockSection {
+    /// Block name (e.g., "identity", "instructions", "constraints").
+    pub name: String,
+    /// Assembly order — lower appears first.
+    pub order: Option<u32>,
+    /// Maximum character budget for this block.
+    pub max_length: Option<usize>,
+}
+
+// ── System Prompt section (G6) ──────────────────────────────────────────
+
+/// System prompt instances configuration.
+#[derive(Debug, Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct SystemPromptSection {
+    /// Named prompt instances (content for strategy templates).
+    pub instances: Vec<PromptInstanceSection>,
+}
+
+/// A system prompt instance — fills content into a strategy's blocks.
+#[derive(Debug, Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct PromptInstanceSection {
+    /// Instance ID using `{{...}}` reference protocol.
+    pub id: String,
+    /// Description for existence check queries.
+    pub description: Option<String>,
+    /// References a strategy instance by `{{...}}` id.
+    #[serde(rename = "type")]
+    pub strategy_type: Option<String>,
+    /// Block content: keys are block names, values are text or "file:path".
+    /// Uses `#[serde(flatten)]` to capture all unknown fields as block content.
+    #[serde(flatten)]
+    pub blocks: HashMap<String, serde_json::Value>,
 }

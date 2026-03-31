@@ -23,8 +23,6 @@ fn make_config(provider: Arc<dyn phi_core::provider::StreamProvider>) -> AgentLo
         get_steering_messages: None,
         get_follow_up_messages: None,
         context_config: None,
-        compaction_strategy: None,
-        block_compaction_strategy: None,
         execution_limits: None,
         cache_config: CacheConfig::default(),
         tool_execution: ToolExecutionStrategy::default(),
@@ -822,8 +820,6 @@ async fn test_retry_on_rate_limit_succeeds() {
         get_steering_messages: None,
         get_follow_up_messages: None,
         context_config: None,
-        compaction_strategy: None,
-        block_compaction_strategy: None,
         execution_limits: None,
         cache_config: CacheConfig::default(),
         tool_execution: ToolExecutionStrategy::default(),
@@ -905,8 +901,6 @@ async fn test_retry_exhausted_returns_error() {
         get_steering_messages: None,
         get_follow_up_messages: None,
         context_config: None,
-        compaction_strategy: None,
-        block_compaction_strategy: None,
         execution_limits: None,
         cache_config: CacheConfig::default(),
         tool_execution: ToolExecutionStrategy::default(),
@@ -999,8 +993,6 @@ async fn test_no_retry_on_auth_error() {
         get_steering_messages: None,
         get_follow_up_messages: None,
         context_config: None,
-        compaction_strategy: None,
-        block_compaction_strategy: None,
         execution_limits: None,
         cache_config: CacheConfig::default(),
         tool_execution: ToolExecutionStrategy::default(),
@@ -1072,8 +1064,6 @@ async fn test_retry_none_disables_retries() {
         get_steering_messages: None,
         get_follow_up_messages: None,
         context_config: None,
-        compaction_strategy: None,
-        block_compaction_strategy: None,
         execution_limits: None,
         cache_config: CacheConfig::default(),
         tool_execution: ToolExecutionStrategy::default(),
@@ -1336,8 +1326,6 @@ async fn test_on_error_fires_on_provider_error() {
         get_steering_messages: None,
         get_follow_up_messages: None,
         context_config: None,
-        compaction_strategy: None,
-        block_compaction_strategy: None,
         execution_limits: None,
         cache_config: CacheConfig::default(),
         tool_execution: ToolExecutionStrategy::default(),
@@ -2724,14 +2712,13 @@ async fn test_custom_compaction_strategy_is_called() {
             compaction: CompactionConfig {
                 compact_at_pct: 0.01,               // Very aggressive — trigger at 1%
                 compact_budget_threshold_pct: 0.99, // Always fire
+                in_memory_strategy: Some(std::sync::Arc::new(MarkerCompaction)),
                 ..CompactionConfig::default()
             },
             keep_recent: 1,
             keep_first: 1,
             tool_output_max_lines: 10,
         }),
-        compaction_strategy: Some(std::sync::Arc::new(MarkerCompaction)),
-        block_compaction_strategy: None,
         execution_limits: None,
         cache_config: CacheConfig::default(),
         tool_execution: ToolExecutionStrategy::default(),
@@ -2833,8 +2820,6 @@ async fn test_none_compaction_strategy_uses_default() {
             keep_first: 1,
             tool_output_max_lines: 10,
         }),
-        compaction_strategy: None, // Should fall back to DefaultCompaction
-        block_compaction_strategy: None,
         execution_limits: None,
         cache_config: CacheConfig::default(),
         tool_execution: ToolExecutionStrategy::default(),
@@ -3470,4 +3455,74 @@ async fn test_tool_execution_hooks_fire() {
 
     assert!(before_fired.load(std::sync::atomic::Ordering::SeqCst));
     assert!(after_fired.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+// ---------------------------------------------------------------------------
+// G5 — Compaction Strategy Tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_compaction_strategy_in_compaction_config() {
+    use phi_core::context::{CompactionConfig, CompactionStrategy, ContextConfig};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // Create a custom CompactionStrategy that sets a flag when accessed.
+    struct MarkerStrategy {
+        flag: Arc<AtomicBool>,
+    }
+    impl CompactionStrategy for MarkerStrategy {
+        fn compact(
+            &self,
+            messages: Vec<AgentMessage>,
+            _config: &ContextConfig,
+        ) -> Vec<AgentMessage> {
+            self.flag.store(true, Ordering::SeqCst);
+            messages
+        }
+    }
+
+    let flag = Arc::new(AtomicBool::new(false));
+    let strategy = Arc::new(MarkerStrategy { flag: flag.clone() });
+
+    let compaction = CompactionConfig {
+        in_memory_strategy: Some(strategy),
+        ..Default::default()
+    };
+
+    // Verify the field is Some.
+    assert!(compaction.in_memory_strategy.is_some());
+
+    // Build a ContextConfig using this CompactionConfig.
+    let ctx_config = ContextConfig {
+        compaction,
+        ..Default::default()
+    };
+
+    // Verify it's wired through.
+    assert!(ctx_config.compaction.in_memory_strategy.is_some());
+
+    // Call compact to verify the strategy is reachable.
+    let strategy_ref = ctx_config.compaction.in_memory_strategy.as_ref().unwrap();
+    strategy_ref.compact(vec![], &ctx_config);
+    assert!(
+        flag.load(Ordering::SeqCst),
+        "strategy should have been called"
+    );
+}
+
+#[test]
+fn test_block_strategy_in_compaction_config() {
+    use phi_core::context::{CompactionConfig, DefaultBlockCompaction};
+
+    let compaction = CompactionConfig {
+        block_strategy: Some(Arc::new(DefaultBlockCompaction)),
+        ..Default::default()
+    };
+
+    // Verify the field is Some and round-trips correctly.
+    assert!(compaction.block_strategy.is_some());
+
+    // Clone to verify it survives Arc cloning (CompactionConfig is Clone).
+    let cloned = compaction.clone();
+    assert!(cloned.block_strategy.is_some());
 }

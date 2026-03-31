@@ -94,6 +94,11 @@ When building context from session history:
 
 ## Custom strategies
 
+Compaction strategies are fields on `CompactionConfig`, not on `AgentLoopConfig`. The dispatch logic in `run.rs` reads them from `ctx_config.compaction`:
+
+- **`in_memory_strategy`** — custom in-memory compaction strategy (used when session is `None`)
+- **`block_strategy`** — block-based compaction strategy (used when session is `Some`; falls back to `DefaultBlockCompaction`)
+
 Implement `BlockCompactionStrategy` to customise any section:
 
 ```rust
@@ -116,6 +121,15 @@ impl BlockCompactionStrategy for MyStrategy {
         my_llm_summarize(record, turn_map, config, is_most_recent)
     }
 }
+```
+
+Set the custom strategy on `CompactionConfig`:
+
+```rust
+let compaction_config = CompactionConfig {
+    block_strategy: Some(Arc::new(MyStrategy)),
+    ..Default::default()
+};
 ```
 
 ## Public APIs

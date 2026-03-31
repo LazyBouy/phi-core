@@ -12,7 +12,7 @@ Agent
 │   ├── agent_id [EXISTS] — UUID, immutable
 │   ├── Agent Profile [CONCEPTUAL as struct; EXISTS as scattered fields]
 │   │   ├── profile_id [CONCEPTUAL] — distinct from agent_id; shareable
-│   │   ├── SystemPromptStrategy [CONCEPTUAL] — how system prompt is composed
+│   │   ├── SystemPromptStrategy [EXISTS] — how system prompt is composed
 │   │   │   └── Currently: static system_prompt string [EXISTS]
 │   │   ├── Agent Name [CONCEPTUAL]
 │   │   └── Agent Description [CONCEPTUAL]
@@ -51,10 +51,11 @@ Agent
 | `agent_id` | `String` (UUID v4) | `[EXISTS]` | Stable identifier assigned at construction. Included in every `AgentStart` event. Immutable for the lifetime of the agent instance. |
 | **Agent Profile** | — | `[CONCEPTUAL]` as struct; `[EXISTS]` as scattered fields | Personality container. Conceptually separate from Agent (multiple agents could share one profile). Currently fields live directly on `BasicAgent`. |
 | `profile_id` | `String` | `[CONCEPTUAL]` | Distinct from `agent_id`. Would allow profile sharing across agents. |
-| `SystemPromptStrategy` | trait | `[CONCEPTUAL]` | Defines how the system prompt is composed per turn. Currently a static `String` on `BasicAgent.system_prompt`. Future: a trait with `compose(context) -> String` supporting layered prompt building (base personality, task context, tool/skill index, memory context, turn-specific instructions). |
+| `SystemPromptStrategy` | trait | `[EXISTS]` | Defines how the system prompt is composed per turn. A trait with `compose(context) -> String` supporting layered prompt building. Uses a 3-entity model: **strategy template** (the trait implementation defining composition logic), **prompt instance** (a concrete prompt produced by the strategy for a given context), and **profile ref** (reference to the agent profile providing personality/identity). Currently `BasicAgent` also retains a static `system_prompt` string as a fallback. |
 | `system_prompt` | `String` | `[EXISTS]` | Static system prompt string. Conceptually belongs to the Agent Profile. |
 | Agent Name | `String` | `[CONCEPTUAL]` | Human-readable name for the agent. |
 | Agent Description | `String` | `[CONCEPTUAL]` | Description of the agent's purpose and capabilities. |
+| `workspace` | `Option<PathBuf>` | `[EXISTS]` | Working directory for this agent. Overrides the global `default_workspace` from config. Tools that interact with the filesystem use this as their base path. |
 | `model_config` | `ModelConfig` | `[EXISTS]` | Default model for this agent. Falls back here when Session and Loop don't specify their own. Contains: model id, API key, base URL, API protocol, cost rates, context window size. |
 | `context_config` | `Option<ContextConfig>` | `[EXISTS]` | Token budget and compaction policy. Agent-level limit. |
 | `execution_limits` | `Option<ExecutionLimits>` | `[EXISTS]` | Max turns (50), max tokens (1M), max duration (10 min), cost tracking. Agent-level limit. |
@@ -178,6 +179,6 @@ Mutable state that changes during execution.
 ## Conceptual Notes
 
 - **Agent Profile as a separate struct** does not exist in code. The `system_prompt` field lives directly on `BasicAgent`. A future `AgentProfile` struct would hold `profile_id`, `SystemPromptStrategy`, name, and description, enabling profile sharing across agents.
-- **SystemPromptStrategy** is envisioned as a trait with a `compose(context) -> String` method supporting 5 layers: base personality (Profile), task context (Session), tool/skill index (Capabilities/Skills), memory context (Introspection), turn-specific instructions. Currently only a static `String`.
+- **SystemPromptStrategy** now exists as a trait with a `compose(context) -> String` method. It follows a 3-entity model: **strategy template** (the trait implementation), **prompt instance** (concrete prompt for a given context), **profile ref** (agent profile reference). Full 5-layer composition (base personality, task context, tool/skill index, memory context, turn-specific instructions) is future work. `BasicAgent` retains a static `system_prompt` string as a fallback.
 - **thinking_level and temperature** are currently on Agent but conceptually belong at Session level (task-specific attributes). Moving them to Session would allow different tasks to use different reasoning depths without reconfiguring the agent.
 - **Introspection** is the largest conceptual gap. It requires session log analysis, memory categorization (episodic/semantic/procedural), and feedback loops to Agent Profile evolution.

@@ -16,6 +16,7 @@ pub mod evaluation;
 mod helpers;
 mod parallel;
 mod run;
+pub mod script_callback;
 mod streaming;
 mod tools;
 

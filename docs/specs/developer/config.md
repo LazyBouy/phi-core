@@ -135,8 +135,8 @@ All static settings for a single `agent_loop` / `agent_loop_continue` call. Borr
 | Field | Type | Status | Description |
 |-------|------|--------|-------------|
 | `context_config` | `Option<ContextConfig>` | [EXISTS] | Context window configuration; `None` disables compaction |
-| `compaction_strategy` | `Option<Arc<dyn CompactionStrategy>>` | [EXISTS] | Custom in-memory compaction; used when session is None |
-| `block_compaction_strategy` | `Option<Arc<dyn BlockCompactionStrategy>>` | [EXISTS] | Block-based compaction; used when session is Some; falls back to `DefaultBlockCompaction` |
+
+> **Note:** Compaction strategies have been consolidated into `CompactionConfig` (G5). See `in_memory_strategy` and `block_strategy` fields on `CompactionConfig`. The former `compaction_strategy` and `block_compaction_strategy` fields no longer exist on `AgentLoopConfig`.
 
 ### Limits & Safety
 
@@ -276,5 +276,5 @@ Token metrics per turn or accumulated.
 - **before_task / after_task** [CONCEPTUAL] -- Session-level callbacks that would fire around the entire task lifecycle (AgentStart/AgentEnd). Currently only loop-level (`before_loop` / `after_loop`) and turn-level (`before_turn` / `after_turn`) hooks exist.
 - **before_compaction_start / after_compaction_end** [CONCEPTUAL] -- Compaction lifecycle callbacks. Would enable pre-compaction memory extraction (indexing discarded content) and post-compaction verification.
 - **Session-level model override** [CONCEPTUAL] -- The plan places `thinking_level` and `temperature` at the Session level (task attributes). Currently they live on `BasicAgent` and are copied into `AgentLoopConfig` per loop call. A `Session` struct with its own model override field does not yet exist.
-- **Config streamlining** [CONCEPTUAL] -- Compaction config is split between `ContextConfig.compaction` (WHEN/HOW parameters) and `AgentLoopConfig` (strategy objects: `compaction_strategy`, `block_compaction_strategy`). Consolidating into a single location would reduce configuration surface area.
+- **Config streamlining** [DONE] -- Compaction strategies (`in_memory_strategy`, `block_strategy`) have been consolidated into `CompactionConfig`, completing G5. The dispatch logic in `run.rs` reads them from `ctx_config.compaction`. `AgentLoopConfig` no longer carries strategy fields.
 - **ParallelLoopOutcome / ParallelLoopResult** -- Defined in `src/types/parallel.rs`, these types support evaluational parallelism where multiple branches run concurrently and an `EvaluationStrategy` selects the winner. Related to config because parallel configs produce multiple `AgentLoopConfig` instances.

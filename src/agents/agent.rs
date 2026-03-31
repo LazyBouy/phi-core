@@ -32,6 +32,7 @@ use crate::agents::AgentProfile;
 use crate::context::{ContextConfig, ExecutionLimits};
 use crate::provider::ModelConfig;
 use crate::types::*;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -268,6 +269,12 @@ pub trait Agent: Send {
         None
     }
 
+    /// The agent's workspace directory. File paths in system prompt blocks
+    /// resolve relative to this. Default: `None` (uses current directory).
+    fn workspace(&self) -> Option<&Path> {
+        None
+    }
+
     // ── Hook setters (defaulted — no-ops) ─────────────────────────────────
 
     /// Set the before-loop hook. Default: no-op.
@@ -338,8 +345,6 @@ pub trait Agent: Send {
             get_steering_messages: None,
             get_follow_up_messages: None,
             context_config: self.context_config().cloned(),
-            compaction_strategy: None,
-            block_compaction_strategy: None,
             execution_limits: self.execution_limits().cloned(),
             cache_config: self.cache_config(),
             tool_execution: self.tool_execution(),

@@ -360,6 +360,37 @@ the delta.
 
 ---
 
+## Session Lifecycle Callbacks
+
+`SessionRecorderConfig` supports two session-level callbacks for billing, audit, and metrics:
+
+| Field | Type | Description |
+|---|---|---|
+| `before_task` | `Option<BeforeTaskFn>` | Fires on the first `AgentStart` with a new `session_id`. Use for session initialization, billing setup, or audit logging. |
+| `after_task` | `Option<AfterTaskFn>` | Fires in `flush()` when the session is finalized. Use for billing finalization, metrics emission, or cleanup. |
+
+These are **session-level** (not loop-level) hooks. Unlike `before_loop`/`after_loop` on `AgentLoopConfig` which fire around each individual agent loop, `before_task` and `after_task` fire once per session lifecycle:
+
+```rust
+use phi_core::session::{SessionRecorder, SessionRecorderConfig};
+
+let config = SessionRecorderConfig {
+    before_task: Some(Arc::new(|session_id| {
+        println!("Session started: {}", session_id);
+        // Initialize billing, start audit trail, etc.
+    })),
+    after_task: Some(Arc::new(|session| {
+        println!("Session finalized: {} ({} loops)", session.session_id, session.loops.len());
+        // Finalize billing, emit metrics, etc.
+    })),
+    ..Default::default()
+};
+
+let mut recorder = SessionRecorder::new(config);
+```
+
+---
+
 ## Persistence API
 
 | Function | Description |

@@ -1,5 +1,6 @@
 use crate::types::ThinkingLevel;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// A reusable agent blueprint that defines default configuration for agents.
 ///
@@ -53,6 +54,11 @@ pub struct AgentProfile {
     /// These are NOT tools — they are skill definitions per the AgentSkills standard.
     #[serde(default)]
     pub skills: Vec<String>,
+
+    /// Agent workspace directory. File paths in system prompt blocks resolve
+    /// relative to this directory.
+    #[serde(default)]
+    pub workspace: Option<PathBuf>,
 }
 
 fn default_profile_id() -> String {
@@ -71,6 +77,7 @@ impl Default for AgentProfile {
             max_tokens: None,
             config_id: None,
             skills: Vec::new(),
+            workspace: None,
         }
     }
 }

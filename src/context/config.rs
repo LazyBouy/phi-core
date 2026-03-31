@@ -1,4 +1,6 @@
+use super::{BlockCompactionStrategy, CompactionStrategy};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Compaction scope
@@ -32,7 +34,7 @@ impl Default for CompactionScope {
 // ---------------------------------------------------------------------------
 
 /// Full compaction policy — controls both WHEN and HOW to compact.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CompactionConfig {
     // ── WHEN to compact ──
     /// Fraction of `max_context_tokens` below which headroom is measured.
@@ -64,6 +66,42 @@ pub struct CompactionConfig {
     pub max_summary_tokens: usize,
     /// Max lines per tool output in the keep_recent section. Default: 50.
     pub tool_output_max_lines: usize,
+
+    // ── Strategy objects (G5 — moved from AgentLoopConfig) ──
+    /// Custom in-memory compaction strategy. When set, replaces `DefaultCompaction`.
+    /// Used when `AgentContext.session` is `None` (sub-agents, tests, sessionless runs).
+    #[serde(skip)]
+    pub in_memory_strategy: Option<Arc<dyn CompactionStrategy>>,
+    /// Block-based compaction strategy for Session-aware compaction.
+    /// When set, replaces `DefaultBlockCompaction`.
+    /// Used when `AgentContext.session` is `Some`.
+    #[serde(skip)]
+    pub block_strategy: Option<Arc<dyn BlockCompactionStrategy>>,
+}
+
+impl std::fmt::Debug for CompactionConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompactionConfig")
+            .field("compact_at_pct", &self.compact_at_pct)
+            .field(
+                "compact_budget_threshold_pct",
+                &self.compact_budget_threshold_pct,
+            )
+            .field("compaction_scope", &self.compaction_scope)
+            .field("keep_first_turns", &self.keep_first_turns)
+            .field("keep_recent_turns", &self.keep_recent_turns)
+            .field("max_summary_tokens", &self.max_summary_tokens)
+            .field("tool_output_max_lines", &self.tool_output_max_lines)
+            .field(
+                "in_memory_strategy",
+                &self.in_memory_strategy.as_ref().map(|_| "..."),
+            )
+            .field(
+                "block_strategy",
+                &self.block_strategy.as_ref().map(|_| "..."),
+            )
+            .finish()
+    }
 }
 
 impl Default for CompactionConfig {
@@ -76,6 +114,8 @@ impl Default for CompactionConfig {
             keep_recent_turns: 10,
             max_summary_tokens: 2_000,
             tool_output_max_lines: 50,
+            in_memory_strategy: None,
+            block_strategy: None,
         }
     }
 }

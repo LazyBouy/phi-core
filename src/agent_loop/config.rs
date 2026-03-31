@@ -1,4 +1,4 @@
-use crate::context::{CompactionStrategy, ContextConfig, ExecutionLimits};
+use crate::context::{ContextConfig, ExecutionLimits};
 use crate::provider::{ModelConfig, StreamProvider};
 use crate::types::*;
 use std::sync::Arc;
@@ -117,16 +117,8 @@ pub struct AgentLoopConfig {
     pub get_follow_up_messages: Option<GetMessagesFn>,
 
     /// Context window configuration (auto-compaction).
+    /// Compaction strategies are now part of `ContextConfig.compaction` (G5 consolidation).
     pub context_config: Option<ContextConfig>,
-
-    /// Custom in-memory compaction strategy. When set, replaces the default
-    /// `compact_messages()` call. Used when `AgentContext.session` is `None`.
-    pub compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
-
-    /// Block-based compaction strategy for Session-aware compaction.
-    /// Only used when `AgentContext.session` is `Some`. When `None`, falls back
-    /// to `DefaultBlockCompaction`.
-    pub block_compaction_strategy: Option<Arc<dyn crate::context::BlockCompactionStrategy>>,
 
     /// Execution limits (max turns, tokens, duration, cost).
     /// Cost is tracked automatically using `model_config.cost` rates after each turn.

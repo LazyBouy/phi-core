@@ -209,6 +209,119 @@ Parsing is case-insensitive: `"High"`, `"HIGH"`, `"high"` all work.
 
 ---
 
+## Profile Instances
+
+Profile instances are **named variations** of the profile blueprint. Each instance inherits the profile defaults and overrides specific fields. This lets you define a single profile and then create specialized variants without duplicating the entire configuration.
+
+Use `[[agent.profile.instances]]` to define instances. Each instance requires an `id` field using the `{{...}}` ID reference protocol (see below). Instance fields override the corresponding profile defaults; any field not specified falls through to the profile value.
+
+Agent instances reference a profile instance via the `agent_profile` field, using either a qualified reference (`{{agent_profile.name}}`) or an unqualified reference (`{{name}}`) if the name is unique across all namespaces.
+
+### Example
+
+```toml
+# ── Profile defaults ──────────────────────────────────────────
+[agent.profile]
+name = "coding-agent"
+description = "An agent specialized for code tasks"
+system_prompt = "You are an expert software engineer."
+thinking_level = "high"
+temperature = 0.2
+max_tokens = 16384
+
+# ── Profile instances (override specific fields) ─────────────
+[[agent.profile.instances]]
+id = "{{%coder%}}"
+description = "A code generation specialist"
+thinking_level = "high"
+temperature = 0.2
+max_tokens = 16384
+config_id = "coder"
+
+[[agent.profile.instances]]
+id = "{{%reviewer%}}"
+description = "A code review specialist"
+thinking_level = "high"
+temperature = 0.1
+max_tokens = 8192
+config_id = "reviewer"
+
+# ── Agent instances referencing profile instances ─────────────
+[[agent.instances]]
+name = "code-writer"
+agent_profile = "{{agent_profile.coder}}"
+system_prompt = "You write clean, well-tested code. Follow existing patterns."
+
+[[agent.instances]]
+name = "code-reviewer"
+agent_profile = "{{agent_profile.reviewer}}"
+system_prompt = "You review code for bugs, security issues, and style violations."
+```
+
+The `code-writer` agent inherits all profile defaults and applies the `coder` instance overrides. The `code-reviewer` agent uses the `reviewer` instance, which sets a lower temperature and smaller token budget for more focused review output.
+
+---
+
+## ID Reference Protocol
+
+The `{{...}}` syntax is a lightweight reference protocol for linking configuration entities (providers, profile instances, sub-agents) by name. It appears in `id` fields (to declare an entity) and in reference fields like `provider` and `agent_profile` (to point to an entity).
+
+### Syntax
+
+| Pattern | Meaning |
+|---------|---------|
+| `{{type.name}}` | Qualified reference, recreate if invoked |
+| `{{%type.name%}}` | Qualified reference, no recreation if already exists |
+| `{{name}}` | Unqualified reference (unique resolve), recreate if invoked |
+| `{{%name%}}` | Unqualified reference, no recreation if already exists |
+| `{{#system_id#}}` | Literal system ID, no recreation |
+
+### Namespaces
+
+References are resolved within namespaces. The three namespaces are:
+
+- **`agent_profile`** -- Profile instances declared in `[[agent.profile.instances]]`
+- **`provider`** -- Provider instances declared in `[[provider.instances]]`
+- **`sub_agent`** -- Sub-agent instances declared in `[[sub_agents.instances]]`
+
+### Resolution
+
+**Qualified references** (`{{type.name}}`) include the namespace prefix and always resolve unambiguously. Use these when multiple namespaces could contain the same name.
+
+**Unqualified references** (`{{name}}`) omit the namespace. The system searches all namespaces and resolves the reference only if the name is unique. If multiple entities share the same name across namespaces, an unqualified reference is ambiguous and will produce an error.
+
+### Recreation Semantics
+
+The `%` sigil controls whether an entity is recreated when referenced:
+
+- **Without `%`** (`{{name}}` or `{{type.name}}`): The entity is recreated each time it is resolved. Use this when you want fresh instances.
+- **With `%`** (`{{%name%}}` or `{{%type.name%}}`): The entity is reused if it already exists (matched by latest creation date). Use this for shared singletons like provider connections.
+
+The `{{#system_id#}}` form references a literal system-generated ID and never triggers recreation.
+
+### Usage in ID Fields
+
+When declaring an entity, the `id` field establishes the entity's name within its namespace:
+
+```toml
+[[provider.instances]]
+id = "{{%openai%}}"          # declares "openai" in the provider namespace
+model = "gpt-4o"
+```
+
+### Usage in Reference Fields
+
+When referencing an entity from another section, use the reference syntax:
+
+```toml
+[[agent.instances]]
+name = "my-agent"
+provider = "{{provider.openai}}"       # qualified reference
+agent_profile = "{{reviewer}}"         # unqualified (must be unique)
+```
+
+---
+
 ## Provider Configuration
 
 The `[provider]` section defines the LLM model, API credentials, and protocol.
@@ -272,31 +385,66 @@ model = "my-model"
 
 ### Multiple Providers
 
-Use `[[provider.instances]]` to define named providers alongside the default:
+Use `[[provider.instances]]` to define named providers alongside the default. Each instance uses the `{{...}}` ID reference protocol to declare its name in the `provider` namespace. The `url` field is an alias for `base_url`.
 
 ```toml
-# Default provider (used unless overridden)
+# Default provider — Anthropic (used unless overridden)
 [provider]
 model = "claude-sonnet-4-20250514"
+name = "Claude Sonnet 4"
 api_key = "${ANTHROPIC_API_KEY}"
+api = "anthropic_messages"
+provider = "anthropic"
 
-# Named OpenAI instance
+[provider.cost]
+input_per_million = 3.0
+output_per_million = 15.0
+cache_read_per_million = 0.3
+cache_write_per_million = 3.75
+
+# OpenAI
 [[provider.instances]]
-name = "openai"
+id = "{{%openai%}}"
+description = "OpenAI GPT-4o provider"
+name = "GPT-4o"
 model = "gpt-4o"
 api_key = "${OPENAI_API_KEY}"
 api = "openai_completions"
+url = "https://api.openai.com/v1"
 
-# Named local instance
+# OpenRouter
 [[provider.instances]]
-name = "local"
-model = "llama-3"
+id = "{{%openrouter%}}"
+description = "OpenRouter multi-model gateway"
+name = "OpenRouter"
+model = "anthropic/claude-sonnet-4"
+api_key = "${OPENROUTER_API_KEY}"
 api = "openai_completions"
-base_url = "http://localhost:8080/v1"
+url = "https://openrouter.ai/api/v1"
+provider = "openrouter"
+
+# Google Gemini
+[[provider.instances]]
+id = "{{%gemini%}}"
+description = "Google Gemini 2.5 Flash provider"
+name = "Gemini 2.5 Flash"
+model = "gemini-2.5-flash"
+api_key = "${GOOGLE_API_KEY}"
+api = "google_generative_ai"
+
+# Ollama (local)
+[[provider.instances]]
+id = "{{%ollama%}}"
+description = "Local Ollama instance for development"
+name = "Ollama Llama 3.2"
+model = "llama3.2"
+api = "openai_completions"
+url = "http://localhost:11434/v1"
 api_key = "not-needed"
+provider = "ollama"
 ```
 
-Agent instances and sub-agents can reference these by name (e.g., `provider = "openai"`).
+Agent instances and sub-agents reference these via the ID protocol (e.g., `provider = "{{provider.openai}}"` or `provider = "{{ollama}}"` if unique).
 
 ---
 
@@ -515,7 +663,25 @@ system_prompt = "You are an implementer. Write the code."
 
 ---
 
-## Callbacks & Hooks (Phase 2)
+## Agent Workspace
+
+The `workspace` field sets the working directory for an agent. Tools that interact with the filesystem (bash, file read/write, etc.) use this as their base path.
+
+There are two levels of workspace configuration:
+
+- **`default_workspace`** (top-level config field): Sets the default workspace for all agents. If omitted, the current working directory is used.
+- **`workspace`** (per-agent field on `[agent.profile]` or `[[agent.instances]]`): Overrides `default_workspace` for a specific agent.
+
+```toml
+default_workspace = "/home/user/projects"
+
+[agent.profile]
+workspace = "/home/user/projects/my-app"   # overrides default_workspace for this agent
+```
+
+---
+
+## Callbacks & Hooks
 
 The config schema accepts `[callbacks]` and `[hooks]` sections for lifecycle hooks:
 
@@ -523,14 +689,25 @@ The config schema accepts `[callbacks]` and `[hooks]` sections for lifecycle hoo
 [callbacks]
 before_loop = "my_plugin::before_loop"
 after_turn = "my_plugin::after_turn"
+before_task = "./scripts/on_task_start.sh"
+after_task = "python3 scripts/after_task.py"
 
 [hooks]
 transform_context = "my_plugin::transform"
 ```
 
-**These are not yet active.** In Phase 1, the config parser accepts these strings but `agent_from_config()` ignores them. WASM plugin loading will activate them in Phase 2.
+Script-based callbacks (shell scripts, Python scripts) are supported. The agent spawns the script as a subprocess, passing context via environment variables. Exit code 0 means continue; non-zero aborts the action (for `Before*` hooks). WASM plugin loading for Rust-native callbacks is planned for Phase 2.
 
-To set hooks programmatically today, use the `Agent` trait setter methods after construction:
+### Session-Level Callbacks
+
+`before_task` and `after_task` are session-level callbacks configured on `SessionRecorderConfig`:
+
+- **`before_task`**: Fires on the first `AgentStart` event with a new `session_id`. Use for task-level setup, metrics initialization, or audit logging.
+- **`after_task`**: Fires on `flush()`. Use for task-level teardown, billing, or summary generation.
+
+### Programmatic Hooks
+
+To set hooks programmatically, use the `Agent` trait setter methods after construction:
 
 ```rust
 let agent = agent_from_config(&config)?;
@@ -644,6 +821,33 @@ tools = ["web_search"]
 | `max_tokens` | integer | None | Max output tokens |
 | `config_id` | string | None | Stable identity for loop_id generation |
 | `skills` | array | `[]` | Skill names (SKILL.md, not tools) |
+| `instances` | array | `[]` | Named profile instances (see `ProfileInstanceSection`) |
+
+### `ProfileInstanceSection`
+
+Each entry in `[[agent.profile.instances]]`:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `id` | string | **required** | `{{...}}` ID in the `agent_profile` namespace |
+| `description` | string | None | Human-readable description of this variant |
+| `thinking_level` | string | (from profile) | Override thinking level |
+| `temperature` | float | (from profile) | Override temperature |
+| `max_tokens` | integer | (from profile) | Override max output tokens |
+| `config_id` | string | None | Stable identity for loop_id generation |
+
+### `AgentInstanceSection`
+
+Each entry in `[[agent.instances]]`:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | **required** | Instance name |
+| `system_prompt` | string | None | Instance-specific system prompt |
+| `provider` | string | (default provider) | Provider reference (`{{...}}` syntax) |
+| `agent_profile` | string | None | Profile instance reference (`{{...}}` syntax) |
+| `max_turns` | integer | None | Override max turns |
+| `tools` | array | None | Override tool list |
 
 ### `[provider]`
 
@@ -652,12 +856,22 @@ tools = ["web_search"]
 | `model` | string | `"unknown"` | Model ID sent to API |
 | `api_key` | string | `""` | API credential (supports `${VAR}`) |
 | `api` | string | `"anthropic_messages"` | API protocol |
-| `base_url` | string | (per protocol) | API base URL |
+| `base_url` | string | (per protocol) | API base URL (`url` is an accepted alias) |
 | `provider` | string | `"anthropic"` | Provider name |
 | `name` | string | model value | Display name |
 | `reasoning` | bool | `false` | Supports thinking/reasoning |
 | `context_window` | integer | `200000` | Context window tokens |
 | `max_tokens` | integer | `8192` | Default max output tokens |
+
+### `ProviderInstanceSection`
+
+Each entry in `[[provider.instances]]` accepts all fields from `[provider]` above, plus:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `id` | string | None | `{{...}}` ID in the `provider` namespace |
+| `description` | string | None | Human-readable description of this provider |
+| `url` | string | None | Alias for `base_url` |
 
 ### `[provider.cost]`
 

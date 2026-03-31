@@ -50,7 +50,7 @@
     │  Provider [E]     Event [E]                 │
     │  Message [E]      Compaction [E]            │
     │  Configuration [E]                          │
-    │  SystemPromptStrategy [C]                   │
+    │  SystemPromptStrategy [E]                   │
     │  ContextTranslationStrategy [C]             │
     └─────────────────────────────────────────────┘
 
@@ -86,7 +86,7 @@ If the Loop has no model specified, it falls back to the Session's model. If the
 | Event | `types/event.rs` | `[EXISTS]` | [event.md](event.md) |
 | Compaction | `context/compaction.rs` | `[EXISTS]` | [compaction.md](compaction.md) |
 | Configuration | `context/config.rs` + `agent_loop/config.rs` | `[EXISTS]` | [config.md](config.md) |
-| SystemPromptStrategy | not in code | `[CONCEPTUAL]` | [agent.md](agent.md) |
+| SystemPromptStrategy | trait + implementations | `[EXISTS]` | [agent.md](agent.md) |
 | ContextTranslationStrategy | not in code | `[CONCEPTUAL]` | [provider.md](provider.md) |
 | Introspection / Memory | not in code | `[CONCEPTUAL]` | [agent.md](agent.md) |
 | Permissions | not in code | `[CONCEPTUAL]` | [agent.md](agent.md) |
@@ -99,13 +99,13 @@ Callbacks live on the entity they observe:
 
 | Callback | Owner | Status |
 |----------|-------|--------|
-| before_task / after_task | Session | `[CONCEPTUAL]` |
+| before_task / after_task | Session (SessionRecorderConfig) | `[EXISTS]` |
 | before_loop / after_loop | Loop | `[EXISTS]` |
 | on_error | Loop | `[EXISTS]` |
 | before_turn / after_turn | Turn | `[EXISTS]` |
 | before_tool_execution / after_tool_execution | Tool | `[EXISTS]` |
 | before_tool_execution_update / after_tool_execution_update | Tool | `[EXISTS]` |
-| before_compaction_start / after_compaction_end | Compaction | `[CONCEPTUAL]` |
+| before_compaction_start / after_compaction_end | Compaction | `[EXISTS]` |
 
 ---
 
@@ -120,9 +120,9 @@ These are places where the conceptual model differs from current code. They repr
 | temperature | On BasicAgent | Should be Session-level (task attribute) |
 | Session model | No model field on Session | Session should carry model override |
 | Session scope | Not in code | Ephemeral vs Persistent (Introspection mandatory for Persistent) |
-| SystemPromptStrategy | Static string | Dynamic trait with layered composition |
-| Compaction config | Split across ContextConfig + AgentLoopConfig | Single CompactionConfig location |
-| before_task / after_task | Not in code (before_loop exists) | Session-level callbacks |
+| SystemPromptStrategy | Trait exists with `compose(context) -> String` | ~~Dynamic trait with layered composition~~ Trait exists; full 5-layer impl is future work |
+| Compaction config | Now consolidated in `CompactionConfig` (strategies are fields on it) | ~~Single CompactionConfig location~~ Done |
+| before_task / after_task | Now on `SessionRecorderConfig` | ~~Session-level callbacks~~ Done |
 | ContextTranslationStrategy | Not in code | Provider-pair mapping for mid-session switching |
 | Introspection | Not in code | Memory extraction with 3 categories (episodic, semantic, procedural) |
 | Permissions | Not in code | Include/exclude rules on Agent |
@@ -147,9 +147,9 @@ Prioritized list of features that belong in phi-core (per [First Principles](../
 
 | ID | Feature | Why Core | Effort | Spec Ref |
 |----|---------|----------|--------|----------|
-| **G5** | Compaction config consolidation | Currently split across `ContextConfig` + `AgentLoopConfig`. Consumers must wire both correctly. Single config reduces misuse. | ~100 LOC | `config.md`, misalignment table above |
-| **G2** | Session-level callbacks (`before_task` / `after_task`) | Session-level lifecycle events needed for task-level metrics, billing, audit. A session may span multiple loops. | ~80 LOC | callback ownership table above |
-| **G6** | SystemPromptStrategy trait | Static string is insufficient. Dynamic composition (personality + task + skills + memory) needed by non-trivial agents. Define trait now, full 5-layer impl later. | ~100 LOC | `agent.md` |
+| **G5** | Compaction config consolidation `[EXISTS]` | Compaction strategies (`in_memory_strategy`, `block_strategy`) are now fields on `CompactionConfig`, consolidating what was previously split across `ContextConfig` + `AgentLoopConfig`. | ~100 LOC | `config.md`, misalignment table above |
+| **G2** | Session-level callbacks (`before_task` / `after_task`) `[EXISTS]` | `before_task` and `after_task` callbacks now exist on `SessionRecorderConfig`. `before_task` fires on the first `AgentStart` with a new `session_id`; `after_task` fires on `flush()`. | ~80 LOC | callback ownership table above |
+| **G6** | SystemPromptStrategy trait `[EXISTS]` | The `SystemPromptStrategy` trait now exists with a `compose(context) -> String` method. Supports a 3-entity model: strategy template, prompt instance, profile ref. Full 5-layer composition is a future enhancement. | ~100 LOC | `agent.md` |
 
 ### Priority 3 — Needs Design
 

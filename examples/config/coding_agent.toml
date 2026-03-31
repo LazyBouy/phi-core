@@ -12,6 +12,36 @@ thinking_level = "high"       # "off", "minimal", "low", "medium", "high"
 temperature = 0.2             # Low temperature for precise code generation
 max_tokens = 16384            # Max output tokens per response
 
+# ── Profile instances (named variations of the profile blueprint) ──────────
+
+[[agent.profile.instances]]
+id = "{{%coder%}}"
+description = "A code generation specialist"
+thinking_level = "high"
+temperature = 0.2
+max_tokens = 16384
+config_id = "coder"
+
+[[agent.profile.instances]]
+id = "{{%reviewer%}}"
+description = "A code review specialist"
+thinking_level = "high"
+temperature = 0.1
+max_tokens = 8192
+config_id = "reviewer"
+
+# ── Agent instances (reference profile instances) ──────────────────────────
+
+[[agent.instances]]
+name = "code-writer"
+agent_profile = "{{agent_profile.coder}}"
+system_prompt = "You write clean, well-tested code. Follow existing patterns."
+
+[[agent.instances]]
+name = "code-reviewer"
+agent_profile = "{{agent_profile.reviewer}}"
+system_prompt = "You review code for bugs, security issues, and style violations."
+
 # ── Provider ────────────────────────────────────────────────────────────────
 
 [provider]

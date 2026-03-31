@@ -12,8 +12,8 @@ Compaction [EXISTS]
 ├── CompactionStrategy [EXISTS] — legacy in-memory
 ├── BlockCompactionStrategy [EXISTS] — modern overlay
 ├── TurnMap [EXISTS] — turn indices → message ranges
-├── Callbacks: before/after compaction [CONCEPTUAL]
-└── Config spread: ContextConfig + AgentLoopConfig [CONCEPTUAL: streamline]
+├── Callbacks: before/after compaction [EXISTS]
+└── Config: consolidated in CompactionConfig [EXISTS]
 ```
 
 ---
@@ -156,14 +156,14 @@ Full compaction policy -- controls both WHEN and HOW to compact.
 | `compact_session_loops()`, `build_context_from_session()`, `resolve_scope()` | `src/context/orchestration.rs` |
 | `compact_messages()` (legacy in-memory) | `src/context/compact_messages.rs` |
 | `ContextTracker` (token tracking) | `src/context/tracker.rs` |
-| `compaction_strategy` and `block_compaction_strategy` fields | `src/agent_loop/config.rs` |
+| `in_memory_strategy` and `block_strategy` fields | `src/context/config.rs` (on `CompactionConfig`) |
 
 ---
 
 ## Conceptual Notes
 
-- **before_compaction_start / after_compaction_end callbacks** [CONCEPTUAL] -- Currently no lifecycle hooks fire around compaction. The plan envisions `before_compaction_start` (for pre-compaction indexing/memory extraction) and `after_compaction_end` (for post-compaction verification) as blank-by-default callbacks.
-- **Config spread** [CONCEPTUAL: streamline] -- Compaction configuration is currently split across two locations: `ContextConfig.compaction` (the `CompactionConfig` struct with WHEN/HOW settings) and `AgentLoopConfig` (which holds `compaction_strategy: Option<Arc<dyn CompactionStrategy>>` and `block_compaction_strategy: Option<Arc<dyn BlockCompactionStrategy>>`). Streamlining into a single `CompactionConfig` location that bundles both the policy and the strategy would reduce configuration surface area.
+- **before_compaction_start / after_compaction_end callbacks** [EXISTS] -- Lifecycle hooks now fire around compaction. `before_compaction_start` fires before compaction begins (for pre-compaction indexing/memory extraction) and `after_compaction_end` fires after compaction completes (for post-compaction verification). Both are blank-by-default callbacks.
+- **Config consolidation** [EXISTS] -- Compaction strategies (`in_memory_strategy` and `block_strategy`) are now fields on `CompactionConfig`, consolidating what was previously split across `ContextConfig.compaction` and `AgentLoopConfig`. The strategies no longer live on `AgentLoopConfig`; all compaction policy and strategy configuration is in one place.
 - **LLM-based Summarisation** -- `DefaultBlockCompaction.keep_compacted` is a basic per-turn one-liner generator. The `BlockCompactionStrategy` trait is designed for more sophisticated strategies that call an LLM to produce holistic digests of all turns within the `max_summary_tokens` budget.
 - **Compaction Events** [EXISTS] -- `CompactionStarted` and `CompactionEnded` events bracket compaction execution, providing estimated token counts before/after. These are consumed by `SessionRecorder` for observability.
 - **Legacy vs Modern** -- Two systems coexist: `CompactionStrategy` (legacy, in-memory, rewrites messages) is used when `AgentContext.session` is `None`; `BlockCompactionStrategy` (modern, non-destructive overlays) is used when session data is available. The legacy path is preserved for backward compatibility and simple stateless use cases.

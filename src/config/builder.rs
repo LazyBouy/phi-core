@@ -3,11 +3,16 @@
 //! [`agent_from_config`] is the entry point: it takes a parsed [`AgentConfig`] and
 //! returns an `Arc<dyn Agent>` (a [`BasicAgent`] internally, wrapped in Arc).
 
+use super::reference::{parse_config_ref, ConfigRef};
 use super::schema::AgentConfig;
+use crate::agent_loop::script_callback::{is_script_path, ScriptCallback};
+use crate::agents::system_prompt::{CustomPromptStrategy, PromptBlockDef, SystemPrompt};
 use crate::agents::{Agent, AgentProfile, BasicAgent};
 use crate::context::{CompactionConfig, CompactionScope, ContextConfig, ExecutionLimits};
 use crate::provider::ModelConfig;
 use crate::types::{CacheConfig, CacheStrategy, ThinkingLevel, ToolExecutionStrategy};
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Errors from config parsing and agent construction.
@@ -120,13 +125,23 @@ pub fn agent_from_config(config: &AgentConfig) -> Result<Arc<dyn Agent>, ConfigE
     // ── Build the agent ──────────────────────────────────────────────────
     let mut agent = BasicAgent::new(model_config);
 
-    // System prompt: agent-level overrides profile-level
-    let system_prompt = config
+    // System prompt: agent-level overrides profile-level.
+    // If the value is a {{...}} reference, resolve through the 3-entity chain:
+    //   SystemPromptStrategy (template) → SystemPrompt (content) → compose()
+    let raw_prompt = config
         .agent
         .system_prompt
         .as_deref()
         .or(config.agent.profile.system_prompt.as_deref())
         .unwrap_or("");
+    let workspace_path = config
+        .agent
+        .workspace
+        .as_deref()
+        .or(config.default_workspace.as_deref())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let system_prompt = resolve_system_prompt(raw_prompt, config, &workspace_path)?;
     if !system_prompt.is_empty() {
         agent = agent.with_system_prompt(system_prompt);
     }
@@ -186,6 +201,38 @@ pub fn agent_from_config(config: &AgentConfig) -> Result<Arc<dyn Agent>, ConfigE
         agent = agent.with_tool_execution(strategy);
     }
 
+    // ── Workspace ────────────────────────────────────────────────────────
+    // Resolution: agent-level workspace > default_workspace > None
+    let workspace = config
+        .agent
+        .workspace
+        .as_deref()
+        .or(config.default_workspace.as_deref());
+    if let Some(ws) = workspace {
+        agent = agent.with_workspace(ws);
+    }
+
+    // ── Script-based callbacks ───────────────────────────────────────────
+    // When config callback fields contain script paths (*.sh, *.py, or contain '/'),
+    // wrap them as ScriptCallback closures. Non-script strings (e.g., "module::func")
+    // are Phase 2 WASM references and are ignored.
+    let cb_workspace = workspace.map(PathBuf::from);
+    wire_script_callbacks(&mut agent, &config.callbacks, cb_workspace);
+
+    // ── Session ──────────────────────────────────────────────────────────
+    // Sessions are NOT created from config. They are runtime entities managed by
+    // SessionRecorder, which creates them when the first AgentStart event arrives.
+    // The [session] config section provides overrides (scope, thinking_level,
+    // temperature) that are stored on the Session struct by the recorder.
+
+    // ── Multi-agent instances ────────────────────────────────────────────
+    // agent_from_config() builds a single agent from the base profile.
+    // Profile instances (config.agent.profile.instances) and agent instances
+    // (config.agent.instances) are parsed and available on the AgentConfig struct,
+    // but multi-agent construction requires agents_from_config() (future).
+    // Helpers resolve_profile_instance() and find_profile_instance() are ready
+    // for that use case.
+
     Ok(Arc::new(agent))
 }
 
@@ -211,6 +258,68 @@ fn build_profile(section: &super::schema::ProfileSection) -> Result<AgentProfile
         max_tokens: section.max_tokens,
         config_id: section.config_id.clone(),
         skills: section.skills.clone(),
+        workspace: None,
+    })
+}
+
+/// Build a profile by resolving a `{{...}}` reference against the config's
+/// profile instances, then merging: profile defaults ← instance overrides.
+/// Ready for `agents_from_config()` — the future multi-agent entry point.
+#[allow(dead_code)]
+fn resolve_profile_instance(
+    base: &super::schema::ProfileSection,
+    instance: &super::schema::ProfileInstanceSection,
+) -> Result<AgentProfile, ConfigError> {
+    // Instance fields override base profile defaults (Option::or pattern)
+    let thinking_str = instance
+        .thinking_level
+        .as_deref()
+        .or(base.thinking_level.as_deref());
+    let thinking_level = thinking_str.map(parse_thinking_level).transpose()?;
+
+    Ok(AgentProfile {
+        profile_id: base
+            .profile_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        name: instance.name.clone().or_else(|| base.name.clone()),
+        description: instance
+            .description
+            .clone()
+            .or_else(|| base.description.clone()),
+        system_prompt: instance
+            .system_prompt
+            .clone()
+            .or_else(|| base.system_prompt.clone()),
+        thinking_level,
+        temperature: instance.temperature.or(base.temperature),
+        max_tokens: instance.max_tokens.or(base.max_tokens),
+        config_id: instance
+            .config_id
+            .clone()
+            .or_else(|| base.config_id.clone()),
+        skills: if instance.skills.is_empty() {
+            base.skills.clone()
+        } else {
+            instance.skills.clone()
+        },
+        workspace: None,
+    })
+}
+
+/// Look up a profile instance by reference name within the config.
+///
+/// Searches `[[agent.profile.instances]]` for an instance whose `id` field
+/// matches the given name (after stripping `{{...}}` syntax from both sides).
+/// Ready for `agents_from_config()` — the future multi-agent entry point.
+#[allow(dead_code)]
+fn find_profile_instance<'a>(
+    config: &'a AgentConfig,
+    ref_name: &str,
+) -> Option<&'a super::schema::ProfileInstanceSection> {
+    config.agent.profile.instances.iter().find(|inst| {
+        let inst_ref = super::reference::parse_config_ref(&inst.id);
+        inst_ref.effective_name() == ref_name
     })
 }
 
@@ -302,6 +411,8 @@ fn build_context_config(section: &super::schema::CompactionSection) -> ContextCo
             tool_output_max_lines: section
                 .tool_output_max_lines
                 .unwrap_or(comp_defaults.tool_output_max_lines),
+            in_memory_strategy: None,
+            block_strategy: None,
         },
         keep_recent: defaults.keep_recent,
         keep_first: defaults.keep_first,
@@ -380,5 +491,205 @@ fn parse_tool_execution_strategy(
             value: s.to_string(),
             expected: "sequential, parallel, batched".to_string(),
         }),
+    }
+}
+
+// ── System prompt resolution ────────────────────────────────────────────
+
+/// Resolve system prompt: if raw text is a `{{...}}` reference, resolve through
+/// the 3-entity chain (SystemPromptStrategy → SystemPrompt → compose()).
+/// If it's a literal string, return as-is.
+fn resolve_system_prompt(
+    raw: &str,
+    config: &AgentConfig,
+    workspace: &std::path::Path,
+) -> Result<String, ConfigError> {
+    if raw.is_empty() {
+        return Ok(String::new());
+    }
+
+    let config_ref = parse_config_ref(raw);
+    match config_ref {
+        ConfigRef::Literal(_) => Ok(raw.to_string()),
+        ref r if r.is_reference() => {
+            let prompt_name = r.effective_name();
+
+            // Find the SystemPrompt instance
+            let prompt_inst = config
+                .system_prompt
+                .instances
+                .iter()
+                .find(|p| parse_config_ref(&p.id).effective_name() == prompt_name)
+                .ok_or_else(|| ConfigError::InvalidField {
+                    field: "agent.system_prompt".into(),
+                    value: raw.into(),
+                    expected: format!(
+                        "a system_prompt instance named '{prompt_name}' in [[system_prompt.instances]]"
+                    ),
+                })?;
+
+            // Find the referenced strategy
+            let strategy_ref_raw = prompt_inst.strategy_type.as_deref().unwrap_or("");
+            let strategy_name = parse_config_ref(strategy_ref_raw)
+                .effective_name()
+                .to_string();
+
+            let strategy_inst = config
+                .system_prompt_strategy
+                .instances
+                .iter()
+                .find(|s| parse_config_ref(&s.id).effective_name() == strategy_name)
+                .ok_or_else(|| ConfigError::InvalidField {
+                    field: "system_prompt.type".into(),
+                    value: strategy_ref_raw.into(),
+                    expected: format!(
+                        "a strategy named '{strategy_name}' in [[system_prompt_strategy.instances]]"
+                    ),
+                })?;
+
+            // Build the strategy
+            let block_defs: Vec<PromptBlockDef> = strategy_inst
+                .blocks
+                .iter()
+                .map(|b| PromptBlockDef {
+                    name: b.name.clone(),
+                    order: b.order.unwrap_or(0),
+                    max_length: b.max_length.unwrap_or(usize::MAX),
+                })
+                .collect();
+            let strategy = CustomPromptStrategy { blocks: block_defs };
+
+            // Build the SystemPrompt with block content
+            let mut blocks = HashMap::new();
+            for (key, value) in &prompt_inst.blocks {
+                // Skip known metadata fields captured by serde(flatten)
+                if key == "id" || key == "description" || key == "type" {
+                    continue;
+                }
+                if let Some(text) = value.as_str() {
+                    blocks.insert(key.clone(), text.to_string());
+                }
+            }
+
+            let prompt = SystemPrompt {
+                id: prompt_inst.id.clone(),
+                description: prompt_inst.description.clone(),
+                strategy_ref: strategy_ref_raw.to_string(),
+                blocks,
+            };
+
+            prompt
+                .compose(&strategy, workspace)
+                .map_err(ConfigError::Io)
+        }
+        _ => Ok(raw.to_string()),
+    }
+}
+
+// ── Script callback wiring ──────────────────────────────────────────────
+
+/// Wire script-based callbacks from config into the agent via trait setters.
+/// Script paths (*.sh, *.py, or containing '/') are wrapped as ScriptCallback closures.
+/// Non-script strings are Phase 2 WASM references and are ignored.
+fn wire_script_callbacks(
+    agent: &mut dyn Agent,
+    callbacks: &super::schema::CallbacksSection,
+    workspace: Option<PathBuf>,
+) {
+    if let Some(ref path) = callbacks.before_loop {
+        if is_script_path(path) {
+            let script = ScriptCallback::new(path, workspace.clone());
+            agent.set_before_loop(Some(Arc::new(move |msgs, n| {
+                let input = serde_json::json!({
+                    "hook": "before_loop",
+                    "message_count": msgs.len(),
+                    "loop_index": n,
+                });
+                script
+                    .execute_sync(&input)
+                    .ok()
+                    .and_then(|v| v.get("allow").and_then(|a| a.as_bool()))
+                    .unwrap_or(true)
+            })));
+        }
+    }
+
+    if let Some(ref path) = callbacks.after_loop {
+        if is_script_path(path) {
+            let script = ScriptCallback::new(path, workspace.clone());
+            agent.set_after_loop(Some(Arc::new(move |_msgs, _usage| {
+                let input = serde_json::json!({"hook": "after_loop"});
+                let _ = script.execute_sync(&input);
+            })));
+        }
+    }
+
+    if let Some(ref path) = callbacks.before_tool_execution {
+        if is_script_path(path) {
+            let script = ScriptCallback::new(path, workspace.clone());
+            agent.set_before_tool_execution(Some(Arc::new(move |name, id, _args| {
+                let input = serde_json::json!({
+                    "hook": "before_tool_execution",
+                    "tool_name": name,
+                    "tool_call_id": id,
+                });
+                script
+                    .execute_sync(&input)
+                    .ok()
+                    .and_then(|v| v.get("allow").and_then(|a| a.as_bool()))
+                    .unwrap_or(true)
+            })));
+        }
+    }
+
+    if let Some(ref path) = callbacks.after_tool_execution {
+        if is_script_path(path) {
+            let script = ScriptCallback::new(path, workspace.clone());
+            agent.set_after_tool_execution(Some(Arc::new(move |name, id, is_error| {
+                let input = serde_json::json!({
+                    "hook": "after_tool_execution",
+                    "tool_name": name,
+                    "tool_call_id": id,
+                    "is_error": is_error,
+                });
+                let _ = script.execute_sync(&input);
+            })));
+        }
+    }
+
+    if let Some(ref path) = callbacks.before_compaction_start {
+        if is_script_path(path) {
+            let script = ScriptCallback::new(path, workspace.clone());
+            agent.set_before_compaction_start(Some(Arc::new(move |tokens, count| {
+                let input = serde_json::json!({
+                    "hook": "before_compaction_start",
+                    "estimated_tokens": tokens,
+                    "message_count": count,
+                });
+                script
+                    .execute_sync(&input)
+                    .ok()
+                    .and_then(|v| v.get("allow").and_then(|a| a.as_bool()))
+                    .unwrap_or(true)
+            })));
+        }
+    }
+
+    if let Some(ref path) = callbacks.after_compaction_end {
+        if is_script_path(path) {
+            let script = ScriptCallback::new(path, workspace);
+            agent.set_after_compaction_end(Some(Arc::new(
+                move |before, after, tok_before, tok_after| {
+                    let input = serde_json::json!({
+                        "hook": "after_compaction_end",
+                        "messages_before": before,
+                        "messages_after": after,
+                        "tokens_before": tok_before,
+                        "tokens_after": tok_after,
+                    });
+                    let _ = script.execute_sync(&input);
+                },
+            )));
+        }
     }
 }

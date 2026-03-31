@@ -427,6 +427,80 @@ Auto-generated or derived. Not user-configurable.
 | All `Turn` fields | `Turn` | Populated by SessionRecorder from events |
 | All `Session` identity fields | `Session` | Managed by SessionRecorder |
 
+### `[system_prompt_strategy]` -- System Prompt Strategy Template
+
+Defines a reusable strategy for assembling system prompts from ordered blocks. Each block has a name, order, and optional max length. Strategies are referenced by prompt instances.
+
+```toml
+[[system_prompt_strategy.instances]]
+id = "coding-assistant"
+description = "Strategy for coding assistant prompts"
+
+[[system_prompt_strategy.instances.blocks]]
+name = "identity"
+order = 1
+max_length = 500
+
+[[system_prompt_strategy.instances.blocks]]
+name = "capabilities"
+order = 2
+max_length = 1000
+
+[[system_prompt_strategy.instances.blocks]]
+name = "instructions"
+order = 3
+max_length = 2000
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string | Unique strategy identifier |
+| `description` | string | Human-readable description |
+| `blocks[].name` | string | Block name (referenced by prompt instances) |
+| `blocks[].order` | integer | Assembly order (lower = earlier in prompt) |
+| `blocks[].max_length` | integer | Maximum token length for this block |
+
+### `[system_prompt]` -- System Prompt Instances
+
+Defines concrete prompt instances that reference a strategy and provide content for each block. Block content fields are flattened at the instance level using the block name.
+
+```toml
+[[system_prompt.instances]]
+id = "code-reviewer-prompt"
+description = "Prompt for code review tasks"
+type = "coding-assistant"  # references strategy id
+identity = "You are a senior code reviewer."
+capabilities = "You can read files, search code, and run tests."
+instructions = "Focus on correctness, security, and maintainability."
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string | Unique prompt instance identifier |
+| `description` | string | Human-readable description |
+| `type` | string | References a `system_prompt_strategy` instance by id |
+| *(block names)* | string | Flattened block content fields matching the strategy's block names |
+
+### `default_workspace` and `[agent].workspace` -- Workspace Configuration
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `default_workspace` | `Option<String>` | `null` | Top-level default workspace directory for all agents |
+| `[agent.profile].workspace` | `Option<String>` | `null` | Agent-level workspace override; takes precedence over `default_workspace` |
+
+Agent instances can also override workspace:
+
+```toml
+default_workspace = "./workspace"
+
+[agent.profile]
+workspace = "./agent-workspace"  # overrides default_workspace
+
+[[agent.instances]]
+name = "researcher"
+workspace = "./research-workspace"  # overrides agent profile workspace
+```
+
 ---
 
 ## Resolution Order

@@ -2,13 +2,29 @@ use super::helpers::*;
 use super::model::*;
 use crate::types::*;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // SessionRecorderConfig
 // ---------------------------------------------------------------------------
 
+// ── Session-level callback types (G2) ────────────────────────────────────
+
+/// Called when a new session is first created (first `AgentStart` with a new `session_id`).
+///
+/// Arguments: the newly created `Session` (header fields populated, no loops yet).
+/// Return `false` to reject the session (the recorder will still create it but mark it rejected).
+pub type BeforeTaskFn = Arc<dyn Fn(&Session) -> bool + Send + Sync>;
+
+/// Called when a session is finalized (via `flush()` or explicit close).
+///
+/// Arguments: the completed `Session` with all loops finalized.
+pub type AfterTaskFn = Arc<dyn Fn(&Session) + Send + Sync>;
+
+// ── SessionRecorderConfig ────────────────────────────────────────────────
+
 /// Configuration for [`SessionRecorder`].
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct SessionRecorderConfig {
     /// Store `MessageUpdate` (streaming delta) events in [`LoopRecord::events`].
     ///
@@ -16,6 +32,22 @@ pub struct SessionRecorderConfig {
     /// final messages and are not needed for replay or branching. Enable only
     /// for debugging or playback use cases.
     pub include_streaming_events: bool,
+
+    /// Session-level callback: fires when a new session is first created (G2).
+    pub before_task: Option<BeforeTaskFn>,
+
+    /// Session-level callback: fires when a session is finalized (G2).
+    pub after_task: Option<AfterTaskFn>,
+}
+
+impl std::fmt::Debug for SessionRecorderConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionRecorderConfig")
+            .field("include_streaming_events", &self.include_streaming_events)
+            .field("before_task", &self.before_task.as_ref().map(|_| "..."))
+            .field("after_task", &self.after_task.as_ref().map(|_| "..."))
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -136,6 +168,7 @@ impl SessionRecorder {
             } => {
                 // Ensure the session exists.
                 let now = *timestamp;
+                let is_new_session = !self.open_sessions.contains_key(session_id);
                 let session = self
                     .open_sessions
                     .entry(session_id.clone())
@@ -153,6 +186,13 @@ impl SessionRecorder {
                         loops: Vec::new(),
                     });
                 session.last_active_at = now;
+
+                // G2: fire before_task callback on new session creation
+                if is_new_session {
+                    if let Some(ref hook) = self.config.before_task {
+                        hook(session);
+                    }
+                }
 
                 // If parent_loop_id is set and belongs to a DIFFERENT session, this is a
                 // sub-agent spawn — record the inbound SpawnRef on this session.
@@ -489,6 +529,10 @@ impl SessionRecorder {
             // A session is "complete" when all its loops have ended.
             // Since we just flushed all open loops, every session is complete.
             if let Some(session) = self.open_sessions.remove(&sid) {
+                // G2: fire after_task callback on session finalization
+                if let Some(ref hook) = self.config.after_task {
+                    hook(&session);
+                }
                 self.completed.push(session);
             }
         }
