@@ -8,16 +8,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Build & Development Commands
 
+Cargo is at `/root/rust-env/cargo/bin/cargo` (not in PATH — always use the full path or alias it).
+
 ```bash
-cargo build                          # Build the library
-cargo test                           # Run all unit tests
-cargo test <test_name>               # Run a single test by name
-cargo test --test agent_test         # Run a specific test file
-cargo fmt                            # Auto-format code
-cargo fmt -- --check                 # Check formatting (CI uses this)
-cargo clippy --all-targets           # Lint (CI runs with -Dwarnings)
-cargo run --example cli              # Run the interactive CLI example
-cargo run --example basic            # Run the minimal example
+/root/rust-env/cargo/bin/cargo build                          # Build the library
+/root/rust-env/cargo/bin/cargo test                           # Run all unit tests
+/root/rust-env/cargo/bin/cargo test <test_name>               # Run a single test by name
+/root/rust-env/cargo/bin/cargo test --test agent_test         # Run a specific test file
+/root/rust-env/cargo/bin/cargo fmt                            # Auto-format code
+/root/rust-env/cargo/bin/cargo fmt -- --check                 # Check formatting (CI uses this)
+RUSTFLAGS="-Dwarnings" /root/rust-env/cargo/bin/cargo clippy --all-targets  # Lint (CI uses this)
+/root/rust-env/cargo/bin/cargo run --example cli              # Run the interactive CLI example
+/root/rust-env/cargo/bin/cargo run --example basic            # Run the minimal example
 ```
 
 CI (`RUSTFLAGS="-Dwarnings"`) treats all clippy warnings as errors. Integration tests in `tests/integration_anthropic.rs` require a live API key and are skipped by default.
