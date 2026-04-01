@@ -14,7 +14,7 @@ Session [EXISTS]
 │   ├── scope [CONCEPTUAL] — Ephemeral / Persistent
 │   ├── created_at, last_active_at [EXISTS]
 │   ├── parent_spawn_ref [EXISTS] — cross-session link
-│   ├── Model override [CONCEPTUAL]
+│   ├── Model override [EXISTS]
 │   ├── thinking_level, temperature [CONCEPTUAL on Session]
 │   ├── Task Name, Task Status [CONCEPTUAL]
 │   └── Callbacks: before_task / after_task [EXISTS]
@@ -36,7 +36,7 @@ Session [EXISTS]
 | `created_at` | `DateTime<Utc>` | `[EXISTS]` | Timestamp of the first `AgentStart` event for this session. |
 | `last_active_at` | `DateTime<Utc>` | `[EXISTS]` | Updated each time a new loop opens (on `AgentStart`). Reflects when the last loop started, not when it last had activity. |
 | `parent_spawn_ref` | `Option<SpawnRef>` | `[EXISTS]` | Cross-session link when this session was spawned as a sub-agent. Points back to parent session, loop, tool call. Inverse of `LoopRecord.child_loop_refs`. |
-| Model override | `ModelConfig` | `[CONCEPTUAL]` | Session-level model that overrides the Agent default. Would sit between Agent default and Loop-level model in the fallback hierarchy. |
+| Model override | `ModelConfig` | `[EXISTS]` | Session-level model that overrides the Agent default. Would sit between Agent default and Loop-level model in the fallback hierarchy. |
 | `thinking_level` | `ThinkingLevel` | `[EXISTS]` on Agent; `[CONCEPTUAL]` on Session | Reasoning depth for this task. Currently lives on `BasicAgent`, conceptually belongs here. |
 | `temperature` | `Option<f32>` | `[EXISTS]` on Agent; `[CONCEPTUAL]` on Session | Sampling temperature for this task. Currently lives on `BasicAgent`, conceptually belongs here. |
 | Task Name | `String` | `[CONCEPTUAL]` | Human-readable label for the task this session represents. |

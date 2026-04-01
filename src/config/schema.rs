@@ -74,6 +74,8 @@ pub struct ProfileSection {
     pub config_id: Option<String>,
     /// Skill names loaded via SkillSet from SKILL.md files (NOT tools).
     pub skills: Vec<String>,
+    /// Reference to a compaction instance via `{{...}}` protocol.
+    pub compaction: Option<String>,
     /// Named profile instances (variations of this profile blueprint).
     /// Each instance overrides specific fields from the profile defaults.
     pub instances: Vec<ProfileInstanceSection>,
@@ -330,6 +332,32 @@ pub struct CompactionSection {
     pub max_summary_tokens: Option<usize>,
     /// Max lines per tool output in the keep_recent section.
     pub tool_output_max_lines: Option<usize>,
+    /// Focus message to guide compaction summarization.
+    pub focus_message: Option<String>,
+    /// Named compaction instances with `{{...}}` ID protocol.
+    pub instances: Vec<CompactionInstanceSection>,
+}
+
+/// A named compaction instance — a variation of the compaction defaults.
+///
+/// The `id` field uses the `{{...}}` reference protocol.
+/// Fields set here override the parent `CompactionSection` defaults.
+#[derive(Debug, Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct CompactionInstanceSection {
+    /// Instance ID using `{{...}}` reference protocol.
+    pub id: String,
+    /// Description for existence check queries.
+    pub description: Option<String>,
+    pub max_context_tokens: Option<usize>,
+    pub system_prompt_tokens: Option<usize>,
+    pub compact_at_pct: Option<f64>,
+    pub compact_budget_threshold_pct: Option<f64>,
+    pub keep_first_turns: Option<usize>,
+    pub keep_recent_turns: Option<usize>,
+    pub max_summary_tokens: Option<usize>,
+    pub tool_output_max_lines: Option<usize>,
+    pub focus_message: Option<String>,
 }
 
 // ── Execution section ───────────────────────────────────────────────────────

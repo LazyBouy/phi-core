@@ -25,8 +25,8 @@
 
 use crate::agent_loop::{
     AfterCompactionEndFn, AfterLoopFn, AfterToolExecutionFn, AfterToolExecutionUpdateFn,
-    AgentLoopConfig, BeforeCompactionStartFn, BeforeLoopFn, BeforeToolExecutionFn,
-    BeforeToolExecutionUpdateFn, ConvertToLlmFn, TransformContextFn,
+    AfterTurnFn, AgentLoopConfig, BeforeCompactionStartFn, BeforeLoopFn, BeforeToolExecutionFn,
+    BeforeToolExecutionUpdateFn, BeforeTurnFn, ConvertToLlmFn, TransformContextFn,
 };
 use crate::agents::AgentProfile;
 use crate::context::{ContextConfig, ExecutionLimits};
@@ -277,6 +277,12 @@ pub trait Agent: Send {
 
     // ── Hook setters (defaulted — no-ops) ─────────────────────────────────
 
+    /// Set the before-turn hook. Default: no-op.
+    fn set_before_turn(&mut self, _f: Option<BeforeTurnFn>) {}
+
+    /// Set the after-turn hook. Default: no-op.
+    fn set_after_turn(&mut self, _f: Option<AfterTurnFn>) {}
+
     /// Set the before-loop hook. Default: no-op.
     fn set_before_loop(&mut self, _f: Option<BeforeLoopFn>) {}
 
@@ -313,6 +319,20 @@ pub trait Agent: Send {
 
     /// Set the after-compaction-end hook (G1). Default: no-op.
     fn set_after_compaction_end(&mut self, _f: Option<AfterCompactionEndFn>) {}
+
+    /// Set the context translation strategy (G8). Default: no-op.
+    fn set_context_translation(
+        &mut self,
+        _s: Option<Arc<dyn crate::provider::context_translation::ContextTranslationStrategy>>,
+    ) {
+    }
+
+    /// Get the context translation strategy (G8). Default: None.
+    fn context_translation(
+        &self,
+    ) -> Option<Arc<dyn crate::provider::context_translation::ContextTranslationStrategy>> {
+        None
+    }
 
     // ── Config assembly (defaulted) ───────────────────────────────────────
 
@@ -363,6 +383,7 @@ pub trait Agent: Send {
             input_filters: vec![],
             first_turn_trigger: TurnTrigger::User,
             config_id: None,
+            context_translation: self.context_translation(),
         }
     }
 }

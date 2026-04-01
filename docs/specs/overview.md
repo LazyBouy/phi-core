@@ -51,7 +51,7 @@
     │  Message [E]      Compaction [E]            │
     │  Configuration [E]                          │
     │  SystemPromptStrategy [E]                   │
-    │  ContextTranslationStrategy [C]             │
+    │  ContextTranslationStrategy [E]             │
     └─────────────────────────────────────────────┘
 
 [E] = EXISTS    [P] = PLANNED    [C] = CONCEPTUAL
@@ -87,7 +87,7 @@ If the Loop has no model specified, it falls back to the Session's model. If the
 | Compaction | `context/compaction.rs` | `[EXISTS]` | [compaction.md](compaction.md) |
 | Configuration | `context/config.rs` + `agent_loop/config.rs` | `[EXISTS]` | [config.md](config.md) |
 | SystemPromptStrategy | trait + implementations | `[EXISTS]` | [agent.md](agent.md) |
-| ContextTranslationStrategy | not in code | `[CONCEPTUAL]` | [provider.md](provider.md) |
+| ContextTranslationStrategy | `provider/context_translation.rs` | `[EXISTS]` | [provider.md](provider.md) |
 | Introspection / Memory | not in code | `[CONCEPTUAL]` | [agent.md](agent.md) |
 | Permissions | not in code | `[CONCEPTUAL]` | [agent.md](agent.md) |
 
@@ -116,14 +116,14 @@ These are places where the conceptual model differs from current code. They repr
 | Concept | Current Code | Conceptual Target |
 |---------|-------------|-------------------|
 | Agent Profile | Scattered fields on BasicAgent | Dedicated `AgentProfile` struct with `profile_id` |
-| thinking_level | On BasicAgent | Should be Session-level (task attribute) |
-| temperature | On BasicAgent | Should be Session-level (task attribute) |
-| Session model | No model field on Session | Session should carry model override |
-| Session scope | Not in code | Ephemeral vs Persistent (Introspection mandatory for Persistent) |
+| thinking_level | On BasicAgent and Session [EXISTS] | Should be Session-level (task attribute) |
+| temperature | On BasicAgent and Session [EXISTS] | Should be Session-level (task attribute) |
+| Session model | model_config exists on Session [EXISTS] | Session should carry model override |
+| Session scope | SessionScope enum [EXISTS] | Ephemeral vs Persistent (Introspection mandatory for Persistent) |
 | SystemPromptStrategy | Trait exists with `compose(context) -> String` | ~~Dynamic trait with layered composition~~ Trait exists; full 5-layer impl is future work |
 | Compaction config | Now consolidated in `CompactionConfig` (strategies are fields on it) | ~~Single CompactionConfig location~~ Done |
 | before_task / after_task | Now on `SessionRecorderConfig` | ~~Session-level callbacks~~ Done |
-| ContextTranslationStrategy | Not in code | Provider-pair mapping for mid-session switching |
+| ContextTranslationStrategy | `[EXISTS]` — `ContextTranslationStrategy` trait + `DefaultContextTranslation` in `provider/context_translation.rs` | Read-only translation with per-provider rules (Thinking → Text for OpenAI, dropped for Google/Bedrock) |
 | Introspection | Not in code | Memory extraction with 3 categories (episodic, semantic, procedural) |
 | Permissions | Not in code | Include/exclude rules on Agent |
 
@@ -155,8 +155,8 @@ Prioritized list of features that belong in phi-core (per [First Principles](../
 
 | ID | Feature | Why Core | Effort | Spec Ref |
 |----|---------|----------|--------|----------|
-| **G8** | ContextTranslationStrategy | Mid-session provider switching requires translating context between provider formats. Touches message pipeline inside the loop. | ~150 LOC | `provider.md`, misalignment table above |
-| **G10** | Tool Registry | Map tool names in config to tool instances at runtime. Currently config specifies tool names but caller must register instances via `.set_tools()`. Requires a registry pattern. | ~200 LOC | `config.md` |
+| **G8** | ContextTranslationStrategy `[EXISTS]` | ContextTranslationStrategy trait with DefaultContextTranslation. Read-only translation for cross-provider compatibility. | ~150 LOC | `provider.md`, misalignment table above |
+| **G10** | Tool Registry `[EXISTS]` | ToolRegistry maps config tool names to instances. 6 built-in tools registered. | ~200 LOC | `config.md` |
 
 ### External — Not Core
 

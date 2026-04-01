@@ -10,7 +10,8 @@ use crate::agents::system_prompt::{CustomPromptStrategy, PromptBlockDef, SystemP
 use crate::agents::{Agent, AgentProfile, BasicAgent};
 use crate::context::{CompactionConfig, CompactionScope, ContextConfig, ExecutionLimits};
 use crate::provider::ModelConfig;
-use crate::types::{CacheConfig, CacheStrategy, ThinkingLevel, ToolExecutionStrategy};
+use crate::tools::ToolRegistry;
+use crate::types::{AgentTool, CacheConfig, CacheStrategy, ThinkingLevel, ToolExecutionStrategy};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -61,10 +62,118 @@ impl std::error::Error for ConfigError {}
 ///
 /// - **Tools are not instantiated.** Config specifies tool names via `tools.enabled`;
 ///   the caller must register tool instances via `.set_tools()` on the returned agent.
-///   Full tool-from-config requires a tool registry (tracked as G10).
+///   Use [`agent_from_config_with_registry`] to resolve tools automatically (G10).
 /// - **Callbacks/hooks are Phase 2.** Config stores callback/hook strings but the
 ///   builder ignores them in Phase 1. WASM plugin loading will activate them in Phase 2.
 pub fn agent_from_config(config: &AgentConfig) -> Result<Arc<dyn Agent>, ConfigError> {
+    let agent = build_basic_agent(config, None, None, None)?;
+    Ok(Arc::new(agent))
+}
+
+/// Construct an agent from config, resolving tool names via a [`ToolRegistry`] (G10).
+///
+/// Tools listed in `config.tools.enabled` are resolved through the registry.
+/// Unknown tool names are silently skipped. The rest of the construction pipeline
+/// is identical to [`agent_from_config`].
+pub fn agent_from_config_with_registry(
+    config: &AgentConfig,
+    registry: &ToolRegistry,
+) -> Result<Arc<dyn Agent>, ConfigError> {
+    let tools = registry.resolve(&config.tools.enabled);
+    let agent = build_basic_agent(config, None, None, Some(tools))?;
+    Ok(Arc::new(agent))
+}
+
+/// Construct multiple agents from a config with agent instances.
+///
+/// If `config.agent.instances` is empty, returns a single agent from
+/// [`agent_from_config`] with the name `"default"`.
+///
+/// Otherwise, builds one agent per instance, resolving `agent_profile` refs
+/// against `config.agent.profile.instances`. Each instance can override:
+/// - `agent_profile` — reference to a named profile instance
+/// - `system_prompt` — override the system prompt
+/// - `profile` — inline profile overrides
+#[allow(clippy::type_complexity)]
+pub fn agents_from_config(
+    config: &AgentConfig,
+) -> Result<Vec<(String, Arc<dyn Agent>)>, ConfigError> {
+    if config.agent.instances.is_empty() {
+        let agent = agent_from_config(config)?;
+        return Ok(vec![("default".to_string(), agent)]);
+    }
+
+    let mut agents = Vec::new();
+    for instance in &config.agent.instances {
+        let name = instance
+            .name
+            .clone()
+            .unwrap_or_else(|| "unnamed".to_string());
+
+        // Resolve profile: agent_profile ref -> find instance -> merge with base
+        let profile_override = if let Some(ref profile_ref) = instance.agent_profile {
+            let parsed = super::reference::parse_config_ref(profile_ref);
+            let ref_name = parsed.effective_name();
+            if let Some(inst) = find_profile_instance(config, ref_name) {
+                Some(resolve_profile_instance(&config.agent.profile, inst)?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Resolve provider instance from ref (if set)
+        let provider_inst = if let Some(ref provider_ref) = instance.provider {
+            let parsed = super::reference::parse_config_ref(provider_ref);
+            let ref_name = parsed.effective_name();
+            config.provider.instances.iter().find(|pi| {
+                let id_name = pi
+                    .id
+                    .as_deref()
+                    .map(|id| {
+                        super::reference::parse_config_ref(id)
+                            .effective_name()
+                            .to_string()
+                    })
+                    .unwrap_or_default();
+                let plain_name = pi.name.as_deref().unwrap_or("");
+                id_name == ref_name || plain_name == ref_name
+            })
+        } else {
+            None
+        };
+
+        // System prompt override from instance
+        let system_prompt_override = instance.system_prompt.clone();
+
+        let agent = build_basic_agent(config, profile_override.as_ref(), provider_inst, None)?;
+
+        // Apply instance-level system prompt override after construction
+        let agent: Arc<dyn Agent> = if let Some(ref prompt) = system_prompt_override {
+            let mut a = build_basic_agent(config, profile_override.as_ref(), provider_inst, None)?;
+            a = a.with_system_prompt(prompt.clone());
+            Arc::new(a)
+        } else {
+            Arc::new(agent)
+        };
+
+        agents.push((name, agent));
+    }
+    Ok(agents)
+}
+
+/// Internal: build a `BasicAgent` from config with optional overrides.
+///
+/// - `profile_override`: when `Some`, replaces the profile built from `config.agent.profile`.
+/// - `provider_instance`: when `Some`, overrides model config fields from a provider instance.
+/// - `tools_override`: when `Some`, sets these tools on the agent.
+fn build_basic_agent(
+    config: &AgentConfig,
+    profile_override: Option<&AgentProfile>,
+    provider_instance: Option<&super::schema::ProviderInstance>,
+    tools_override: Option<Vec<Arc<dyn AgentTool>>>,
+) -> Result<BasicAgent, ConfigError> {
     // ── Build ModelConfig ────────────────────────────────────────────────
     let model = config
         .provider
@@ -100,7 +209,7 @@ pub fn agent_from_config(config: &AgentConfig) -> Result<Arc<dyn Agent>, ConfigE
             .unwrap_or("anthropic_messages"),
     )?;
 
-    let model_config = ModelConfig {
+    let mut model_config = ModelConfig {
         id: model,
         name: display_name,
         api: api_protocol,
@@ -116,11 +225,38 @@ pub fn agent_from_config(config: &AgentConfig) -> Result<Arc<dyn Agent>, ConfigE
         max_tokens: config.provider.max_tokens.unwrap_or(8_192),
         cost: build_cost_config(&config.provider.cost),
         headers: config.provider.headers.clone(),
-        compat: None, // TODO: build from config.provider.compat when needed
+        compat: build_compat_config(&config.provider.compat),
     };
 
+    // Apply provider instance overrides (from agent instance → provider ref)
+    if let Some(pi) = provider_instance {
+        if let Some(ref m) = pi.model {
+            model_config.id = m.clone();
+            model_config.name = m.clone();
+        }
+        if let Some(ref k) = pi.api_key {
+            model_config.api_key = k.clone();
+        }
+        if let Some(ref a) = pi.api {
+            model_config.api = parse_api_protocol(a)?;
+            // Re-derive base_url if the instance doesn't set one
+            if pi.base_url.is_none() {
+                model_config.base_url = default_base_url(model_config.api);
+            }
+        }
+        if let Some(ref u) = pi.base_url {
+            model_config.base_url = u.clone();
+        }
+        if let Some(ref p) = pi.provider {
+            model_config.provider = p.clone();
+        }
+    }
+
     // ── Build AgentProfile ───────────────────────────────────────────────
-    let profile = build_profile(&config.agent.profile)?;
+    let profile = match profile_override {
+        Some(p) => p.clone(),
+        None => build_profile(&config.agent.profile)?,
+    };
 
     // ── Build the agent ──────────────────────────────────────────────────
     let mut agent = BasicAgent::new(model_config);
@@ -172,8 +308,10 @@ pub fn agent_from_config(config: &AgentConfig) -> Result<Arc<dyn Agent>, ConfigE
     }
 
     // ── Context / Compaction (G5) ────────────────────────────────────────
-    if config.compaction.max_context_tokens.is_some() {
-        let ctx_config = build_context_config(&config.compaction);
+    // Resolve compaction instance from profile ref (if set)
+    let compaction_section = resolve_compaction_from_profile(config);
+    if compaction_section.max_context_tokens.is_some() {
+        let ctx_config = build_context_config(&compaction_section);
         agent = agent.with_context_config(ctx_config);
     }
 
@@ -201,6 +339,11 @@ pub fn agent_from_config(config: &AgentConfig) -> Result<Arc<dyn Agent>, ConfigE
         agent = agent.with_tool_execution(strategy);
     }
 
+    // ── Tools (G10) ──────────────────────────────────────────────────────
+    if let Some(tools) = tools_override {
+        agent = agent.with_tools(tools);
+    }
+
     // ── Workspace ────────────────────────────────────────────────────────
     // Resolution: agent-level workspace > default_workspace > None
     let workspace = config
@@ -219,21 +362,7 @@ pub fn agent_from_config(config: &AgentConfig) -> Result<Arc<dyn Agent>, ConfigE
     let cb_workspace = workspace.map(PathBuf::from);
     wire_script_callbacks(&mut agent, &config.callbacks, cb_workspace);
 
-    // ── Session ──────────────────────────────────────────────────────────
-    // Sessions are NOT created from config. They are runtime entities managed by
-    // SessionRecorder, which creates them when the first AgentStart event arrives.
-    // The [session] config section provides overrides (scope, thinking_level,
-    // temperature) that are stored on the Session struct by the recorder.
-
-    // ── Multi-agent instances ────────────────────────────────────────────
-    // agent_from_config() builds a single agent from the base profile.
-    // Profile instances (config.agent.profile.instances) and agent instances
-    // (config.agent.instances) are parsed and available on the AgentConfig struct,
-    // but multi-agent construction requires agents_from_config() (future).
-    // Helpers resolve_profile_instance() and find_profile_instance() are ready
-    // for that use case.
-
-    Ok(Arc::new(agent))
+    Ok(agent)
 }
 
 // ── Helper functions ────────────────────────────────────────────────────────
@@ -264,8 +393,6 @@ fn build_profile(section: &super::schema::ProfileSection) -> Result<AgentProfile
 
 /// Build a profile by resolving a `{{...}}` reference against the config's
 /// profile instances, then merging: profile defaults ← instance overrides.
-/// Ready for `agents_from_config()` — the future multi-agent entry point.
-#[allow(dead_code)]
 fn resolve_profile_instance(
     base: &super::schema::ProfileSection,
     instance: &super::schema::ProfileInstanceSection,
@@ -311,8 +438,6 @@ fn resolve_profile_instance(
 ///
 /// Searches `[[agent.profile.instances]]` for an instance whose `id` field
 /// matches the given name (after stripping `{{...}}` syntax from both sides).
-/// Ready for `agents_from_config()` — the future multi-agent entry point.
-#[allow(dead_code)]
 fn find_profile_instance<'a>(
     config: &'a AgentConfig,
     ref_name: &str,
@@ -321,6 +446,45 @@ fn find_profile_instance<'a>(
         let inst_ref = super::reference::parse_config_ref(&inst.id);
         inst_ref.effective_name() == ref_name
     })
+}
+
+fn resolve_compaction_from_profile(config: &AgentConfig) -> super::schema::CompactionSection {
+    if let Some(ref comp_ref) = config.agent.profile.compaction {
+        let parsed = super::reference::parse_config_ref(comp_ref);
+        let ref_name = parsed.effective_name();
+        if let Some(inst) = config
+            .compaction
+            .instances
+            .iter()
+            .find(|i| super::reference::parse_config_ref(&i.id).effective_name() == ref_name)
+        {
+            return merge_compaction_instance(&config.compaction, inst);
+        }
+    }
+    config.compaction.clone()
+}
+
+fn merge_compaction_instance(
+    base: &super::schema::CompactionSection,
+    inst: &super::schema::CompactionInstanceSection,
+) -> super::schema::CompactionSection {
+    super::schema::CompactionSection {
+        max_context_tokens: inst.max_context_tokens.or(base.max_context_tokens),
+        system_prompt_tokens: inst.system_prompt_tokens.or(base.system_prompt_tokens),
+        compact_at_pct: inst.compact_at_pct.or(base.compact_at_pct),
+        compact_budget_threshold_pct: inst
+            .compact_budget_threshold_pct
+            .or(base.compact_budget_threshold_pct),
+        keep_first_turns: inst.keep_first_turns.or(base.keep_first_turns),
+        keep_recent_turns: inst.keep_recent_turns.or(base.keep_recent_turns),
+        max_summary_tokens: inst.max_summary_tokens.or(base.max_summary_tokens),
+        tool_output_max_lines: inst.tool_output_max_lines.or(base.tool_output_max_lines),
+        focus_message: inst
+            .focus_message
+            .clone()
+            .or_else(|| base.focus_message.clone()),
+        instances: base.instances.clone(),
+    }
 }
 
 fn parse_thinking_level(s: &str) -> Result<ThinkingLevel, ConfigError> {
@@ -411,6 +575,7 @@ fn build_context_config(section: &super::schema::CompactionSection) -> ContextCo
             tool_output_max_lines: section
                 .tool_output_max_lines
                 .unwrap_or(comp_defaults.tool_output_max_lines),
+            focus_message: section.focus_message.clone(),
             in_memory_strategy: None,
             block_strategy: None,
         },
@@ -474,6 +639,50 @@ fn build_cache_config(section: &super::schema::CacheSection) -> CacheConfig {
         _ => CacheStrategy::Auto, // unknown strategies default to auto
     };
     CacheConfig { enabled, strategy }
+}
+
+fn build_compat_config(
+    section: &super::schema::CompatSection,
+) -> Option<crate::provider::model::OpenAiCompat> {
+    use crate::provider::model::{MaxTokensField, OpenAiCompat, ThinkingFormat};
+
+    // Return None if all fields are empty (non-OpenAI provider)
+    if section.auth_style.is_none()
+        && section.reasoning_format.is_none()
+        && section.max_tokens_field.is_none()
+        && section.supports_streaming.is_none()
+        && section.supports_system_message.is_none()
+    {
+        return None;
+    }
+
+    let mut compat = OpenAiCompat::default();
+
+    if let Some(ref fmt) = section.reasoning_format {
+        compat.thinking_format = match fmt.to_lowercase().as_str() {
+            "xai" => ThinkingFormat::Xai,
+            "qwen" => ThinkingFormat::Qwen,
+            "openrouter" => ThinkingFormat::OpenRouter,
+            _ => ThinkingFormat::OpenAi,
+        };
+    }
+
+    if let Some(ref field) = section.max_tokens_field {
+        compat.max_tokens_field = match field.to_lowercase().as_str() {
+            "max_completion_tokens" => MaxTokensField::MaxCompletionTokens,
+            _ => MaxTokensField::MaxTokens,
+        };
+    }
+
+    if let Some(streaming) = section.supports_streaming {
+        compat.supports_usage_in_streaming = streaming;
+    }
+
+    if let Some(developer) = section.supports_system_message {
+        compat.supports_developer_role = developer;
+    }
+
+    Some(compat)
 }
 
 fn parse_tool_execution_strategy(
@@ -619,6 +828,34 @@ fn wire_script_callbacks(
             let script = ScriptCallback::new(path, workspace.clone());
             agent.set_after_loop(Some(Arc::new(move |_msgs, _usage| {
                 let input = serde_json::json!({"hook": "after_loop"});
+                let _ = script.execute_sync(&input);
+            })));
+        }
+    }
+
+    if let Some(ref path) = callbacks.before_turn {
+        if is_script_path(path) {
+            let script = ScriptCallback::new(path, workspace.clone());
+            agent.set_before_turn(Some(Arc::new(move |msgs, turn| {
+                let input = serde_json::json!({
+                    "hook": "before_turn",
+                    "message_count": msgs.len(),
+                    "turn_index": turn,
+                });
+                script
+                    .execute_sync(&input)
+                    .ok()
+                    .and_then(|v| v.get("allow").and_then(|a| a.as_bool()))
+                    .unwrap_or(true)
+            })));
+        }
+    }
+
+    if let Some(ref path) = callbacks.after_turn {
+        if is_script_path(path) {
+            let script = ScriptCallback::new(path, workspace.clone());
+            agent.set_after_turn(Some(Arc::new(move |_msgs, _usage| {
+                let input = serde_json::json!({"hook": "after_turn"});
                 let _ = script.execute_sync(&input);
             })));
         }

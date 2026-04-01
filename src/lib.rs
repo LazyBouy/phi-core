@@ -65,7 +65,8 @@ pub use agent_loop::{agent_loop, agent_loop_continue, agent_loop_parallel};
 pub use agents::SubAgentTool;
 pub use agents::{Agent, AgentProfile, BasicAgent, QueueMode};
 pub use config::{
-    agent_from_config, parse_config, parse_config_file, AgentConfig, ConfigError, ConfigFormat,
+    agent_from_config, agent_from_config_with_registry, agents_from_config, parse_config,
+    parse_config_file, AgentConfig, ConfigError, ConfigFormat,
 };
 pub use context::skills::SkillSet;
 pub use context::{

@@ -14,6 +14,7 @@ use crate::agent_loop::{
 };
 use crate::context::{CompactionStrategy, ContextConfig, ExecutionLimits};
 use crate::mcp::{McpClient, McpError, McpToolAdapter};
+use crate::provider::context_translation::ContextTranslationStrategy;
 use crate::provider::{ModelConfig, StreamProvider};
 use crate::types::*;
 use std::collections::HashMap;
@@ -141,6 +142,7 @@ pub struct BasicAgent {
     transform_context: Option<TransformContextFn>,
     before_compaction_start: Option<BeforeCompactionStartFn>,
     after_compaction_end: Option<AfterCompactionEndFn>,
+    context_translation: Option<Arc<dyn ContextTranslationStrategy>>,
 
     // ── Profile, config identity, and workspace ──────────────────────────
     config_id: Option<String>,
@@ -221,6 +223,7 @@ impl BasicAgent {
             transform_context: None,
             before_compaction_start: None,
             after_compaction_end: None,
+            context_translation: None,
             config_id: None,
             profile: None,
             workspace: None,
@@ -548,6 +551,15 @@ impl BasicAgent {
         f: impl Fn(usize, usize, usize, usize) + Send + Sync + 'static,
     ) -> Self {
         self.after_compaction_end = Some(Arc::new(f));
+        self
+    }
+
+    /// Set the context translation strategy (G8) for cross-provider compatibility.
+    pub fn with_context_translation(
+        mut self,
+        strategy: Arc<dyn ContextTranslationStrategy>,
+    ) -> Self {
+        self.context_translation = Some(strategy);
         self
     }
 
@@ -941,6 +953,7 @@ impl BasicAgent {
             input_filters: self.input_filters.clone(),
             first_turn_trigger: TurnTrigger::User,
             config_id: self.config_id.clone(),
+            context_translation: self.context_translation.clone(),
         }
     }
 
@@ -1285,6 +1298,14 @@ impl Agent for BasicAgent {
 
     // ── Hook setters ─────────────────────────────────────────────────────
 
+    fn set_before_turn(&mut self, f: Option<BeforeTurnFn>) {
+        self.before_turn = f;
+    }
+
+    fn set_after_turn(&mut self, f: Option<AfterTurnFn>) {
+        self.after_turn = f;
+    }
+
     fn set_before_loop(&mut self, f: Option<BeforeLoopFn>) {
         self.before_loop = f;
     }
@@ -1333,5 +1354,13 @@ impl Agent for BasicAgent {
 
     fn set_after_compaction_end(&mut self, f: Option<AfterCompactionEndFn>) {
         self.after_compaction_end = f;
+    }
+
+    fn set_context_translation(&mut self, s: Option<Arc<dyn ContextTranslationStrategy>>) {
+        self.context_translation = s;
+    }
+
+    fn context_translation(&self) -> Option<Arc<dyn ContextTranslationStrategy>> {
+        self.context_translation.clone()
     }
 }

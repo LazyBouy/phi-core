@@ -151,6 +151,8 @@ Script callbacks are specified as command strings (e.g., `"./scripts/on_task_sta
 
 Script callbacks can be configured in the `[callbacks]` section of the config file or set programmatically via the `Agent` trait.
 
+All callback tiers are wired in the script callback bridge. Loop-level (`before_loop`, `after_loop`), tool-level (`before_tool_execution`, `after_tool_execution`), compaction-level (`before_compaction_start`, `after_compaction_end`), and turn-level (`before_turn`, `after_turn`) hooks are all resolved from the `[callbacks]` config section and bridged to external scripts. The bridge passes hook context as JSON (message count, turn index, tool name, etc.) via stdin to the subprocess.
+
 ---
 
 ## Hook Ordering

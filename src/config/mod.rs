@@ -20,13 +20,15 @@ mod parser;
 pub mod reference;
 mod schema;
 
-pub use builder::{agent_from_config, ConfigError};
+pub use builder::{
+    agent_from_config, agent_from_config_with_registry, agents_from_config, ConfigError,
+};
 pub use parser::{parse_config, parse_config_auto, parse_config_file, ConfigFormat};
 pub use reference::{parse_config_ref, ConfigRef};
 pub use schema::{
     AgentConfig, AgentInstanceSection, AgentSection, CacheSection, CallbacksSection,
-    CompactionSection, CompatSection, CostSection, ExecutionSection, HooksSection,
-    ProfileInstanceSection, ProfileSection, PromptInstanceSection, ProviderInstance,
+    CompactionInstanceSection, CompactionSection, CompatSection, CostSection, ExecutionSection,
+    HooksSection, ProfileInstanceSection, ProfileSection, PromptInstanceSection, ProviderInstance,
     ProviderSection, RetrySection, SessionSection, SkillsSection, StrategyBlockSection,
     StrategyInstanceSection, SubAgentsSection, SystemPromptSection, SystemPromptStrategySection,
     ToolInstance, ToolsSection,

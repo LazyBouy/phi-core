@@ -278,6 +278,7 @@ impl AgentTool for SubAgentTool {
             input_filters: vec![],
             first_turn_trigger: TurnTrigger::SubAgent,
             config_id: None,
+            context_translation: None,
         };
 
         /*

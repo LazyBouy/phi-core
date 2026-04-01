@@ -1,4 +1,5 @@
 use crate::context::{ContextConfig, ExecutionLimits};
+use crate::provider::context_translation::ContextTranslationStrategy;
 use crate::provider::{ModelConfig, StreamProvider};
 use crate::types::*;
 use std::sync::Arc;
@@ -188,4 +189,12 @@ pub struct AgentLoopConfig {
     ///   `config.config_id = Some("experiment-A".to_string());`
     ///   → loop IDs: `ses_xyz.experiment-A.1`, `ses_xyz.experiment-A.2`, …
     pub config_id: Option<String>,
+
+    /// G8 — Optional context translation strategy for cross-provider compatibility.
+    ///
+    /// When set, messages are translated through this strategy before being sent to
+    /// the LLM provider. This allows content types from one provider (e.g.,
+    /// `Content::Thinking` from Anthropic) to be translated or removed when targeting
+    /// a different provider. The translation is read-only — originals are never modified.
+    pub context_translation: Option<Arc<dyn ContextTranslationStrategy>>,
 }

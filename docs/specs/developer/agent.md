@@ -55,7 +55,7 @@ Agent
 | `system_prompt` | `String` | `[EXISTS]` | Static system prompt string. Conceptually belongs to the Agent Profile. |
 | Agent Name | `String` | `[CONCEPTUAL]` | Human-readable name for the agent. |
 | Agent Description | `String` | `[CONCEPTUAL]` | Description of the agent's purpose and capabilities. |
-| `workspace` | `Option<PathBuf>` | `[EXISTS]` | Working directory for this agent. Overrides the global `default_workspace` from config. Tools that interact with the filesystem use this as their base path. |
+| `workspace` | `Option<PathBuf>` | `[EXISTS]` | Working directory. Lives on `AgentProfile` as blueprint default; `BasicAgent` stores an agent-level override. Resolution: agent workspace > profile workspace > current directory. |
 | `model_config` | `ModelConfig` | `[EXISTS]` | Default model for this agent. Falls back here when Session and Loop don't specify their own. Contains: model id, API key, base URL, API protocol, cost rates, context window size. |
 | `context_config` | `Option<ContextConfig>` | `[EXISTS]` | Token budget and compaction policy. Agent-level limit. |
 | `execution_limits` | `Option<ExecutionLimits>` | `[EXISTS]` | Max turns (50), max tokens (1M), max duration (10 min), cost tracking. Agent-level limit. |

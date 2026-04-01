@@ -47,6 +47,7 @@ fn make_config() -> AgentLoopConfig {
         input_filters: vec![],
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
+        context_translation: None,
     }
 }
 

@@ -521,7 +521,34 @@ agent_mut.set_tools(vec![
 ]);
 ```
 
-Tool instantiation from config names is tracked as a future feature (G10 — Tool Registry).
+### Tool Registry
+
+Instead of manually registering tools after construction, use `agent_from_config_with_registry()` to resolve tool names from the config automatically:
+
+```rust
+use phi_core::{parse_config_file, agent_from_config_with_registry, Agent};
+use phi_core::tools::ToolRegistry;
+use std::path::Path;
+
+let config = parse_config_file(Path::new("agent.toml"))?;
+
+// Create a registry with the 6 built-in tools
+let registry = ToolRegistry::new().with_defaults();
+
+// Tools listed in config.tools.enabled are resolved through the registry
+let agent = agent_from_config_with_registry(&config, &registry)?;
+```
+
+The default registry includes all 6 built-in tools: `bash`, `read_file`, `write_file`, `edit_file`, `list_files`, `search`. You can also register custom tools:
+
+```rust
+let mut registry = ToolRegistry::new().with_defaults();
+registry.register("my_tool", || Arc::new(MyCustomTool::new()));
+
+let agent = agent_from_config_with_registry(&config, &registry)?;
+```
+
+Unknown tool names in `tools.enabled` are silently skipped. Use `registry.contains(name)` to check availability before construction if needed.
 
 ---
 
@@ -553,6 +580,39 @@ tool_output_max_lines = 50      # Truncate tool outputs to 50 lines
 6. Tool outputs in kept turns are truncated to `max_lines`
 
 See [Context Compaction](../concepts/compaction.md) for the full algorithm.
+
+### Focused Compaction
+
+The `focus_message` field steers what the compaction summary emphasizes. Compaction instances let you define named variations that agent profiles can reference.
+
+```toml
+[compaction]
+max_context_tokens = 200000
+focus_message = "Retain key decisions and code changes."
+
+# Named compaction instances
+[[compaction.instances]]
+id = "{{%coding%}}"
+focus_message = "Focus on file paths, function signatures, and design rationale."
+keep_recent_turns = 6
+max_summary_tokens = 3000
+
+[[compaction.instances]]
+id = "{{%research%}}"
+focus_message = "Preserve citations, data sources, and methodology."
+keep_first_turns = 3
+max_summary_tokens = 4000
+```
+
+Profiles reference a compaction instance via `compaction = "{{compaction.coding}}"`:
+
+```toml
+[agent.profile]
+name = "coding-agent"
+compaction = "{{compaction.coding}}"
+```
+
+See [Focused Compaction](../concepts/focused-compaction.md) for full details.
 
 ---
 

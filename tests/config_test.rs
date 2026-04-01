@@ -1,7 +1,10 @@
 //! Tests for the config module: parsing, env var substitution, and agent construction.
 
 use phi_core::config::reference::{parse_config_ref, ConfigRef};
-use phi_core::config::{agent_from_config, parse_config, ConfigError, ConfigFormat};
+use phi_core::config::{
+    agent_from_config, agent_from_config_with_registry, agents_from_config, parse_config,
+    ConfigError, ConfigFormat,
+};
 #[allow(unused_imports)]
 use phi_core::Agent; // for trait methods
 
@@ -771,5 +774,494 @@ api_key = "test"
         agent.workspace(),
         Some(Path::new("/tmp/ws")),
         "workspace should be wired from default_workspace"
+    );
+}
+
+// ===========================================================================
+// Compact with Focus (tests 25–28)
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// 25. test_focus_message_none_default
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_focus_message_none_default() {
+    let cc = phi_core::CompactionConfig::default();
+    assert!(
+        cc.focus_message.is_none(),
+        "CompactionConfig::default().focus_message should be None"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 26. test_compaction_instance_parse
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_compaction_instance_parse() {
+    let toml = r#"
+[provider]
+model = "test"
+api_key = "test"
+
+[[compaction.instances]]
+id = "{{spec_focused}}"
+description = "Focus on specs"
+focus_message = "Focus on API specs"
+max_context_tokens = 80000
+
+[[compaction.instances]]
+id = "{{code_focused}}"
+description = "Focus on code"
+focus_message = "Focus on implementation details"
+"#;
+    let config = parse_config(toml, ConfigFormat::Toml).expect("should parse compaction instances");
+    assert_eq!(config.compaction.instances.len(), 2);
+    assert_eq!(config.compaction.instances[0].id, "{{spec_focused}}");
+    assert_eq!(
+        config.compaction.instances[0].description.as_deref(),
+        Some("Focus on specs")
+    );
+    assert_eq!(
+        config.compaction.instances[0].focus_message.as_deref(),
+        Some("Focus on API specs")
+    );
+    assert_eq!(
+        config.compaction.instances[0].max_context_tokens,
+        Some(80000)
+    );
+    assert_eq!(config.compaction.instances[1].id, "{{code_focused}}");
+    assert_eq!(
+        config.compaction.instances[1].focus_message.as_deref(),
+        Some("Focus on implementation details")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 27. test_compaction_instance_ref_in_profile
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_compaction_instance_ref_in_profile() {
+    let toml = r#"
+[provider]
+model = "test"
+api_key = "test"
+
+[agent.profile]
+name = "test"
+compaction = "{{spec_focused}}"
+"#;
+    let config = parse_config(toml, ConfigFormat::Toml).expect("should parse");
+    assert_eq!(
+        config.agent.profile.compaction.as_deref(),
+        Some("{{spec_focused}}"),
+        "profile compaction reference should be preserved"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 28. test_focus_message_from_config
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_focus_message_from_config() {
+    let toml = r#"
+[provider]
+model = "test"
+api_key = "test"
+
+[compaction]
+focus_message = "focus on APIs"
+max_context_tokens = 100000
+"#;
+    let config = parse_config(toml, ConfigFormat::Toml).unwrap();
+    let agent = agent_from_config(&config).expect("agent construction should succeed");
+    let ctx = agent
+        .context_config()
+        .expect("context_config should be Some");
+    assert_eq!(
+        ctx.compaction.focus_message.as_deref(),
+        Some("focus on APIs"),
+        "focus_message should be wired from config"
+    );
+}
+
+// ===========================================================================
+// G10: Tool Registry (tests 29–32)
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// 29. test_registry_with_defaults_has_6_tools
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_registry_with_defaults_has_6_tools() {
+    use phi_core::tools::ToolRegistry;
+
+    let registry = ToolRegistry::new().with_defaults();
+    let all_names = vec![
+        "bash".to_string(),
+        "read_file".to_string(),
+        "write_file".to_string(),
+        "edit_file".to_string(),
+        "list_files".to_string(),
+        "search".to_string(),
+    ];
+    let tools = registry.resolve(&all_names);
+    assert_eq!(tools.len(), 6, "should resolve all 6 default tools");
+}
+
+// ---------------------------------------------------------------------------
+// 30. test_registry_resolve_subset
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_registry_resolve_subset() {
+    use phi_core::tools::ToolRegistry;
+
+    let registry = ToolRegistry::new().with_defaults();
+    let tools = registry.resolve(&["bash".to_string(), "search".to_string()]);
+    assert_eq!(tools.len(), 2, "should resolve 2 tools");
+}
+
+// ---------------------------------------------------------------------------
+// 31. test_registry_resolve_unknown_skipped
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_registry_resolve_unknown_skipped() {
+    use phi_core::tools::ToolRegistry;
+
+    let registry = ToolRegistry::new().with_defaults();
+    let tools = registry.resolve(&["bash".to_string(), "nonexistent".to_string()]);
+    assert_eq!(
+        tools.len(),
+        1,
+        "unknown tool names should be silently skipped"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 32. test_agent_from_config_with_registry
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_agent_from_config_with_registry() {
+    use phi_core::tools::ToolRegistry;
+
+    let toml = r#"
+[provider]
+model = "test"
+api_key = "test"
+
+[tools]
+enabled = ["bash", "search"]
+"#;
+    let config = parse_config(toml, ConfigFormat::Toml).unwrap();
+    let registry = ToolRegistry::new().with_defaults();
+    let agent =
+        agent_from_config_with_registry(&config, &registry).expect("should build with registry");
+    // Just verify it doesn't error — tool presence is internal to BasicAgent
+    assert_eq!(
+        agent.model_config().unwrap().id,
+        "test",
+        "agent should be constructed"
+    );
+}
+
+// ===========================================================================
+// agents_from_config() (tests 33–35)
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// 33. test_agents_from_config_empty_instances
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_agents_from_config_empty_instances() {
+    let toml = r#"
+[provider]
+model = "test"
+api_key = "test"
+"#;
+    let config = parse_config(toml, ConfigFormat::Toml).unwrap();
+    let agents = agents_from_config(&config).expect("should build agents");
+    assert_eq!(agents.len(), 1, "no instances → single default agent");
+    assert_eq!(
+        agents[0].0, "default",
+        "default agent should be named 'default'"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 34. test_agents_from_config_with_instances
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_agents_from_config_with_instances() {
+    let toml = r#"
+[provider]
+model = "test"
+api_key = "test"
+
+[[agent.instances]]
+name = "writer"
+
+[[agent.instances]]
+name = "reviewer"
+"#;
+    let config = parse_config(toml, ConfigFormat::Toml).unwrap();
+    let agents = agents_from_config(&config).expect("should build agents");
+    assert_eq!(agents.len(), 2, "should build 2 agent instances");
+    assert_eq!(agents[0].0, "writer");
+    assert_eq!(agents[1].0, "reviewer");
+}
+
+// ---------------------------------------------------------------------------
+// 35. test_agents_from_config_instance_system_prompt
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_agents_from_config_instance_system_prompt() {
+    let toml = r#"
+[provider]
+model = "test"
+api_key = "test"
+
+[[agent.instances]]
+name = "custom"
+system_prompt = "You are a custom agent."
+"#;
+    let config = parse_config(toml, ConfigFormat::Toml).unwrap();
+    let agents = agents_from_config(&config).expect("should build agents");
+    assert_eq!(agents.len(), 1);
+    assert_eq!(
+        agents[0].1.system_prompt(),
+        "You are a custom agent.",
+        "instance system_prompt override should be applied"
+    );
+}
+
+// ===========================================================================
+// before_turn/after_turn callbacks schema (tests 36–37)
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// 36. test_before_turn_in_callbacks_schema
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_before_turn_in_callbacks_schema() {
+    let toml = r#"
+[provider]
+model = "test"
+api_key = "test"
+
+[callbacks]
+before_turn = "scripts/hook.sh"
+"#;
+    let config = parse_config(toml, ConfigFormat::Toml).expect("should parse");
+    assert_eq!(
+        config.callbacks.before_turn.as_deref(),
+        Some("scripts/hook.sh"),
+        "before_turn callback should be parsed"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 37. test_after_turn_in_callbacks_schema
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_after_turn_in_callbacks_schema() {
+    let toml = r#"
+[provider]
+model = "test"
+api_key = "test"
+
+[callbacks]
+after_turn = "scripts/hook.py"
+"#;
+    let config = parse_config(toml, ConfigFormat::Toml).expect("should parse");
+    assert_eq!(
+        config.callbacks.after_turn.as_deref(),
+        Some("scripts/hook.py"),
+        "after_turn callback should be parsed"
+    );
+}
+
+// ===========================================================================
+// Context translation, compaction instance, provider instance (tests 38–40b)
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// test_context_translation_stored_on_basic_agent
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_context_translation_stored_on_basic_agent() {
+    use phi_core::provider::context_translation::DefaultContextTranslation;
+    use phi_core::provider::ModelConfig;
+    use phi_core::{Agent, BasicAgent};
+    use std::sync::Arc;
+
+    let agent = BasicAgent::new(ModelConfig::anthropic("test", "test", "test"))
+        .with_context_translation(Arc::new(DefaultContextTranslation));
+    // Verify via Agent trait getter
+    let ct = agent.context_translation();
+    assert!(
+        ct.is_some(),
+        "context_translation should be Some after with_context_translation"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// test_compaction_instance_resolved_from_profile
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_compaction_instance_resolved_from_profile() {
+    let toml = r#"
+[provider]
+model = "test"
+api_key = "test"
+
+[compaction]
+max_context_tokens = 200000
+
+[[compaction.instances]]
+id = "{{coding}}"
+focus_message = "Focus on code"
+
+[agent.profile]
+compaction = "{{coding}}"
+"#;
+    let config = parse_config(toml, ConfigFormat::Toml).unwrap();
+    let agent = agent_from_config(&config).expect("agent construction should succeed");
+    let ctx = agent
+        .context_config()
+        .expect("context_config should be Some");
+    assert_eq!(
+        ctx.compaction.focus_message.as_deref(),
+        Some("Focus on code"),
+        "focus_message should be resolved from compaction instance"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// test_agents_from_config_instance_provider_ref
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_agents_from_config_instance_provider_ref() {
+    let toml = r#"
+[provider]
+model = "default-model"
+api_key = "test"
+
+[[provider.instances]]
+id = "{{%openai%}}"
+model = "gpt-4o"
+api = "openai_completions"
+
+[[agent.instances]]
+name = "openai-agent"
+provider = "{{openai}}"
+"#;
+    let config = parse_config(toml, ConfigFormat::Toml).unwrap();
+    let agents = agents_from_config(&config).expect("should build agents");
+    let (name, agent) = agents
+        .iter()
+        .find(|(n, _)| n == "openai-agent")
+        .expect("should find openai-agent");
+    assert_eq!(name, "openai-agent");
+    assert_eq!(
+        agent.model_config().unwrap().id,
+        "gpt-4o",
+        "provider instance model should override default"
+    );
+}
+
+// ===========================================================================
+// OpenAI compat (tests 38–40)
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// 38. test_compat_config_parsed
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_compat_config_parsed() {
+    let toml = r#"
+[provider]
+model = "grok-3"
+api_key = "test"
+api = "openai_completions"
+
+[provider.compat]
+reasoning_format = "xai"
+max_tokens_field = "max_completion_tokens"
+"#;
+    let config = parse_config(toml, ConfigFormat::Toml).unwrap();
+    let agent = agent_from_config(&config).expect("should build agent");
+    let mc = agent.model_config().expect("model_config should exist");
+    let compat = mc.compat.as_ref().expect("compat should be Some");
+    assert_eq!(
+        compat.thinking_format,
+        phi_core::provider::model::ThinkingFormat::Xai,
+        "reasoning_format should map to ThinkingFormat::Xai"
+    );
+    assert_eq!(
+        compat.max_tokens_field,
+        phi_core::provider::model::MaxTokensField::MaxCompletionTokens,
+        "max_tokens_field should map to MaxCompletionTokens"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 39. test_compat_none_when_empty
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_compat_none_when_empty() {
+    let toml = r#"
+[provider]
+model = "test"
+api_key = "test"
+"#;
+    let config = parse_config(toml, ConfigFormat::Toml).unwrap();
+    let agent = agent_from_config(&config).expect("should build agent");
+    let mc = agent.model_config().expect("model_config should exist");
+    assert!(
+        mc.compat.is_none(),
+        "compat should be None when no compat fields are set"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 40. test_compat_reasoning_format_mapping
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_compat_reasoning_format_mapping() {
+    let toml = r#"
+[provider]
+model = "test"
+api_key = "test"
+api = "openai_completions"
+
+[provider.compat]
+reasoning_format = "openrouter"
+"#;
+    let config = parse_config(toml, ConfigFormat::Toml).unwrap();
+    let agent = agent_from_config(&config).expect("should build agent");
+    let mc = agent.model_config().unwrap();
+    let compat = mc.compat.as_ref().expect("compat should be Some");
+    assert_eq!(
+        compat.thinking_format,
+        phi_core::provider::model::ThinkingFormat::OpenRouter,
+        "reasoning_format 'openrouter' should map to ThinkingFormat::OpenRouter"
     );
 }

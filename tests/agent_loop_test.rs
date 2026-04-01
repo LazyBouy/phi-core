@@ -41,6 +41,7 @@ fn make_config(provider: Arc<dyn phi_core::provider::StreamProvider>) -> AgentLo
         input_filters: vec![],
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
+        context_translation: None,
     }
 }
 
@@ -843,6 +844,7 @@ async fn test_retry_on_rate_limit_succeeds() {
         input_filters: vec![],
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
+        context_translation: None,
     };
 
     let mut context = AgentContext {
@@ -924,6 +926,7 @@ async fn test_retry_exhausted_returns_error() {
         input_filters: vec![],
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
+        context_translation: None,
     };
 
     let mut context = AgentContext {
@@ -1011,6 +1014,7 @@ async fn test_no_retry_on_auth_error() {
         input_filters: vec![],
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
+        context_translation: None,
     };
 
     let mut context = AgentContext {
@@ -1082,6 +1086,7 @@ async fn test_retry_none_disables_retries() {
         input_filters: vec![],
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
+        context_translation: None,
     };
 
     let mut context = AgentContext {
@@ -1346,6 +1351,7 @@ async fn test_on_error_fires_on_provider_error() {
         input_filters: vec![],
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
+        context_translation: None,
     };
 
     let mut context = AgentContext {
@@ -2737,6 +2743,7 @@ async fn test_custom_compaction_strategy_is_called() {
         input_filters: vec![],
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
+        context_translation: None,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Hello")));
@@ -2838,6 +2845,7 @@ async fn test_none_compaction_strategy_uses_default() {
         input_filters: vec![],
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
+        context_translation: None,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Hello")));

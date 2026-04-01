@@ -67,6 +67,13 @@ pub struct CompactionConfig {
     /// Max lines per tool output in the keep_recent section. Default: 50.
     pub tool_output_max_lines: usize,
 
+    // ── Focus message ──
+    /// Optional focus message to guide compaction summarization.
+    /// When set, prepended to the compacted section to tell the model what to prioritize.
+    /// Example: "Focus on specification details, API contracts, and architectural decisions."
+    #[serde(default)]
+    pub focus_message: Option<String>,
+
     // ── Strategy objects (G5 — moved from AgentLoopConfig) ──
     /// Custom in-memory compaction strategy. When set, replaces `DefaultCompaction`.
     /// Used when `AgentContext.session` is `None` (sub-agents, tests, sessionless runs).
@@ -92,6 +99,7 @@ impl std::fmt::Debug for CompactionConfig {
             .field("keep_recent_turns", &self.keep_recent_turns)
             .field("max_summary_tokens", &self.max_summary_tokens)
             .field("tool_output_max_lines", &self.tool_output_max_lines)
+            .field("focus_message", &self.focus_message)
             .field(
                 "in_memory_strategy",
                 &self.in_memory_strategy.as_ref().map(|_| "..."),
@@ -114,6 +122,7 @@ impl Default for CompactionConfig {
             keep_recent_turns: 10,
             max_summary_tokens: 2_000,
             tool_output_max_lines: 50,
+            focus_message: None,
             in_memory_strategy: None,
             block_strategy: None,
         }

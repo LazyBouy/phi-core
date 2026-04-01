@@ -2,7 +2,7 @@
 
 The config-driven invocation layer is the single entry point for constructing and running agents. All agent features — profile, session config, tools, callbacks, compaction, execution limits — are expressed as config and resolved through one pipeline.
 
-**Status:** `[PLANNED]`
+**Status:** `[PARTIAL]` -- Phase 1 config pipeline (parse -> build -> agent) exists with multi-agent support, tool registry, and system prompt strategies. Remaining: WASM plugins.
 
 **Why:** Features exist but are invoked through scattered Rust builder APIs. There is no unified config → CLI → UI pipeline. The invocation layer makes every feature discoverable and configurable without writing Rust code.
 

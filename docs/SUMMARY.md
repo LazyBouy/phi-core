@@ -22,6 +22,8 @@
 - [Lifecycle Callbacks](concepts/callbacks.md)
 - [Sessions](concepts/sessions.md)
 - [Context Compaction](concepts/compaction.md)
+- [Focused Compaction](concepts/focused-compaction.md)
+- [Context Translation](concepts/context-translation.md)
 
 # Guides
 

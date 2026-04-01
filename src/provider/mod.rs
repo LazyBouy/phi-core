@@ -1,6 +1,7 @@
 pub mod anthropic;
 pub mod azure_openai;
 pub mod bedrock;
+pub mod context_translation;
 pub mod google;
 pub mod google_vertex;
 pub mod mock;
@@ -15,6 +16,7 @@ pub mod traits;
 pub use anthropic::AnthropicProvider;
 pub use azure_openai::AzureOpenAiProvider;
 pub use bedrock::BedrockProvider;
+pub use context_translation::{ContextTranslationStrategy, DefaultContextTranslation};
 pub use google::GoogleProvider;
 pub use google_vertex::GoogleVertexProvider;
 pub use mock::MockProvider;

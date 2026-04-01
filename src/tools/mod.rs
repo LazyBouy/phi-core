@@ -39,12 +39,14 @@ pub mod bash;
 pub mod edit;
 pub mod file;
 pub mod list;
+pub mod registry;
 pub mod search;
 
 pub use bash::BashTool;
 pub use edit::EditFileTool;
 pub use file::{ReadFileTool, WriteFileTool};
 pub use list::ListFilesTool;
+pub use registry::ToolRegistry;
 pub use search::SearchTool;
 
 use crate::types::AgentTool;
