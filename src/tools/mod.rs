@@ -39,6 +39,7 @@ pub mod bash;
 pub mod edit;
 pub mod file;
 pub mod list;
+pub mod prun;
 pub mod registry;
 pub mod search;
 
@@ -46,6 +47,7 @@ pub use bash::BashTool;
 pub use edit::EditFileTool;
 pub use file::{ReadFileTool, WriteFileTool};
 pub use list::ListFilesTool;
+pub use prun::{PrunRecord, PrunRequest, PrunTool, PrunVariant};
 pub use registry::ToolRegistry;
 pub use search::SearchTool;
 

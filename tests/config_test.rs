@@ -1265,3 +1265,110 @@ reasoning_format = "openrouter"
         "reasoning_format 'openrouter' should map to ThinkingFormat::OpenRouter"
     );
 }
+
+// ===========================================================================
+// TokenCounter tests
+// ===========================================================================
+
+use phi_core::context::token::{estimate_tokens, HeuristicTokenCounter, TokenCounter};
+use phi_core::ContextConfig;
+use std::sync::Arc;
+
+// ---------------------------------------------------------------------------
+// 9. test_heuristic_counter_matches_free_functions
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_heuristic_counter_matches_free_functions() {
+    let counter = HeuristicTokenCounter;
+    let texts = ["hello", "a longer piece of text for testing", "", "x"];
+    for text in &texts {
+        assert_eq!(
+            counter.estimate_text(text),
+            estimate_tokens(text),
+            "HeuristicTokenCounter.estimate_text and estimate_tokens should agree for {:?}",
+            text
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 10. test_custom_counter_override
+// ---------------------------------------------------------------------------
+
+struct ConstantCounter;
+
+impl TokenCounter for ConstantCounter {
+    fn estimate_text(&self, _text: &str) -> usize {
+        1
+    }
+}
+
+#[test]
+fn test_custom_counter_override() {
+    let counter = ConstantCounter;
+    // estimate_text always returns 1
+    assert_eq!(counter.estimate_text("hello world"), 1);
+
+    // estimate_message should use estimate_text (which returns 1) + overhead,
+    // NOT the heuristic chars/4 value
+    let msg = phi_core::AgentMessage::Llm(phi_core::LlmMessage::new(phi_core::Message::User {
+        content: vec![phi_core::Content::Text {
+            text: "a very long string that would be many tokens with heuristic".to_string(),
+        }],
+        timestamp: 0,
+    }));
+    let custom_estimate = counter.estimate_message(&msg);
+    let heuristic_estimate = HeuristicTokenCounter.estimate_message(&msg);
+
+    // Custom should be much smaller: 1 (text) + 4 (overhead) = 5
+    assert_eq!(custom_estimate, 1 + 4);
+    // Heuristic should be much larger
+    assert!(
+        heuristic_estimate > custom_estimate,
+        "heuristic ({}) should exceed constant counter ({})",
+        heuristic_estimate,
+        custom_estimate
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 11. test_context_config_counter_fallback
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_context_config_counter_fallback() {
+    let config = ContextConfig {
+        token_counter: None,
+        ..Default::default()
+    };
+    let counter = config.counter();
+    // Should behave like HeuristicTokenCounter
+    assert_eq!(
+        counter.estimate_text("hello"),
+        HeuristicTokenCounter.estimate_text("hello")
+    );
+    assert_eq!(
+        counter.estimate_text("test string"),
+        HeuristicTokenCounter.estimate_text("test string")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 12. test_context_config_custom_counter
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_context_config_custom_counter() {
+    let config = ContextConfig {
+        token_counter: Some(Arc::new(ConstantCounter)),
+        ..Default::default()
+    };
+    let counter = config.counter();
+    // Should use ConstantCounter (always returns 1), not heuristic
+    assert_eq!(
+        counter.estimate_text("hello world this is a long string"),
+        1
+    );
+    assert_eq!(counter.estimate_text("x"), 1);
+}

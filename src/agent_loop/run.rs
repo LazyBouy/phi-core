@@ -5,8 +5,8 @@ use super::helpers::apply_input_filters;
 use super::streaming::stream_assistant_response;
 use super::tools::execute_tool_calls;
 use crate::context::{
-    build_context_from_session, compact_session_loops, total_tokens, BlockCompactionStrategy,
-    CompactionStrategy, DefaultBlockCompaction, DefaultCompaction, ExecutionTracker,
+    build_context_from_session, compact_session_loops, BlockCompactionStrategy, CompactionStrategy,
+    DefaultBlockCompaction, DefaultCompaction, ExecutionTracker,
 };
 use crate::types::*;
 use chrono::Utc;
@@ -172,7 +172,9 @@ pub(super) async fn run_loop(
                     })
                     .ok();
                     context.messages.push(msg.clone());
-                    new_messages.push(msg);
+                    new_messages.push(msg.clone());
+                    // Also track in user_context stream
+                    context.user_context.push(msg);
                 }
             }
 
@@ -180,7 +182,7 @@ pub(super) async fn run_loop(
             if let Some(ref ctx_config) = config.context_config {
                 let max_tokens = ctx_config.max_context_tokens;
                 let comp = &ctx_config.compaction;
-                let estimated = total_tokens(&context.messages);
+                let estimated = ctx_config.counter().estimate_messages(&context.messages);
                 let system_frac = ctx_config.system_prompt_tokens as f64 / max_tokens as f64;
                 let current_frac = estimated as f64 / max_tokens as f64;
                 let headroom = comp.compact_at_pct - system_frac - current_frac;
@@ -238,9 +240,21 @@ pub(super) async fn run_loop(
                                 .block_strategy
                                 .as_deref()
                                 .unwrap_or(&DefaultBlockCompaction);
-                            compact_session_loops(session, lid, block_strategy, comp, max_tokens);
-                            context.messages =
-                                build_context_from_session(session, lid, comp, max_tokens);
+                            compact_session_loops(
+                                session,
+                                lid,
+                                block_strategy,
+                                comp,
+                                max_tokens,
+                                ctx_config.token_counter.as_ref(),
+                            );
+                            context.messages = build_context_from_session(
+                                session,
+                                lid,
+                                comp,
+                                max_tokens,
+                                ctx_config.token_counter.as_ref(),
+                            );
 
                             let chain = session.loop_chain_to(lid);
                             let loops_compacted = chain
@@ -254,7 +268,8 @@ pub(super) async fn run_loop(
                                 .count();
 
                             let messages_after = context.messages.len();
-                            let tokens_after = total_tokens(&context.messages);
+                            let tokens_after =
+                                ctx_config.counter().estimate_messages(&context.messages);
 
                             tx.send(AgentEvent::CompactionEnded {
                                 loop_id: loop_id.clone(),
@@ -281,7 +296,8 @@ pub(super) async fn run_loop(
                                 strategy.compact(std::mem::take(&mut context.messages), ctx_config);
 
                             let messages_after = context.messages.len();
-                            let tokens_after = total_tokens(&context.messages);
+                            let tokens_after =
+                                ctx_config.counter().estimate_messages(&context.messages);
 
                             tx.send(AgentEvent::CompactionEnded {
                                 loop_id: loop_id.clone(),
@@ -310,6 +326,10 @@ pub(super) async fn run_loop(
                 AgentMessage::from(message.clone()).with_turn_id(current_turn_id.clone());
             context.messages.push(agent_msg.clone());
             new_messages.push(agent_msg.clone());
+            // Track in inrun_context stream (model-generated)
+            context
+                .inrun_context
+                .push(crate::types::InRunEntry::Live(agent_msg.clone()));
 
             // Check for error/abort
             if let Message::Assistant {
@@ -390,7 +410,20 @@ pub(super) async fn run_loop(
                     let am: AgentMessage =
                         AgentMessage::from(result.clone()).with_turn_id(current_turn_id.clone());
                     context.messages.push(am.clone());
-                    new_messages.push(am);
+                    new_messages.push(am.clone());
+                    // Track in inrun_context stream (tool results are model-generated context)
+                    context
+                        .inrun_context
+                        .push(crate::types::InRunEntry::Live(am));
+                }
+
+                // Apply pending prun requests
+                if let Some(ref prun_pending) = config.prun_pending {
+                    let requests: Vec<crate::tools::prun::PrunRequest> =
+                        prun_pending.lock().unwrap().drain(..).collect();
+                    for request in requests {
+                        apply_prun(context, &request, tx, &loop_id);
+                    }
                 }
             }
 
@@ -481,4 +514,62 @@ pub(super) async fn run_loop(
         break;
     }
     loop_usage
+}
+
+/// Apply a single prun request to the in-run context, converting Live entries to
+/// PrunedSilent or PrunedMemo from the tail until enough tokens are removed.
+fn apply_prun(
+    context: &mut AgentContext,
+    request: &crate::tools::prun::PrunRequest,
+    tx: &mpsc::UnboundedSender<AgentEvent>,
+    loop_id: &str,
+) {
+    use crate::context::token::message_tokens;
+    use crate::types::InRunEntry;
+
+    let mut tokens_remaining = request.tokens_to_remove;
+    let mut total_tokens_removed: usize = 0;
+    let mut messages_removed: usize = 0;
+    let mut pruned_timestamps: Vec<u64> = Vec::new();
+
+    // Walk inrun_context from the tail, pruning Live entries until budget is exhausted
+    for entry in context.inrun_context.iter_mut().rev() {
+        if tokens_remaining == 0 {
+            break;
+        }
+        if let InRunEntry::Live(msg) = entry {
+            let msg_tokens = message_tokens(msg);
+            let tokens_to_remove = msg_tokens.min(tokens_remaining);
+            tokens_remaining = tokens_remaining.saturating_sub(tokens_to_remove);
+            total_tokens_removed += tokens_to_remove;
+            messages_removed += 1;
+            let ts = msg.timestamp();
+            pruned_timestamps.push(ts);
+
+            if let Some(ref memo) = request.memo {
+                *entry = InRunEntry::PrunedMemo {
+                    memo: memo.clone(),
+                    tokens_removed: msg_tokens,
+                    timestamp: ts,
+                };
+            } else {
+                *entry = InRunEntry::PrunedSilent {
+                    tokens_removed: msg_tokens,
+                    timestamp: ts,
+                };
+            }
+        }
+    }
+
+    if total_tokens_removed > 0 {
+        tx.send(AgentEvent::PrunApplied {
+            loop_id: loop_id.to_string(),
+            tokens_removed: total_tokens_removed,
+            messages_removed,
+            memo: request.memo.clone(),
+            pruned_timestamps,
+            timestamp: chrono::Utc::now(),
+        })
+        .ok();
+    }
 }

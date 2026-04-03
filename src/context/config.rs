@@ -1,3 +1,4 @@
+use super::token::TokenCounter;
 use super::{BlockCompactionStrategy, CompactionStrategy};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -138,7 +139,7 @@ impl Default for CompactionConfig {
 /// `CompactionConfig` is a required field: if you set a context limit,
 /// compaction is always ready with sensible defaults. Compaction as a whole
 /// is disabled by setting `context_config: None` on `AgentLoopConfig`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ContextConfig {
     /// Maximum context tokens (the model's context window).
     pub max_context_tokens: usize,
@@ -146,6 +147,11 @@ pub struct ContextConfig {
     pub system_prompt_tokens: usize,
     /// Compaction policy — always present when context limits are set.
     pub compaction: CompactionConfig,
+
+    /// Custom token counter. When `None`, uses `HeuristicTokenCounter` (chars/4).
+    /// Set to a custom `TokenCounter` for model-specific tokenization.
+    #[serde(skip)]
+    pub token_counter: Option<Arc<dyn TokenCounter>>,
 
     // Legacy fields — kept for backward compatibility with existing configs.
     // New code should use `compaction.*` instead.
@@ -157,12 +163,33 @@ pub struct ContextConfig {
     pub tool_output_max_lines: usize,
 }
 
+impl std::fmt::Debug for ContextConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ContextConfig")
+            .field("max_context_tokens", &self.max_context_tokens)
+            .field("system_prompt_tokens", &self.system_prompt_tokens)
+            .field("compaction", &self.compaction)
+            .field("token_counter", &self.token_counter.as_ref().map(|_| "..."))
+            .finish()
+    }
+}
+
+impl ContextConfig {
+    /// Returns the configured token counter, or the default heuristic (chars/4).
+    pub fn counter(&self) -> &dyn TokenCounter {
+        self.token_counter
+            .as_deref()
+            .unwrap_or(&super::token::HeuristicTokenCounter)
+    }
+}
+
 impl Default for ContextConfig {
     fn default() -> Self {
         Self {
             max_context_tokens: 100_000,
             system_prompt_tokens: 4_000,
             compaction: CompactionConfig::default(),
+            token_counter: None,
             keep_recent: 10,
             keep_first: 2,
             tool_output_max_lines: 50,

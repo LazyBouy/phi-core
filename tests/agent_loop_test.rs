@@ -42,6 +42,7 @@ fn make_config(provider: Arc<dyn phi_core::provider::StreamProvider>) -> AgentLo
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
         context_translation: None,
+        prun_pending: None,
     }
 }
 
@@ -68,6 +69,8 @@ async fn test_simple_text_response() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Hi")));
@@ -99,6 +102,7 @@ async fn test_simple_text_response() {
             AgentEvent::ParallelLoopEnd { .. } => "ParallelLoopEnd",
             AgentEvent::CompactionStarted { .. } => "CompactionStarted",
             AgentEvent::CompactionEnded { .. } => "CompactionEnded",
+            AgentEvent::PrunApplied { .. } => "PrunApplied",
         })
         .collect();
 
@@ -176,6 +180,8 @@ async fn test_tool_call_and_response() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Read test.txt")));
@@ -205,6 +211,7 @@ async fn test_tool_call_and_response() {
             AgentEvent::ParallelLoopEnd { .. } => "ParallelLoopEnd",
             AgentEvent::CompactionStarted { .. } => "CompactionStarted",
             AgentEvent::CompactionEnded { .. } => "CompactionEnded",
+            AgentEvent::PrunApplied { .. } => "PrunApplied",
         })
         .collect();
 
@@ -236,6 +243,8 @@ async fn test_abort_cancels_loop() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Hi")));
@@ -279,6 +288,8 @@ async fn test_continue_from_tool_result() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -336,6 +347,8 @@ async fn test_tool_error_is_reported() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Use the tool")));
@@ -378,6 +391,8 @@ async fn test_unknown_tool_reports_error() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Use nonexistent tool")));
@@ -481,6 +496,8 @@ async fn test_parallel_tool_execution_faster_than_sequential() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Run all tools")));
@@ -558,6 +575,8 @@ async fn test_sequential_tool_execution_is_slower() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Run tools")));
@@ -631,6 +650,8 @@ async fn test_batched_tool_execution() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Run all tools")));
@@ -728,6 +749,8 @@ async fn test_tool_execution_update_events_emitted() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("go")));
@@ -845,6 +868,7 @@ async fn test_retry_on_rate_limit_succeeds() {
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
         context_translation: None,
+        prun_pending: None,
     };
 
     let mut context = AgentContext {
@@ -857,6 +881,8 @@ async fn test_retry_on_rate_limit_succeeds() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("hi")));
@@ -927,6 +953,7 @@ async fn test_retry_exhausted_returns_error() {
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
         context_translation: None,
+        prun_pending: None,
     };
 
     let mut context = AgentContext {
@@ -939,6 +966,8 @@ async fn test_retry_exhausted_returns_error() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("hi")));
@@ -1015,6 +1044,7 @@ async fn test_no_retry_on_auth_error() {
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
         context_translation: None,
+        prun_pending: None,
     };
 
     let mut context = AgentContext {
@@ -1027,6 +1057,8 @@ async fn test_no_retry_on_auth_error() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("hi")));
@@ -1087,6 +1119,7 @@ async fn test_retry_none_disables_retries() {
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
         context_translation: None,
+        prun_pending: None,
     };
 
     let mut context = AgentContext {
@@ -1099,6 +1132,8 @@ async fn test_retry_none_disables_retries() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("hi")));
@@ -1138,6 +1173,8 @@ async fn test_message_update_events_emitted_during_streaming() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("hi")));
@@ -1242,6 +1279,8 @@ async fn test_before_turn_can_abort() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("go")));
@@ -1290,6 +1329,8 @@ async fn test_after_turn_receives_messages() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("go")));
@@ -1352,6 +1393,7 @@ async fn test_on_error_fires_on_provider_error() {
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
         context_translation: None,
+        prun_pending: None,
     };
 
     let mut context = AgentContext {
@@ -1364,6 +1406,8 @@ async fn test_on_error_fires_on_provider_error() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("hi")));
@@ -1394,6 +1438,8 @@ async fn test_callbacks_are_optional() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Hi")));
@@ -1469,6 +1515,8 @@ async fn test_progress_message_event_emitted() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("go")));
@@ -1550,6 +1598,8 @@ async fn test_tool_ignoring_progress_no_panic() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("go")));
@@ -1638,6 +1688,8 @@ async fn test_parallel_tools_progress_distinguishable() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("go")));
@@ -1685,6 +1737,8 @@ async fn test_on_update_still_works_after_refactor() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("go")));
@@ -1756,6 +1810,8 @@ async fn test_filter_pass_message_goes_through() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Hi")));
@@ -1790,6 +1846,8 @@ async fn test_filter_warn_injects_warning_message() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Hi")));
@@ -1835,6 +1893,8 @@ async fn test_filter_reject_returns_empty() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Bad input")));
@@ -1914,6 +1974,8 @@ async fn test_filter_chain_first_reject_wins() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Bad")));
@@ -1952,6 +2014,8 @@ async fn test_filter_multiple_warns_accumulate() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Hi")));
@@ -2013,6 +2077,8 @@ async fn test_filter_non_text_content_only_text_extracted() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::User {
@@ -2108,6 +2174,8 @@ async fn test_filter_rejects_steering_message() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let (tx, rx) = mpsc::unbounded_channel();
@@ -2174,6 +2242,8 @@ async fn test_filter_warns_steering_message() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -2256,6 +2326,8 @@ async fn test_filter_rejects_follow_up_message() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let (tx, rx) = mpsc::unbounded_channel();
@@ -2334,6 +2406,8 @@ async fn test_filter_warns_follow_up_message() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -2652,6 +2726,7 @@ async fn test_default_compaction_matches_compact_messages() {
         max_context_tokens: 500,
         system_prompt_tokens: 100,
         compaction: CompactionConfig::default(),
+        token_counter: None,
         keep_recent: 5,
         keep_first: 2,
         tool_output_max_lines: 20,
@@ -2721,6 +2796,7 @@ async fn test_custom_compaction_strategy_is_called() {
                 in_memory_strategy: Some(std::sync::Arc::new(MarkerCompaction)),
                 ..CompactionConfig::default()
             },
+            token_counter: None,
             keep_recent: 1,
             keep_first: 1,
             tool_output_max_lines: 10,
@@ -2744,6 +2820,7 @@ async fn test_custom_compaction_strategy_is_called() {
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
         context_translation: None,
+        prun_pending: None,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Hello")));
@@ -2757,6 +2834,8 @@ async fn test_custom_compaction_strategy_is_called() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -2823,6 +2902,7 @@ async fn test_none_compaction_strategy_uses_default() {
                 compact_budget_threshold_pct: 0.99,
                 ..CompactionConfig::default()
             },
+            token_counter: None,
             keep_recent: 1,
             keep_first: 1,
             tool_output_max_lines: 10,
@@ -2846,6 +2926,7 @@ async fn test_none_compaction_strategy_uses_default() {
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
         context_translation: None,
+        prun_pending: None,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Hello")));
@@ -2859,6 +2940,8 @@ async fn test_none_compaction_strategy_uses_default() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -2895,6 +2978,8 @@ async fn test_loop_id_explicit_config_id() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -2948,6 +3033,8 @@ async fn test_continuation_kind_in_agent_start() {
         parent_loop_id: Some("ses-test.mock.mock.1".into()),
         continuation_kind: Some(ContinuationKind::Rerun { tag: tag.clone() }),
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -3062,6 +3149,8 @@ async fn test_continue_panics_without_agent_id() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -3082,6 +3171,8 @@ fn make_base_context() -> AgentContext {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     }
 }
 
@@ -3373,6 +3464,8 @@ async fn test_before_loop_hook_fires() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     agent_loop(vec![msg], &mut context, &config, tx, cancel).await;
@@ -3409,6 +3502,8 @@ async fn test_after_loop_hook_fires() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     agent_loop(vec![msg], &mut context, &config, tx, cancel).await;
@@ -3456,6 +3551,8 @@ async fn test_tool_execution_hooks_fire() {
         parent_loop_id: None,
         continuation_kind: None,
         session: None,
+        user_context: Vec::new(),
+        inrun_context: Vec::new(),
     };
 
     agent_loop(vec![msg], &mut context, &config, tx, cancel).await;

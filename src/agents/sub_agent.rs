@@ -240,6 +240,8 @@ impl AgentTool for SubAgentTool {
             parent_loop_id: self.parent_loop_id.clone(), // links child back to parent
             continuation_kind: None,
             session: None,
+            user_context: Vec::new(),
+            inrun_context: Vec::new(),
         };
 
         // Config for the sub-agent loop
@@ -279,6 +281,7 @@ impl AgentTool for SubAgentTool {
             first_turn_trigger: TurnTrigger::SubAgent,
             config_id: None,
             context_translation: None,
+            prun_pending: None,
         };
 
         /*

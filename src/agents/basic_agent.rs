@@ -143,6 +143,7 @@ pub struct BasicAgent {
     before_compaction_start: Option<BeforeCompactionStartFn>,
     after_compaction_end: Option<AfterCompactionEndFn>,
     context_translation: Option<Arc<dyn ContextTranslationStrategy>>,
+    prun_pending: Option<Arc<Mutex<Vec<crate::tools::prun::PrunRequest>>>>,
 
     // ── Profile, config identity, and workspace ──────────────────────────
     config_id: Option<String>,
@@ -224,6 +225,7 @@ impl BasicAgent {
             before_compaction_start: None,
             after_compaction_end: None,
             context_translation: None,
+            prun_pending: None,
             config_id: None,
             profile: None,
             workspace: None,
@@ -503,6 +505,22 @@ impl BasicAgent {
         f: impl Fn(&str, &str, &str) + Send + Sync + 'static,
     ) -> Self {
         self.after_tool_execution_update = Some(Arc::new(f));
+        self
+    }
+
+    /// Enable the prun tool (both `prun` and `prun_with_memo` variants).
+    /// Adds both tool variants to the tool set and wires up the shared pending queue.
+    pub fn with_prun_tool(mut self) -> Self {
+        let pending = Arc::new(Mutex::new(Vec::new()));
+        self.tools.push(Arc::new(crate::tools::PrunTool::new(
+            pending.clone(),
+            crate::tools::PrunVariant::Prun,
+        )));
+        self.tools.push(Arc::new(crate::tools::PrunTool::new(
+            pending.clone(),
+            crate::tools::PrunVariant::PrunWithMemo,
+        )));
+        self.prun_pending = Some(pending);
         self
     }
 
@@ -814,9 +832,21 @@ impl BasicAgent {
             record.messages = self.messages.clone();
         }
 
-        crate::context::compact_session_loops(session, current_lid, strategy, comp, max_tokens);
-        self.messages =
-            crate::context::build_context_from_session(session, current_lid, comp, max_tokens);
+        crate::context::compact_session_loops(
+            session,
+            current_lid,
+            strategy,
+            comp,
+            max_tokens,
+            None,
+        );
+        self.messages = crate::context::build_context_from_session(
+            session,
+            current_lid,
+            comp,
+            max_tokens,
+            None,
+        );
 
         let msgs_after = self.messages.len();
         let tokens_after = crate::context::total_tokens(&self.messages);
@@ -872,9 +902,21 @@ impl BasicAgent {
             record.messages = self.messages.clone();
         }
 
-        crate::context::compact_session_loops(session, current_lid, strategy, comp, max_tokens);
-        self.messages =
-            crate::context::build_context_from_session(session, current_lid, comp, max_tokens);
+        crate::context::compact_session_loops(
+            session,
+            current_lid,
+            strategy,
+            comp,
+            max_tokens,
+            None,
+        );
+        self.messages = crate::context::build_context_from_session(
+            session,
+            current_lid,
+            comp,
+            max_tokens,
+            None,
+        );
 
         let chain = session.loop_chain_to(current_lid);
         chain
@@ -954,6 +996,7 @@ impl BasicAgent {
             first_turn_trigger: TurnTrigger::User,
             config_id: self.config_id.clone(),
             context_translation: self.context_translation.clone(),
+            prun_pending: self.prun_pending.clone(),
         }
     }
 
@@ -1066,6 +1109,8 @@ impl Agent for BasicAgent {
             parent_loop_id: None, // origin — no parent
             continuation_kind: None,
             session: self.session.take(), // Move session into context for block-based compaction
+            user_context: Vec::new(),
+            inrun_context: Vec::new(),
         };
 
         let _new_messages = agent_loop(messages, &mut context, &config, tx, cancel).await;
@@ -1122,6 +1167,8 @@ impl Agent for BasicAgent {
             parent_loop_id,
             continuation_kind: Some(kind_with_tag),
             session: self.session.take(),
+            user_context: Vec::new(),
+            inrun_context: Vec::new(),
         };
 
         let _new_messages = agent_loop_continue(&mut context, &config, tx, cancel).await;

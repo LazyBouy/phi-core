@@ -108,3 +108,30 @@ pub struct SearchTool {
 ```
 
 Returns matching lines with file paths and line numbers.
+
+## PrunTool
+
+Model-directed context pruning. Removes the oldest inrun_context entries (model-generated messages) from the working context to reclaim space in the context window. Pruned content is preserved in the session log.
+
+- **Name**: `prun`
+- **Parameters**: `tokens` (integer, required) -- approximate number of tokens to reclaim
+
+The tool removes inrun_context entries oldest-first until the requested token budget is met. User messages are never affected. Returns a confirmation with the actual token count reclaimed.
+
+### Configuration
+
+```rust
+let agent = BasicAgent::new(model_config)
+    .with_prun_tool();  // enables both prun and prun_with_memo
+```
+
+## PrunWithMemoTool
+
+Context pruning with a summary replacement. Same removal behavior as `prun`, but inserts a concise memo at the position of the earliest pruned message so the model retains key takeaways.
+
+- **Name**: `prun_with_memo`
+- **Parameters**: `tokens` (integer, required) -- approximate number of tokens to reclaim; `memo` (string, required) -- concise summary to retain in working context
+
+The memo appears at the original timestamp of the earliest pruned message, preserving conversation chronology. Useful when pruned content contained decisions or conclusions worth remembering.
+
+See [Context Pruning](../concepts/context-pruning.md) for the full design.

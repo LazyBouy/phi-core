@@ -42,11 +42,14 @@ pub(super) async fn stream_assistant_response(
     loop_id: &str,
 ) -> Message {
     // complete LLM response (all content blocks assembled); synthetic error Message on failure
+    // Build working context: if prun streams are populated, merge them; otherwise use messages as-is.
+    let base_messages = context.build_working_context();
+
     // Apply context transform (optional hook to prune/reshape messages before LLM sees them)
     let messages = if let Some(transform) = &config.transform_context {
-        transform(context.messages.clone())
+        transform(base_messages)
     } else {
-        context.messages.clone()
+        base_messages
     };
 
     // Convert AgentMessage[] → Message[]: strip Extension messages, keep only LLM-visible ones.

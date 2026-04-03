@@ -86,6 +86,7 @@ fn test_compact_drops_middle_when_needed() {
         max_context_tokens: 500,
         system_prompt_tokens: 100,
         compaction: CompactionConfig::default(),
+        token_counter: None,
         keep_recent: 5,
         keep_first: 2,
         tool_output_max_lines: 20,

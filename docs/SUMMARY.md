@@ -24,6 +24,7 @@
 - [Context Compaction](concepts/compaction.md)
 - [Focused Compaction](concepts/focused-compaction.md)
 - [Context Translation](concepts/context-translation.md)
+- [Context Pruning](concepts/context-pruning.md)
 
 # Guides
 

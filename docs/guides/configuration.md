@@ -499,6 +499,23 @@ batch_size = 3               # Only used when strategy is "batched"
 | `"parallel"` | All tool calls concurrent; check steering after all complete (default) |
 | `"batched"` | Run N concurrent, wait, check steering, next batch |
 
+### Context Pruning
+
+Enable model-directed context pruning with `with_prun_tool()`. This lets the model surgically remove irrelevant inrun content (its own messages, tool calls, tool results) from the working context to reclaim space in the context window. User messages are never pruned. See [Context Pruning](../concepts/context-pruning.md) for details.
+
+```rust
+let agent = BasicAgent::new(model_config)
+    .with_default_tools()
+    .with_prun_tool();
+```
+
+Or via config:
+
+```toml
+[tools]
+enabled = ["bash", "read_file", "write_file", "prun"]
+```
+
 ### Registering Tools at Runtime
 
 **Tools are NOT instantiated from the config file.** The config specifies tool *names* only. You must register tool instances after constructing the agent:

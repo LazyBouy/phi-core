@@ -3,6 +3,8 @@ use super::config::*;
 use super::token::*;
 use crate::types::*;
 use chrono::Utc;
+#[allow(unused_imports)]
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Compaction strategy
@@ -65,7 +67,11 @@ impl CompactionStrategy for DefaultCompaction {
         messages: Vec<AgentMessage>, // OWNED — passed directly to compact_messages()
         config: &ContextConfig,      // SETTINGS — forwarded to compact_messages()
     ) -> Vec<AgentMessage> {
-        super::compact_messages::compact_messages(messages, config)
+        super::compact_messages::compact_messages_with_counter(
+            messages,
+            config,
+            config.token_counter.as_ref(),
+        )
     }
 }
 

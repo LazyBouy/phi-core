@@ -69,6 +69,7 @@ The `context` module is split into sub-modules: `token`, `config`, `tracker`, `c
 - **`ContextTracker`** — hybrid real-usage + estimation for token tracking
 - **compact_messages()** — legacy in-memory compaction (Level 1/2/3). The modern system uses CompactionBlock overlays via BlockCompactionStrategy — see concepts/compaction.md
 - **`ExecutionLimits`/`ExecutionTracker`** — max turns (50), max tokens (1M), max duration (10 min). Cost tracking is automatic: `Usage::estimated_cost(&model_config.cost)` fires after each turn when rates are non-zero (set `model_config.cost` fields)
+- **PrunTool** — model-directed mid-run context pruning. `prun(tokens)` silently removes oldest inrun_context entries; `prun_with_memo(tokens, memo)` replaces them with a summary. User messages are never pruned. Pruned content is preserved in the session log via `PrunRecord`. Enable with `with_prun_tool()` or `"prun"` in config tools list
 
 ### Tool Execution (`agent_loop/`)
 

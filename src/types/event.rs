@@ -266,6 +266,17 @@ pub enum AgentEvent {
         timestamp: DateTime<Utc>,
     },
 
+    /// A prun tool removed in-run context.
+    PrunApplied {
+        loop_id: String,
+        tokens_removed: usize,
+        messages_removed: usize,
+        memo: Option<String>,
+        /// Timestamps of the pruned messages — enables session reconstruction on reload.
+        pruned_timestamps: Vec<u64>,
+        timestamp: DateTime<Utc>,
+    },
+
     /// Emitted after compaction completes. Only emitted when compaction triggered
     /// (threshold was exceeded). Paired with `CompactionStarted`.
     CompactionEnded {

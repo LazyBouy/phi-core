@@ -45,6 +45,7 @@ fn make_config(provider: Arc<dyn phi_core::provider::StreamProvider>) -> AgentLo
         first_turn_trigger: TurnTrigger::User,
         config_id: None,
         context_translation: None,
+        prun_pending: None,
     }
 }
 

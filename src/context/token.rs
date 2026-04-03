@@ -1,84 +1,119 @@
 use crate::types::*;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
-// Token estimation
+// TokenCounter trait (REQ-162)
 // ---------------------------------------------------------------------------
 
-/// Rough token estimate: ~4 chars per token for English text.
-/// Good enough for context budgeting. Use tiktoken-rs for precision.
-/*
-RUST QUIRK: `div_ceil` — integer division rounding UP
+/// Pluggable token counting strategy.
+///
+/// The default implementation ([`HeuristicTokenCounter`]) uses a ~4 chars/token
+/// heuristic — fast and sufficient for context budgeting. Provide a custom
+/// implementation for model-specific tokenizers (e.g., tiktoken for OpenAI models,
+/// or Anthropic's native token-counting API).
+///
+/// Only `estimate_text` needs to be overridden. The higher-level methods
+/// (`estimate_content`, `estimate_message`, `estimate_messages`) have default
+/// implementations that delegate to `estimate_text`.
+///
+/// # Example
+///
+/// ```
+/// use phi_core::context::token::{TokenCounter, HeuristicTokenCounter};
+///
+/// let counter = HeuristicTokenCounter;
+/// assert_eq!(counter.estimate_text("hello"), 2); // 5 chars / 4 = 2 (rounded up)
+/// ```
+pub trait TokenCounter: Send + Sync {
+    /// Estimate tokens for a raw text string.
+    fn estimate_text(&self, text: &str) -> usize;
 
-  text.len() / 4  → rounds DOWN (e.g., 5/4 = 1, but we want 2 tokens for 5 chars)
-  text.len().div_ceil(4) → rounds UP (5/4 = 2)
+    /// Estimate tokens for a slice of Content blocks.
+    fn estimate_content(&self, content: &[Content]) -> usize {
+        content
+            .iter()
+            .map(|c| match c {
+                Content::Text { text } => self.estimate_text(text),
+                Content::Image { data, .. } => {
+                    let raw_bytes = data.len() * 3 / 4;
+                    (raw_bytes / 750).clamp(85, 16_000)
+                }
+                Content::Thinking { thinking, .. } => self.estimate_text(thinking),
+                Content::ToolCall {
+                    name, arguments, ..
+                } => self.estimate_text(name) + self.estimate_text(&arguments.to_string()) + 8,
+            })
+            .sum()
+    }
 
-`div_ceil(n)` is equivalent to (len + n - 1) / n but cleaner.
-It's a method on integer types (usize, u64, etc.) added in Rust 1.73.
+    /// Estimate tokens for a single message.
+    fn estimate_message(&self, msg: &AgentMessage) -> usize {
+        match msg {
+            AgentMessage::Llm(lm) => match &lm.message {
+                Message::User { content, .. } => self.estimate_content(content) + 4,
+                Message::Assistant { content, .. } => self.estimate_content(content) + 4,
+                Message::ToolResult {
+                    content, tool_name, ..
+                } => self.estimate_content(content) + self.estimate_text(tool_name) + 8,
+            },
+            AgentMessage::Extension(ext) => self.estimate_text(&ext.data.to_string()) + 4,
+        }
+    }
 
-Python analogy: math.ceil(len(text) / 4) or -(-len(text) // 4)
-*/
-pub fn estimate_tokens(text: &str) -> usize {
-    text.len().div_ceil(4)
-}
-
-/// Estimate tokens for a single message
-pub fn message_tokens(msg: &AgentMessage) -> usize {
-    match msg {
-        AgentMessage::Llm(lm) => match &lm.message {
-            Message::User { content, .. } => content_tokens(content) + 4,
-            Message::Assistant { content, .. } => content_tokens(content) + 4,
-            Message::ToolResult {
-                content, tool_name, ..
-            } => content_tokens(content) + estimate_tokens(tool_name) + 8,
-        },
-        AgentMessage::Extension(ext) => estimate_tokens(&ext.data.to_string()) + 4,
+    /// Estimate total tokens for a message list.
+    fn estimate_messages(&self, msgs: &[AgentMessage]) -> usize {
+        msgs.iter().map(|m| self.estimate_message(m)).sum()
     }
 }
 
-/*
-content_tokens — sum token estimates across a slice of Content items.
+// ---------------------------------------------------------------------------
+// HeuristicTokenCounter (default)
+// ---------------------------------------------------------------------------
 
-RUST QUIRK: Iterator chain `.iter().map(...).sum()`
+/// Default token counter: ~4 chars per token (heuristic for English text).
+///
+/// Good enough for context budgeting and compaction threshold decisions.
+/// Use a model-specific tokenizer (e.g., tiktoken) for precision.
+pub struct HeuristicTokenCounter;
 
-This is the idiomatic Rust "transform + aggregate" pattern:
-  .iter()       → create a lazy iterator over the slice (no allocation)
-  .map(|c| ...) → transform each element (still lazy)
-  .sum()        → consume the iterator, adding all values together
-
-Python analogy: sum(estimate(c) for c in content)
-
-The chain is lazy: no work happens until `.sum()` is called. This avoids
-allocating an intermediate Vec. Think of it as a pipeline specification,
-not a sequence of operations.
-
-`.clamp(min, max)` — constrain a value to a range:
-  (raw_bytes / 750).clamp(85, 16_000)
-  Python analogy: max(85, min(raw_bytes // 750, 16000))
-*/
-pub fn content_tokens(content: &[Content]) -> usize {
-    content
-        .iter()
-        .map(|c| match c {
-            Content::Text { text } => estimate_tokens(text),
-            Content::Image { data, .. } => {
-                // Estimate tokens from base64 data length:
-                // base64 len * 3/4 = raw bytes; ~750 bytes per token for images.
-                // Floor at 85 (Anthropic minimum), cap at 16000.
-                let raw_bytes = data.len() * 3 / 4;
-                (raw_bytes / 750).clamp(85, 16_000)
-            }
-            Content::Thinking { thinking, .. } => estimate_tokens(thinking),
-            Content::ToolCall {
-                name, arguments, ..
-            } => {
-                // +8: overhead for the tool call structure (id field, JSON brackets, etc.)
-                estimate_tokens(name) + estimate_tokens(&arguments.to_string()) + 8
-            }
-        })
-        .sum()
+impl TokenCounter for HeuristicTokenCounter {
+    fn estimate_text(&self, text: &str) -> usize {
+        text.len().div_ceil(4)
+    }
 }
 
-/// Estimate total tokens for a message list
+// ---------------------------------------------------------------------------
+// Free functions (backward-compatible wrappers)
+// ---------------------------------------------------------------------------
+
+/// Rough token estimate: ~4 chars per token for English text.
+/// See [`TokenCounter`] for pluggable alternatives.
+pub fn estimate_tokens(text: &str) -> usize {
+    HeuristicTokenCounter.estimate_text(text)
+}
+
+/// Estimate tokens for a single message.
+pub fn message_tokens(msg: &AgentMessage) -> usize {
+    HeuristicTokenCounter.estimate_message(msg)
+}
+
+/// Estimate tokens for a Content slice.
+pub fn content_tokens(content: &[Content]) -> usize {
+    HeuristicTokenCounter.estimate_content(content)
+}
+
+/// Estimate total tokens for a message list.
 pub fn total_tokens(messages: &[AgentMessage]) -> usize {
-    messages.iter().map(message_tokens).sum()
+    HeuristicTokenCounter.estimate_messages(messages)
+}
+
+// ---------------------------------------------------------------------------
+// Helper: resolve counter from optional
+// ---------------------------------------------------------------------------
+
+/// Returns the provided counter, or `HeuristicTokenCounter` if `None`.
+pub fn resolve_counter(counter: Option<&Arc<dyn TokenCounter>>) -> &dyn TokenCounter {
+    counter
+        .map(|c| c.as_ref() as &dyn TokenCounter)
+        .unwrap_or(&HeuristicTokenCounter)
 }

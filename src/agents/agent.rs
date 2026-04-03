@@ -320,6 +320,9 @@ pub trait Agent: Send {
     /// Set the after-compaction-end hook (G1). Default: no-op.
     fn set_after_compaction_end(&mut self, _f: Option<AfterCompactionEndFn>) {}
 
+    /// Enable or disable the prun tool. Default: no-op.
+    fn set_prun_enabled(&mut self, _enabled: bool) {}
+
     /// Set the context translation strategy (G8). Default: no-op.
     fn set_context_translation(
         &mut self,
@@ -384,6 +387,7 @@ pub trait Agent: Send {
             first_turn_trigger: TurnTrigger::User,
             config_id: None,
             context_translation: self.context_translation(),
+            prun_pending: None,
         }
     }
 }

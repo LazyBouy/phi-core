@@ -1,6 +1,7 @@
 use super::config::ContextConfig;
 use super::token::*;
 use crate::types::*;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Tiered compaction
@@ -23,6 +24,16 @@ pub fn compact_messages(
     messages: Vec<AgentMessage>, // OWNED — rewritten by each compaction level; no upfront clone needed
     config: &ContextConfig, // SETTINGS — token budget derived from max_context_tokens - system_prompt_tokens
 ) -> Vec<AgentMessage> {
+    compact_messages_with_counter(messages, config, config.token_counter.as_ref())
+}
+
+/// Compact messages using the provided token counter (or the default heuristic).
+pub fn compact_messages_with_counter(
+    messages: Vec<AgentMessage>,
+    config: &ContextConfig,
+    counter: Option<&Arc<dyn TokenCounter>>,
+) -> Vec<AgentMessage> {
+    let counter = resolve_counter(counter);
     /*
     RUST QUIRK: `saturating_sub` — subtraction that stops at 0, never wraps
 
@@ -43,24 +54,24 @@ pub fn compact_messages(
         .saturating_sub(config.system_prompt_tokens);
 
     // Already fits?
-    if total_tokens(&messages) <= budget {
+    if counter.estimate_messages(&messages) <= budget {
         return messages;
     }
 
     // Level 1: Truncate tool outputs
     let compacted = level1_truncate_tool_outputs(&messages, config.tool_output_max_lines);
-    if total_tokens(&compacted) <= budget {
+    if counter.estimate_messages(&compacted) <= budget {
         return compacted;
     }
 
     // Level 2: Summarize old turns (keep recent N full, summarize the rest)
     let compacted = level2_summarize_old_turns(&compacted, config.keep_recent);
-    if total_tokens(&compacted) <= budget {
+    if counter.estimate_messages(&compacted) <= budget {
         return compacted;
     }
 
     // Level 3: Drop middle messages (keep first + recent)
-    level3_drop_middle(&compacted, config, budget)
+    level3_drop_middle_with_counter(&compacted, config, budget, counter)
 }
 
 /// Level 1: Truncate long tool outputs to head + tail.
@@ -242,11 +253,12 @@ fn level2_summarize_old_turns(
     result
 }
 
-/// Level 3: Drop middle messages, keeping first + recent.
-fn level3_drop_middle(
-    messages: &[AgentMessage], // SOURCE — full history; middle section will be replaced by a compaction marker
-    config: &ContextConfig, // SETTINGS — keep_first and keep_recent counts control what's preserved
-    budget: usize, // TOKEN LIMIT — remaining budget after system prompt; used as fallback via keep_within_budget
+/// Level 3: Drop middle messages with a pluggable token counter.
+fn level3_drop_middle_with_counter(
+    messages: &[AgentMessage],
+    config: &ContextConfig,
+    budget: usize,
+    counter: &dyn TokenCounter,
 ) -> Vec<AgentMessage> {
     let len = messages.len();
     // .min(len) prevents keep_first from exceeding the actual message count
@@ -257,7 +269,7 @@ fn level3_drop_middle(
 
     if first_end >= recent_start {
         // Can't split — just keep as many recent as fit
-        return keep_within_budget(messages, budget);
+        return keep_within_budget_with_counter(messages, budget, counter);
     }
 
     let first_msgs = &messages[..first_end];
@@ -279,20 +291,24 @@ fn level3_drop_middle(
     result.extend_from_slice(recent_msgs);
 
     // If still too big, progressively drop from recent
-    if total_tokens(&result) > budget {
-        return keep_within_budget(&result, budget);
+    if counter.estimate_messages(&result) > budget {
+        return keep_within_budget_with_counter(&result, budget, counter);
     }
 
     result
 }
 
-/// Keep as many recent messages as fit within budget.
-fn keep_within_budget(messages: &[AgentMessage], budget: usize) -> Vec<AgentMessage> {
+/// Keep as many recent messages as fit within budget using a pluggable counter.
+fn keep_within_budget_with_counter(
+    messages: &[AgentMessage],
+    budget: usize,
+    counter: &dyn TokenCounter,
+) -> Vec<AgentMessage> {
     let mut result = Vec::new();
     let mut remaining = budget;
 
     for msg in messages.iter().rev() {
-        let tokens = message_tokens(msg);
+        let tokens = counter.estimate_message(msg);
         if tokens > remaining {
             break;
         }

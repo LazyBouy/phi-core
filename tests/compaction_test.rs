@@ -202,7 +202,7 @@ fn test_build_context_falls_back_to_raw() {
     let session = make_session(vec![record]);
     let config = CompactionConfig::default();
 
-    let context = build_context_from_session(&session, "test.model.1", &config, 100_000);
+    let context = build_context_from_session(&session, "test.model.1", &config, 100_000, None);
 
     // No compaction block → raw messages loaded (3 turns × 2 msgs = 6)
     assert_eq!(context.len(), 6);
@@ -222,7 +222,7 @@ fn test_build_context_from_session_with_blocks() {
     record.compaction_block = Some(DefaultBlockCompaction.compact(&record, &config, true));
 
     let session = make_session(vec![record]);
-    let context = build_context_from_session(&session, "test.model.1", &config, 100_000);
+    let context = build_context_from_session(&session, "test.model.1", &config, 100_000, None);
 
     // Should have: keep_first messages + keep_compacted summaries + keep_recent messages
     // Much fewer than the original 40 messages (20 turns × 2)
@@ -255,6 +255,7 @@ fn test_compact_session_loops_writes_earlier() {
         &DefaultBlockCompaction,
         &config,
         100_000,
+        None,
     );
 
     // Current loop should have a block
@@ -383,6 +384,7 @@ fn test_compaction_scope_token_budget_partial() {
         &DefaultBlockCompaction,
         &config,
         small_budget,
+        None,
     );
 
     // Current loop (3) always gets a block
@@ -423,6 +425,7 @@ fn test_compaction_scope_token_budget_all_fit() {
         &DefaultBlockCompaction,
         &config,
         1_000_000,
+        None,
     );
 
     assert!(session
@@ -460,11 +463,12 @@ fn test_build_context_token_budget_scope() {
 
     // With a small budget, only recent loops should be loaded
     let small_budget = 200;
-    let context = build_context_from_session(&session, "test.model.3", &config, small_budget);
+    let context = build_context_from_session(&session, "test.model.3", &config, small_budget, None);
 
     // With a large budget, all loops should contribute
     let large_budget = 1_000_000;
-    let context_large = build_context_from_session(&session, "test.model.3", &config, large_budget);
+    let context_large =
+        build_context_from_session(&session, "test.model.3", &config, large_budget, None);
 
     // Large budget should load more messages than small budget
     assert!(context_large.len() >= context.len());

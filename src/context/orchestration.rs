@@ -1,9 +1,10 @@
 use super::compaction::*;
 use super::config::*;
 use super::strategy::*;
-use super::token::total_tokens;
+use super::token::{resolve_counter, TokenCounter};
 use crate::session::Session;
 use crate::types::*;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Compaction orchestration — cross-loop block creation
@@ -13,7 +14,7 @@ use crate::types::*;
 ///
 /// For `FixedCount(n)`, returns `n` directly.
 /// For `TokenBudget`, walks the chain backward from the current loop,
-/// accumulating `total_tokens(&record.messages)` per loop, and stops
+/// accumulating token estimates per loop, and stops
 /// when `max_context_tokens` would be exceeded.
 ///
 /// Note: with `TokenBudget`, the scope can include loops whose raw messages
@@ -25,6 +26,7 @@ fn resolve_scope(
     chain: &[String],
     scope: &CompactionScope,
     max_context_tokens: usize,
+    counter: &dyn TokenCounter,
 ) -> usize {
     match scope {
         CompactionScope::FixedCount(n) => *n,
@@ -34,7 +36,7 @@ fn resolve_scope(
             // Walk backward from the loop before current (chain.last() is current)
             for loop_id in chain.iter().rev().skip(1) {
                 if let Some(record) = session.get_loop(loop_id) {
-                    let loop_tokens = total_tokens(&record.messages);
+                    let loop_tokens = counter.estimate_messages(&record.messages);
                     if loop_tokens > budget {
                         break;
                     }
@@ -50,6 +52,7 @@ fn resolve_scope(
 /// Create `CompactionBlock`s for the current loop and earlier loops within scope.
 /// Mutates the session in place.
 ///
+/// When `counter` is `None`, uses `HeuristicTokenCounter` (chars/4) as the default.
 /// The caller is responsible for persisting the session to disk afterward.
 pub fn compact_session_loops(
     session: &mut Session,
@@ -57,7 +60,9 @@ pub fn compact_session_loops(
     strategy: &dyn BlockCompactionStrategy,
     config: &CompactionConfig,
     max_context_tokens: usize,
+    counter: Option<&Arc<dyn TokenCounter>>,
 ) {
+    let counter = resolve_counter(counter);
     let chain = session.loop_chain_to(current_loop_id);
 
     // 1. Compact current loop (most recent — all three sections)
@@ -71,6 +76,7 @@ pub fn compact_session_loops(
         &chain,
         &config.compaction_scope,
         max_context_tokens,
+        counter,
     )
     .min(chain.len().saturating_sub(1));
     let earlier_start = chain.len().saturating_sub(1 + earlier_count);
@@ -93,12 +99,16 @@ pub fn compact_session_loops(
 /// For the most recent loop: loads keep_first + keep_compacted + keep_recent.
 /// For older loops: loads only keep_compacted.
 /// Loops outside the resolved scope are skipped entirely.
+///
+/// When `counter` is `None`, uses `HeuristicTokenCounter` (chars/4) as the default.
 pub fn build_context_from_session(
     session: &Session,
     current_loop_id: &str,
     config: &CompactionConfig,
     max_context_tokens: usize,
+    counter: Option<&Arc<dyn TokenCounter>>,
 ) -> Vec<AgentMessage> {
+    let counter = resolve_counter(counter);
     let chain = session.loop_chain_to(current_loop_id);
     let mut context = Vec::new();
 
@@ -107,6 +117,7 @@ pub fn build_context_from_session(
         &chain,
         &config.compaction_scope,
         max_context_tokens,
+        counter,
     );
     let load_start = chain.len().saturating_sub(earlier_count + 1);
 

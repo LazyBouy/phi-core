@@ -197,4 +197,7 @@ pub struct AgentLoopConfig {
     /// `Content::Thinking` from Anthropic) to be translated or removed when targeting
     /// a different provider. The translation is read-only — originals are never modified.
     pub context_translation: Option<Arc<dyn ContextTranslationStrategy>>,
+
+    /// Shared state for PrunTool to communicate pruning requests to the loop.
+    pub prun_pending: Option<Arc<std::sync::Mutex<Vec<crate::tools::prun::PrunRequest>>>>,
 }

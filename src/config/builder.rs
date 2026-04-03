@@ -579,6 +579,7 @@ fn build_context_config(section: &super::schema::CompactionSection) -> ContextCo
             in_memory_strategy: None,
             block_strategy: None,
         },
+        token_counter: None,
         keep_recent: defaults.keep_recent,
         keep_first: defaults.keep_first,
         tool_output_max_lines: defaults.tool_output_max_lines,

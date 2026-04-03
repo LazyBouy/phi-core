@@ -174,6 +174,19 @@ impl AgentMessage {
         }
     }
 
+    /// Returns the timestamp (unix millis) of the underlying message.
+    /// Returns 0 for Extension messages or if no timestamp is available.
+    pub fn timestamp(&self) -> u64 {
+        match self {
+            Self::Llm(lm) => match &lm.message {
+                Message::User { timestamp, .. } => *timestamp,
+                Message::Assistant { timestamp, .. } => *timestamp,
+                Message::ToolResult { timestamp, .. } => *timestamp,
+            },
+            Self::Extension(_) => 0,
+        }
+    }
+
     /// Set the turn_id on this message. No-op for Extension messages.
     pub fn with_turn_id(self, turn_id: Option<TurnId>) -> Self {
         match self {

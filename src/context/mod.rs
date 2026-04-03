@@ -29,7 +29,7 @@ pub mod tracker;
 // ── Re-exports ─────────────────────────────────────────────────────────────
 // All public items re-exported so `use phi_core::context::Foo` continues to work.
 
-pub use compact_messages::compact_messages;
+pub use compact_messages::{compact_messages, compact_messages_with_counter};
 pub use compaction::{CompactedSection, CompactionBlock, TurnMap, TurnRange};
 pub use config::{CompactionConfig, CompactionScope, ContextConfig};
 pub use execution::{ExecutionLimits, ExecutionTracker};
@@ -38,7 +38,7 @@ pub use skills::SkillSet;
 pub use strategy::{
     BlockCompactionStrategy, CompactionStrategy, DefaultBlockCompaction, DefaultCompaction,
 };
-pub use token::{estimate_tokens, total_tokens};
+pub use token::{estimate_tokens, total_tokens, HeuristicTokenCounter, TokenCounter};
 pub use tracker::ContextTracker;
 
 // truncate_text_head_tail is pub(super) in compact_messages — available

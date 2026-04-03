@@ -26,6 +26,7 @@ pub(super) fn loop_id_of(event: &AgentEvent) -> Option<&str> {
         AgentEvent::InputRejected { loop_id, .. } if !loop_id.is_empty() => Some(loop_id),
         AgentEvent::CompactionStarted { loop_id, .. } => Some(loop_id),
         AgentEvent::CompactionEnded { loop_id, .. } => Some(loop_id),
+        AgentEvent::PrunApplied { loop_id, .. } => Some(loop_id),
         _ => None,
     }
 }

@@ -105,6 +105,11 @@ pub async fn agent_loop(
         context.messages.push(prompt.clone());
     }
 
+    // Classify prompts into user_context (they're user messages)
+    for prompt in &prompts {
+        context.user_context.push(prompt.clone());
+    }
+
     // Run the main loop (streaming + tools + steering + limits + callbacks)
     let loop_usage = run_loop(
         context,
@@ -180,6 +185,21 @@ pub async fn agent_loop_continue(
     }
 
     let mut new_messages: Vec<AgentMessage> = Vec::new();
+
+    // Classify existing messages into streams (if not already populated)
+    if context.user_context.is_empty() && context.inrun_context.is_empty() {
+        for msg in &context.messages {
+            match msg.as_llm() {
+                Some(Message::User { .. }) => context.user_context.push(msg.clone()),
+                Some(Message::Assistant { .. }) | Some(Message::ToolResult { .. }) => {
+                    context
+                        .inrun_context
+                        .push(crate::types::InRunEntry::Live(msg.clone()));
+                }
+                _ => {} // Extension messages go to neither stream
+            }
+        }
+    }
 
     // loop_id: use caller-supplied value (Agent sets this via next_loop_id) or fall back to UUID.
     if context.loop_id.is_none() {

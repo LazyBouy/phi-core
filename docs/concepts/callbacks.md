@@ -188,6 +188,62 @@ after_loop
 
 ---
 
+## Steering Checkpoints
+
+Steering messages (injected via the agent's steering queue) are checked at six specific points in the turn cycle. These checkpoints give the caller opportunities to redirect the agent mid-run without waiting for the current loop iteration to complete.
+
+### The Six Checkpoints
+
+1. **Before turn** -- After `before_turn` fires, before the LLM call. The steering message is prepended to the message history as a User message before the model sees it.
+2. **After turn** -- After the LLM response is received and `after_turn` fires. Steering is appended before the next turn begins.
+3. **Between tool executions (Sequential)** -- When `tool_strategy = "sequential"`, the steering queue is checked between each individual tool call. This is the finest-grained checkpoint.
+4. **Between batches (Batched)** -- When `tool_strategy = "batched"`, the steering queue is checked after each batch completes, before the next batch starts.
+5. **After all tools (Parallel)** -- When `tool_strategy = "parallel"`, steering is checked once after all tool calls complete. No mid-batch interruption.
+6. **On loop re-entry** -- At the top of each loop iteration, before `before_turn` fires.
+
+### Per-Strategy Behavior
+
+| Strategy | When steering is checked | Granularity |
+|----------|------------------------|-------------|
+| **Sequential** | Between each tool call | Per-tool |
+| **Batched** | After each batch completes | Per-batch |
+| **Parallel** | After all tools complete | Post-batch |
+
+In all strategies, checkpoints 1, 2, and 6 always apply. The strategy only affects when steering is checked *during* tool execution (checkpoints 3-5).
+
+### Why Mid-Stream and Mid-Tool Steering Is Not Supported
+
+Steering is intentionally not checked:
+
+- **During an LLM streaming response** -- The SSE stream is atomic from the agent loop's perspective. Interrupting a partial response would produce an inconsistent message (partial assistant text with no stop reason). The model's response must complete or fail before steering can take effect.
+- **During a single tool's execution** -- A tool call is an atomic unit. Interrupting a bash command mid-execution or a file write mid-stream would leave the environment in an undefined state. The tool must return its `ToolResult` before steering is considered.
+
+These boundaries are not limitations but invariants that keep the message history and environment consistent.
+
+### Hard Abort with CancellationToken
+
+For cases where waiting for the next steering checkpoint is unacceptable (e.g., runaway tool, user-initiated cancel), `CancellationToken` provides a hard abort:
+
+```rust
+use tokio_util::sync::CancellationToken;
+
+let cancel = CancellationToken::new();
+let cancel_clone = cancel.clone();
+
+// In another task:
+cancel_clone.cancel(); // triggers immediate abort
+```
+
+When the token is cancelled:
+- The current LLM stream is dropped (partial response discarded)
+- Running tools are cancelled via their async cancellation
+- The loop emits `AgentEnd` with `StopReason::Aborted`
+- No further turns or tool calls are attempted
+
+`CancellationToken` is a last resort. Prefer steering for graceful redirection; use cancellation only when the agent must stop immediately.
+
+---
+
 ## Combining Callbacks
 
 All callbacks are optional and independent:

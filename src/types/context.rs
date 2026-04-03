@@ -4,6 +4,28 @@ use super::tool::AgentTool;
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
+// In-run context entry (2-stream architecture)
+// ---------------------------------------------------------------------------
+
+/// An entry in the in-run context — either a live message or a pruned replacement.
+#[derive(Debug, Clone)]
+pub enum InRunEntry {
+    /// Live message — sent to LLM as-is.
+    Live(AgentMessage),
+    /// Pruned with memo — the original is in the session log; the LLM sees the memo.
+    PrunedMemo {
+        memo: String,
+        tokens_removed: usize,
+        timestamp: u64,
+    },
+    /// Pruned without memo — the original is in the session log; the LLM sees nothing.
+    PrunedSilent {
+        tokens_removed: usize,
+        timestamp: u64,
+    },
+}
+
+// ---------------------------------------------------------------------------
 // Agent context (passed to the loop)
 // ---------------------------------------------------------------------------
 
@@ -61,4 +83,60 @@ pub struct AgentContext {
     /// When `None` (sub-agents, tests, direct callers), the loop falls back to
     /// the existing in-memory compaction path.
     pub session: Option<crate::session::Session>,
+
+    /// User-injected context (prompts, steering, follow-ups). NEVER pruned.
+    pub user_context: Vec<AgentMessage>,
+    /// In-run context (model-generated). Can be pruned surgically.
+    pub inrun_context: Vec<InRunEntry>,
+}
+
+impl AgentContext {
+    /// Build the working context for LLM calls by merging user_context + live inrun entries.
+    ///
+    /// If both streams are empty (old code path, no PrunTool), falls back to `self.messages`
+    /// for backward compatibility.
+    pub fn build_working_context(&self) -> Vec<AgentMessage> {
+        if self.user_context.is_empty() && self.inrun_context.is_empty() {
+            return self.messages.clone();
+        }
+
+        let mut entries: Vec<(u64, AgentMessage)> = Vec::new();
+
+        // Add all user_context entries with their timestamps
+        for msg in &self.user_context {
+            entries.push((msg.timestamp(), msg.clone()));
+        }
+
+        // Add live inrun entries and individual memo messages at their original timestamps
+        for entry in &self.inrun_context {
+            match entry {
+                InRunEntry::Live(msg) => {
+                    entries.push((msg.timestamp(), msg.clone()));
+                }
+                InRunEntry::PrunedMemo {
+                    memo, timestamp, ..
+                } => {
+                    let memo_text = format!("[Pruned context summary: {}]", memo);
+                    let memo_msg = AgentMessage::Llm(super::agent_message::LlmMessage::new(
+                        super::content::Message::User {
+                            content: vec![super::content::Content::Text { text: memo_text }],
+                            timestamp: *timestamp,
+                        },
+                    ));
+                    entries.push((*timestamp, memo_msg));
+                }
+                InRunEntry::PrunedSilent { .. } => {}
+            }
+        }
+
+        // If the merge produced nothing, fall back
+        if entries.is_empty() {
+            return self.messages.clone();
+        }
+
+        // Sort by timestamp to preserve chronological order
+        entries.sort_by_key(|(ts, _)| *ts);
+
+        entries.into_iter().map(|(_, msg)| msg).collect()
+    }
 }
