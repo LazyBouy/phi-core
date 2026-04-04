@@ -15,7 +15,7 @@ Event [EXISTS]
 │   └── Input: InputRejected [EXISTS]
 ├── StreamDelta [EXISTS] — Text/Thinking/ToolCallDelta
 ├── ContinuationKind [EXISTS] — Default/Rerun/Branch/Compaction
-└── TurnTrigger [EXISTS] — User/SubAgent/FollowUp/Branch
+└── TurnTrigger [EXISTS] — User/SubAgent/Continuation/Branch
 ```
 
 ---
@@ -140,8 +140,8 @@ Identifies what caused a new turn to begin. Carried in `TurnStart`.
 |---------|--------|-------------|
 | `User` | [EXISTS] | First turn triggered by a user message |
 | `SubAgent` | [EXISTS] | Invoked as a sub-agent by a parent agent |
-| `FollowUp` | [EXISTS] | Continuation turn: tool round-trip, steering, or Default/Rerun continuation |
-| `Branch` | [EXISTS] | First turn of a Branch continuation; subsequent turns use FollowUp |
+| `Continuation` | [EXISTS] | Continuation turn: tool round-trip, steering, or Default/Rerun continuation |
+| `Branch` | [EXISTS] | First turn of a Branch continuation; subsequent turns use Continuation |
 
 ---
 

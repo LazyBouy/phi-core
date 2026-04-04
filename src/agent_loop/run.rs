@@ -76,12 +76,12 @@ pub(super) async fn run_loop(
                 ) {
                     TurnTrigger::Branch
                 } else if context.continuation_kind.is_some() {
-                    TurnTrigger::FollowUp
+                    TurnTrigger::Continuation
                 } else {
                     config.first_turn_trigger.clone()
                 }
             } else {
-                TurnTrigger::FollowUp
+                TurnTrigger::Continuation
             };
 
             // Check execution limits BEFORE before_turn so we don't fire hooks for an impossible turn

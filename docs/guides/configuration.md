@@ -177,7 +177,23 @@ skills = ["code-review", "debugging"]
 
 ### System Prompt Resolution
 
-Agent-level `system_prompt` overrides the profile's:
+The system prompt is resolved through a priority chain. The first non-empty value wins:
+
+1. `[agent].system_prompt` — explicit agent-level override (highest priority)
+2. Profile instance `system_prompt` — when an agent instance references a profile via `{{agent_profile.name}}`
+3. `[agent.profile].system_prompt` — base inline profile fallback
+4. Empty string (no system prompt)
+
+#### Inline Text
+
+The simplest form — write the prompt directly:
+
+```toml
+[agent.profile]
+system_prompt = "You are an expert software engineer."
+```
+
+Agent-level overrides the profile:
 
 ```toml
 [agent.profile]
@@ -187,7 +203,95 @@ system_prompt = "You are a general assistant."   # default from blueprint
 system_prompt = "You are a Python specialist."   # overrides the profile
 ```
 
-Resolution order: `[agent].system_prompt` &gt; `[agent.profile].system_prompt` &gt; empty string
+#### File Reference (`file:` prefix)
+
+Load the prompt from a file. Relative paths resolve from the agent's `workspace` directory:
+
+```toml
+[agent]
+workspace = "workspace"
+
+[agent.profile]
+system_prompt = "file:system_prompt.md"        # resolves to workspace/system_prompt.md
+```
+
+Absolute paths are used as-is:
+
+```toml
+[agent.profile]
+system_prompt = "file:/etc/phi/prompts/coder.md"
+```
+
+The `file:` prefix works at all levels: `[agent].system_prompt`, `[agent.profile].system_prompt`, and `[[agent.profile.instances]].system_prompt`.
+
+#### Strategy Reference (`{{...}}` protocol)
+
+For advanced multi-block prompt composition, reference a system prompt instance:
+
+```toml
+[agent]
+system_prompt = "{{system_prompt.my_prompt}}"
+```
+
+This triggers the 3-entity chain:
+1. Finds `[[system_prompt.instances]]` with matching ID
+2. Finds the referenced `[[system_prompt_strategy.instances]]` (block template)
+3. Composes blocks in strategy order, resolving `file:` paths in block content
+
+See [System Prompt Strategy](#system-prompt-strategy) for the full 3-entity model.
+
+#### Profile Instance Override
+
+When using named profile instances, the instance's `system_prompt` participates in resolution:
+
+```toml
+[agent.profile]
+system_prompt = "You are a general assistant."   # base fallback
+
+[[agent.profile.instances]]
+id = "{{specialist}}"
+system_prompt = "file:specialist_prompt.md"      # overrides base for this instance
+
+[[agent.instances]]
+name = "my-specialist"
+agent_profile = "{{agent_profile.specialist}}"   # uses specialist's system_prompt
+
+[[agent.instances]]
+name = "my-generalist"
+# no agent_profile → falls back to base [agent.profile].system_prompt
+```
+
+When an agent instance omits `agent_profile`, it is built using the base `[agent.profile]` directly (no instance override). The base profile's `system_prompt`, `temperature`, and other fields apply as defaults.
+
+#### Workspace-relative Resolution
+
+The `file:` prefix resolves relative to the agent's `workspace` directory. Each agent instance can set its own workspace, so the same `file:` reference resolves to different files per agent:
+
+```toml
+[agent.profile]
+name = "base"
+
+[[agent.profile.instances]]
+id = "{{copywriter}}"
+system_prompt = "file:system_prompt.md"   # same file ref, different workspace resolution
+temperature = 0.7
+
+[[agent.instances]]
+name = "alpha-writer"
+agent_profile = "{{agent_profile.copywriter}}"
+workspace = "projects/alpha"              # reads projects/alpha/system_prompt.md
+
+[[agent.instances]]
+name = "beta-writer"
+agent_profile = "{{agent_profile.copywriter}}"
+workspace = "projects/beta"               # reads projects/beta/system_prompt.md
+```
+
+**Workspace resolution order:**
+1. `[[agent.instances]].workspace` — per-agent instance (highest priority)
+2. `[agent].workspace` — shared agent-level
+3. `default_workspace` — global default
+4. `"."` — current directory
 
 ### Thinking Level
 

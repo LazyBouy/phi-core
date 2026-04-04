@@ -10,7 +10,7 @@ A single LLM call-and-response cycle within a Loop. One Loop may have many Turns
 Turn [EXISTS as struct on LoopRecord.turns; EXISTS as event-pair TurnStart/TurnEnd]
 ├── HEADER
 │   ├── TurnId [EXISTS] — { loop_id, turn_index }
-│   ├── triggered_by [EXISTS] — User/SubAgent/FollowUp/Branch
+│   ├── triggered_by [EXISTS] — User/SubAgent/Continuation/Branch
 │   ├── usage [EXISTS] — per-turn from TurnEnd
 │   └── Callbacks: before_turn / after_turn [EXISTS]
 └── LINE ITEMS: Actions
@@ -40,8 +40,8 @@ Identifies what caused a new turn to begin. Enum `TurnTrigger`:
 |---------|--------|-------------|
 | `User` | `[EXISTS]` | First turn triggered by a user message (`agent_loop`). |
 | `SubAgent` | `[EXISTS]` | This agent was invoked as a sub-agent by a parent agent. |
-| `FollowUp` | `[EXISTS]` | Continuation turn: tool round-trip, steering message, or `Default` / `Rerun` continuation. |
-| `Branch` | `[EXISTS]` | First turn of a `Branch` continuation (`agent_loop_continue` with `ContinuationKind::Branch`). Subsequent turns within the same branched loop use `FollowUp`. |
+| `Continuation` | `[EXISTS]` | Continuation turn: tool round-trip, steering message, or `Default` / `Rerun` continuation. |
+| `Branch` | `[EXISTS]` | First turn of a `Branch` continuation (`agent_loop_continue` with `ContinuationKind::Branch`). Subsequent turns within the same branched loop use `Continuation`. |
 
 ### Callbacks `[EXISTS]`
 

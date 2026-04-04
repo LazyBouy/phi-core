@@ -1372,3 +1372,218 @@ fn test_context_config_custom_counter() {
     );
     assert_eq!(counter.estimate_text("x"), 1);
 }
+
+// ---------------------------------------------------------------------------
+// file: prefix resolution in system_prompt
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_file_prefix_system_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    let prompt_path = dir.path().join("my_prompt.md");
+    std::fs::write(&prompt_path, "You are a test agent from a file.").unwrap();
+
+    // Use absolute path so workspace resolution isn't needed
+    let toml = format!(
+        r#"
+[provider]
+model = "test"
+api_key = "test"
+
+[agent.profile]
+system_prompt = "file:{}"
+"#,
+        prompt_path.display()
+    );
+    let config = parse_config(&toml, ConfigFormat::Toml).expect("should parse");
+    let agent = agent_from_config(&config).expect("should build");
+    assert_eq!(agent.system_prompt(), "You are a test agent from a file.");
+}
+
+#[test]
+fn test_file_prefix_relative_to_workspace() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("workspace");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::write(ws.join("prompt.md"), "Workspace-relative prompt.").unwrap();
+
+    let toml = format!(
+        r#"
+[provider]
+model = "test"
+api_key = "test"
+
+[agent]
+workspace = "{}"
+
+[agent.profile]
+system_prompt = "file:prompt.md"
+"#,
+        ws.display()
+    );
+    let config = parse_config(&toml, ConfigFormat::Toml).expect("should parse");
+    let agent = agent_from_config(&config).expect("should build");
+    assert_eq!(agent.system_prompt(), "Workspace-relative prompt.");
+}
+
+// ---------------------------------------------------------------------------
+// Profile instance system_prompt participates in resolution
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_profile_instance_system_prompt_resolved() {
+    let toml = r#"
+[provider]
+model = "test"
+api_key = "test"
+
+[agent.profile]
+name = "base"
+system_prompt = "base fallback prompt"
+
+[[agent.profile.instances]]
+id = "{{specialist}}"
+system_prompt = "specialist prompt from instance"
+
+[[agent.instances]]
+name = "my-specialist"
+agent_profile = "{{agent_profile.specialist}}"
+"#;
+    let config = parse_config(toml, ConfigFormat::Toml).expect("should parse");
+    let agents = agents_from_config(&config).expect("should build");
+    assert_eq!(agents.len(), 1);
+    let (name, agent) = &agents[0];
+    assert_eq!(name, "my-specialist");
+    assert_eq!(agent.system_prompt(), "specialist prompt from instance");
+}
+
+#[test]
+fn test_profile_instance_file_system_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("specialist.md"), "File-based specialist.").unwrap();
+
+    let toml = format!(
+        r#"
+[provider]
+model = "test"
+api_key = "test"
+
+[agent]
+workspace = "{}"
+
+[agent.profile]
+name = "base"
+
+[[agent.profile.instances]]
+id = "{{{{specialist}}}}"
+system_prompt = "file:specialist.md"
+
+[[agent.instances]]
+name = "my-specialist"
+agent_profile = "{{{{agent_profile.specialist}}}}"
+"#,
+        dir.path().display()
+    );
+    let config = parse_config(&toml, ConfigFormat::Toml).expect("should parse");
+    let agents = agents_from_config(&config).expect("should build");
+    let (_, agent) = &agents[0];
+    assert_eq!(agent.system_prompt(), "File-based specialist.");
+}
+
+#[test]
+fn test_agent_level_overrides_profile_instance() {
+    let toml = r#"
+[provider]
+model = "test"
+api_key = "test"
+
+[agent.profile]
+name = "base"
+
+[[agent.profile.instances]]
+id = "{{specialist}}"
+system_prompt = "profile instance prompt"
+
+[[agent.instances]]
+name = "overridden"
+agent_profile = "{{agent_profile.specialist}}"
+system_prompt = "agent instance override"
+"#;
+    let config = parse_config(toml, ConfigFormat::Toml).expect("should parse");
+    let agents = agents_from_config(&config).expect("should build");
+    let (_, agent) = &agents[0];
+    // Agent instance system_prompt overrides profile instance
+    assert_eq!(agent.system_prompt(), "agent instance override");
+}
+
+#[test]
+fn test_base_profile_used_without_instance() {
+    let toml = r#"
+[provider]
+model = "test"
+api_key = "test"
+
+[agent.profile]
+name = "base"
+system_prompt = "base prompt"
+
+[[agent.instances]]
+name = "generalist"
+"#;
+    let config = parse_config(toml, ConfigFormat::Toml).expect("should parse");
+    let agents = agents_from_config(&config).expect("should build");
+    let (_, agent) = &agents[0];
+    assert_eq!(agent.system_prompt(), "base prompt");
+}
+
+// ---------------------------------------------------------------------------
+// Per-instance workspace
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_per_instance_workspace() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws_alpha = dir.path().join("alpha");
+    let ws_beta = dir.path().join("beta");
+    std::fs::create_dir_all(&ws_alpha).unwrap();
+    std::fs::create_dir_all(&ws_beta).unwrap();
+    std::fs::write(ws_alpha.join("prompt.md"), "Alpha prompt.").unwrap();
+    std::fs::write(ws_beta.join("prompt.md"), "Beta prompt.").unwrap();
+
+    let toml = format!(
+        r#"
+[provider]
+model = "test"
+api_key = "test"
+
+[agent.profile]
+name = "base"
+
+[[agent.profile.instances]]
+id = "{{{{writer}}}}"
+system_prompt = "file:prompt.md"
+
+[[agent.instances]]
+name = "alpha"
+agent_profile = "{{{{agent_profile.writer}}}}"
+workspace = "{}"
+
+[[agent.instances]]
+name = "beta"
+agent_profile = "{{{{agent_profile.writer}}}}"
+workspace = "{}"
+"#,
+        ws_alpha.display(),
+        ws_beta.display()
+    );
+    let config = parse_config(&toml, ConfigFormat::Toml).expect("should parse");
+    let agents = agents_from_config(&config).expect("should build");
+    assert_eq!(agents.len(), 2);
+
+    let (name_a, agent_a) = &agents[0];
+    let (name_b, agent_b) = &agents[1];
+    assert_eq!(name_a, "alpha");
+    assert_eq!(name_b, "beta");
+    assert_eq!(agent_a.system_prompt(), "Alpha prompt.");
+    assert_eq!(agent_b.system_prompt(), "Beta prompt.");
+}

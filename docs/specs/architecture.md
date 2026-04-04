@@ -465,7 +465,7 @@ Entity: ContinuationKind (enum)
 Set on AgentContext.continuation_kind before calling agent_loop_continue().
 Surfaced in AgentStart.continuation_kind (None = origin call).
 TurnTrigger semantics:
-  Default / Rerun → first turn uses TurnTrigger::FollowUp
+  Default / Rerun → first turn uses TurnTrigger::Continuation
   Branch          → first turn uses TurnTrigger::Branch
 ```
 
@@ -474,15 +474,15 @@ TurnTrigger semantics:
 Entity: TurnTrigger (enum)
   User      [first turn of an agent_loop() origin call with new user prompts]
   SubAgent  [first turn when running as a sub-agent via SubAgentTool]
-  FollowUp  [subsequent turns; tool round-trip, steering, or Default/Rerun continuation]
+  Continuation  [subsequent turns; tool round-trip, steering, or Default/Rerun continuation]
   Branch    [first turn of an agent_loop_continue(Branch) call]
 
 Emitted in TurnStart.triggered_by.
 Priority on first turn (run_loop):
   1. Branch continuation     → TurnTrigger::Branch
-  2. Any other continuation  → TurnTrigger::FollowUp
+  2. Any other continuation  → TurnTrigger::Continuation
   3. Origin call             → config.first_turn_trigger (User or SubAgent)
-Subsequent turns always use TurnTrigger::FollowUp.
+Subsequent turns always use TurnTrigger::Continuation.
 ```
 
 ### ToolResult / ToolError

@@ -784,9 +784,9 @@ boundaries. The system is configurable for production use.
   - Depends on: —
   - Definition of Done: All three variants instantiate; `Rerun { tag }` and `Branch { tag }` round-trip through JSON serialization preserving the tag string.
 
-- [x] **REQ-181:** Define `TurnTrigger` enum in `types.rs` with four variants: `User` (first turn of origin call), `SubAgent` (sub-agent invocation), `FollowUp` (subsequent turns, tool round-trips, steering, Default/Rerun continuations), `Branch` (first turn of a Branch continuation). Add `triggered_by: TurnTrigger` field to `AgentEvent::TurnStart`. *(Source: [AR])*
+- [x] **REQ-181:** Define `TurnTrigger` enum in `types.rs` with four variants: `User` (first turn of origin call), `SubAgent` (sub-agent invocation), `Continuation` (subsequent turns, tool round-trips, steering, Default/Rerun continuations), `Branch` (first turn of a Branch continuation). Add `triggered_by: TurnTrigger` field to `AgentEvent::TurnStart`. *(Source: [AR])*
   - Depends on: REQ-007
-  - Definition of Done: `TurnStart` events carry the correct `triggered_by` value: origin calls emit `User` on turn 0; Branch continuations emit `Branch` on turn 0; all other first turns and all subsequent turns emit `FollowUp`.
+  - Definition of Done: `TurnStart` events carry the correct `triggered_by` value: origin calls emit `User` on turn 0; Branch continuations emit `Branch` on turn 0; all other first turns and all subsequent turns emit `Continuation`.
 
 - [x] **REQ-182:** Add `before_loop: Option<BeforeLoopFn>` and `after_loop: Option<AfterLoopFn>` to `AgentLoopConfig`. `BeforeLoopFn` fires before `AgentStart` — return `false` to abort the loop (emit `AgentEnd { messages: [] }` instead). `AfterLoopFn` fires after `AgentEnd` with the new messages and accumulated usage. Both are wired in `agent_loop` and `agent_loop_continue`. *(Source: [AR])*
   - Depends on: REQ-036, REQ-037
@@ -832,9 +832,9 @@ boundaries. The system is configurable for production use.
   - Depends on: REQ-007, REQ-180, REQ-190, REQ-191
   - Definition of Done: `AgentStart` events from `agent_loop` have `parent_loop_id: None` and `continuation_kind: None`; events from `agent_loop_continue` carry the values set on `AgentContext`.
 
-- [x] **REQ-193:** In `run_loop`, determine `TurnTrigger` for the first turn based on `context.continuation_kind`: `Branch(..)` → `TurnTrigger::Branch`; any other `Some(..)` → `TurnTrigger::FollowUp`; `None` → `config.first_turn_trigger` (default `User`; `SubAgent` for sub-agent callers). All subsequent turns use `TurnTrigger::FollowUp`. Emit `triggered_by` in `AgentEvent::TurnStart`. *(Source: [AR])*
+- [x] **REQ-193:** In `run_loop`, determine `TurnTrigger` for the first turn based on `context.continuation_kind`: `Branch(..)` → `TurnTrigger::Branch`; any other `Some(..)` → `TurnTrigger::Continuation`; `None` → `config.first_turn_trigger` (default `User`; `SubAgent` for sub-agent callers). All subsequent turns use `TurnTrigger::Continuation`. Emit `triggered_by` in `AgentEvent::TurnStart`. *(Source: [AR])*
   - Depends on: REQ-038, REQ-181
-  - Definition of Done: A `Branch` continuation emits `TurnTrigger::Branch` on turn 0 and `TurnTrigger::FollowUp` on all subsequent turns; a `Default` continuation emits `TurnTrigger::FollowUp` on all turns.
+  - Definition of Done: A `Branch` continuation emits `TurnTrigger::Branch` on turn 0 and `TurnTrigger::Continuation` on all subsequent turns; a `Default` continuation emits `TurnTrigger::Continuation` on all turns.
 
 - [x] **REQ-194:** Add `child_loop_id: Option<String>` to both `ToolResult` and `AgentEvent::ToolExecutionEnd`. Sub-agent tools set `ToolResult.child_loop_id` to the child loop's `loop_id` after `agent_loop` completes. `execute_single_tool` propagates `result.child_loop_id` into `ToolExecutionEnd`. Non-sub-agent tools leave both fields `None`. *(Source: [AR])*
   - Depends on: REQ-010, REQ-046, REQ-148, REQ-190
@@ -1326,7 +1326,7 @@ runbooks cover all known failure modes.
 | REQ-178 | CI pipeline with gated live tests | 6 | 6.4 | [AR] | REQ-164–169 |
 | REQ-179 | Operational runbooks | 6 | 6.4 | [AR] | REQ-071–077 |
 | REQ-180 | `ContinuationKind` enum (`Default`, `Rerun { tag }`, `Branch { tag }`) | 4 | 4.9 | [AR] | — |
-| REQ-181 | `TurnTrigger` enum (`User`, `FollowUp`, `SubAgent`, `Branch`) | 4 | 4.9 | [AR] | — |
+| REQ-181 | `TurnTrigger` enum (`User`, `Continuation`, `SubAgent`, `Branch`) | 4 | 4.9 | [AR] | — |
 | REQ-182 | `before_loop`/`after_loop` hooks on `AgentLoopConfig` | 4 | 4.9 | [AR] | REQ-029, REQ-036 |
 | REQ-183 | `before_tool_execution`/`after_tool_execution` hooks on `AgentLoopConfig` | 4 | 4.9 | [AR] | REQ-029, REQ-046 |
 | REQ-184 | `before_tool_execution_update`/`after_tool_execution_update` hooks | 4 | 4.9 | [AR] | REQ-142, REQ-183 |

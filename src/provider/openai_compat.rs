@@ -316,6 +316,26 @@ impl StreamProvider for OpenAiCompatProvider {
                         Some(Err(e)) => {
                             let err_str = e.to_string();
                             warn!("OpenAI SSE error: {}", err_str);
+
+                            // Classify retryable HTTP errors so the retry loop can handle them.
+                            // reqwest-eventsource renders InvalidStatusCode as
+                            // "Invalid status code: {code} {reason}" (e.g. "Invalid status code: 429 Too Many Requests").
+                            // We match on "status code: NNN" for precision, with broader fallbacks
+                            // for error messages from other sources (e.g. provider JSON error bodies).
+                            let err_lower = err_str.to_lowercase();
+                            if err_lower.contains("status code: 429")
+                                || err_lower.contains("rate limit")
+                                || err_lower.contains("rate-limit")
+                            {
+                                return Err(ProviderError::RateLimited { retry_after_ms: None });
+                            }
+                            if err_lower.contains("status code: 502")
+                                || err_lower.contains("status code: 503")
+                                || err_lower.contains("status code: 504")
+                            {
+                                return Err(ProviderError::Network(err_str));
+                            }
+
                             let err_msg = Message::Assistant {
                                 content: vec![Content::Text { text: String::new() }],
                                 stop_reason: StopReason::Error,

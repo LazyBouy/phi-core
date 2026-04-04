@@ -66,7 +66,7 @@ impl std::error::Error for ConfigError {}
 /// - **Callbacks/hooks are Phase 2.** Config stores callback/hook strings but the
 ///   builder ignores them in Phase 1. WASM plugin loading will activate them in Phase 2.
 pub fn agent_from_config(config: &AgentConfig) -> Result<Arc<dyn Agent>, ConfigError> {
-    let agent = build_basic_agent(config, None, None, None)?;
+    let agent = build_basic_agent(config, None, None, None, None)?;
     Ok(Arc::new(agent))
 }
 
@@ -80,7 +80,7 @@ pub fn agent_from_config_with_registry(
     registry: &ToolRegistry,
 ) -> Result<Arc<dyn Agent>, ConfigError> {
     let tools = registry.resolve(&config.tools.enabled);
-    let agent = build_basic_agent(config, None, None, Some(tools))?;
+    let agent = build_basic_agent(config, None, None, Some(tools), None)?;
     Ok(Arc::new(agent))
 }
 
@@ -146,12 +146,25 @@ pub fn agents_from_config(
 
         // System prompt override from instance
         let system_prompt_override = instance.system_prompt.clone();
+        let ws_override = instance.workspace.as_deref();
 
-        let agent = build_basic_agent(config, profile_override.as_ref(), provider_inst, None)?;
+        let agent = build_basic_agent(
+            config,
+            profile_override.as_ref(),
+            provider_inst,
+            None,
+            ws_override,
+        )?;
 
         // Apply instance-level system prompt override after construction
         let agent: Arc<dyn Agent> = if let Some(ref prompt) = system_prompt_override {
-            let mut a = build_basic_agent(config, profile_override.as_ref(), provider_inst, None)?;
+            let mut a = build_basic_agent(
+                config,
+                profile_override.as_ref(),
+                provider_inst,
+                None,
+                ws_override,
+            )?;
             a = a.with_system_prompt(prompt.clone());
             Arc::new(a)
         } else {
@@ -168,11 +181,13 @@ pub fn agents_from_config(
 /// - `profile_override`: when `Some`, replaces the profile built from `config.agent.profile`.
 /// - `provider_instance`: when `Some`, overrides model config fields from a provider instance.
 /// - `tools_override`: when `Some`, sets these tools on the agent.
+/// - `workspace_override`: when `Some`, overrides the workspace directory for this agent.
 fn build_basic_agent(
     config: &AgentConfig,
     profile_override: Option<&AgentProfile>,
     provider_instance: Option<&super::schema::ProviderInstance>,
     tools_override: Option<Vec<Arc<dyn AgentTool>>>,
+    workspace_override: Option<&str>,
 ) -> Result<BasicAgent, ConfigError> {
     // ── Build ModelConfig ────────────────────────────────────────────────
     let model = config
@@ -261,19 +276,18 @@ fn build_basic_agent(
     // ── Build the agent ──────────────────────────────────────────────────
     let mut agent = BasicAgent::new(model_config);
 
-    // System prompt: agent-level overrides profile-level.
-    // If the value is a {{...}} reference, resolve through the 3-entity chain:
-    //   SystemPromptStrategy (template) → SystemPrompt (content) → compose()
+    // System prompt resolution chain (first non-empty wins):
+    //   1. agent-level override  2. profile instance override  3. base profile  4. empty
+    // Supports: inline text, file:path, or {{...}} reference (3-entity chain)
     let raw_prompt = config
         .agent
         .system_prompt
         .as_deref()
+        .or(profile_override.and_then(|p| p.system_prompt.as_deref()))
         .or(config.agent.profile.system_prompt.as_deref())
         .unwrap_or("");
-    let workspace_path = config
-        .agent
-        .workspace
-        .as_deref()
+    let workspace_path = workspace_override
+        .or(config.agent.workspace.as_deref())
         .or(config.default_workspace.as_deref())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
@@ -345,11 +359,9 @@ fn build_basic_agent(
     }
 
     // ── Workspace ────────────────────────────────────────────────────────
-    // Resolution: agent-level workspace > default_workspace > None
-    let workspace = config
-        .agent
-        .workspace
-        .as_deref()
+    // Resolution: instance workspace > agent-level > default_workspace > None
+    let workspace = workspace_override
+        .or(config.agent.workspace.as_deref())
         .or(config.default_workspace.as_deref());
     if let Some(ws) = workspace {
         agent = agent.with_workspace(ws);
@@ -716,6 +728,17 @@ fn resolve_system_prompt(
 ) -> Result<String, ConfigError> {
     if raw.is_empty() {
         return Ok(String::new());
+    }
+
+    // file: prefix — read prompt from disk. Relative paths resolve from workspace.
+    if let Some(path_str) = raw.strip_prefix("file:") {
+        let path = std::path::Path::new(path_str);
+        let full = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            workspace.join(path)
+        };
+        return std::fs::read_to_string(&full).map_err(ConfigError::Io);
     }
 
     let config_ref = parse_config_ref(raw);

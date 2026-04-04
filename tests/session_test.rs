@@ -1477,10 +1477,10 @@ async fn test_turn_materialization_multi_turn() {
     assert!(t0.has_tool_calls());
     assert!(!t0.tool_results.is_empty());
 
-    // Turn 1: triggered by FollowUp, no tool calls.
+    // Turn 1: triggered by Continuation (tool round-trip), no tool calls.
     let t1 = lr.get_turn(1).unwrap();
     assert_eq!(t1.index(), 1);
-    assert!(matches!(t1.triggered_by, TurnTrigger::FollowUp));
+    assert!(matches!(t1.triggered_by, TurnTrigger::Continuation));
     assert!(!t1.has_tool_calls());
 
     // all_messages covers everything.
@@ -1979,5 +1979,103 @@ fn test_before_task_can_abort() {
     assert!(
         recorder.get_session("session-abort").is_some(),
         "session should be created even when before_task returns false"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// TurnTrigger::Continuation serde tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_turn_trigger_continuation_serializes_as_continuation() {
+    let trigger = TurnTrigger::Continuation;
+    let json = serde_json::to_string(&trigger).unwrap();
+    assert_eq!(json, "\"Continuation\"");
+}
+
+#[test]
+fn test_turn_trigger_followup_deserializes_as_continuation() {
+    // Backward compat: old sessions serialized "FollowUp"
+    let trigger: TurnTrigger = serde_json::from_str("\"FollowUp\"").unwrap();
+    assert!(matches!(trigger, TurnTrigger::Continuation));
+}
+
+#[test]
+fn test_turn_trigger_continuation_roundtrips() {
+    let original = TurnTrigger::Continuation;
+    let json = serde_json::to_string(&original).unwrap();
+    let deserialized: TurnTrigger = serde_json::from_str(&json).unwrap();
+    assert!(matches!(deserialized, TurnTrigger::Continuation));
+}
+
+#[tokio::test]
+async fn test_tool_use_turn_has_continuation_trigger() {
+    // A tool-use cycle should produce turn 0 (User) and turn 1 (Continuation).
+    use phi_core::provider::mock::{MockResponse, MockToolCall};
+
+    struct NoopTool;
+
+    #[async_trait::async_trait]
+    impl phi_core::AgentTool for NoopTool {
+        fn name(&self) -> &str {
+            "test_tool"
+        }
+        fn label(&self) -> &str {
+            "Test"
+        }
+        fn description(&self) -> &str {
+            "noop"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: phi_core::ToolContext,
+        ) -> Result<phi_core::ToolResult, phi_core::ToolError> {
+            Ok(phi_core::ToolResult {
+                content: vec![Content::Text { text: "ok".into() }],
+                details: serde_json::Value::Null,
+                child_loop_id: None,
+            })
+        }
+    }
+
+    let provider = MockProvider::new(vec![
+        MockResponse::ToolCalls(vec![MockToolCall {
+            name: "test_tool".into(),
+            arguments: serde_json::json!({}),
+        }]),
+        MockResponse::Text("Done.".into()),
+    ]);
+
+    let mut agent = BasicAgent::new(ModelConfig::anthropic("mock", "mock", "test"))
+        .with_provider_override(Arc::new(provider))
+        .with_system_prompt("test".to_string());
+    agent.set_tools(vec![Arc::new(NoopTool)]);
+
+    let mut rx = agent.prompt("hi".to_string()).await;
+
+    let mut recorder = SessionRecorder::new(SessionRecorderConfig::default());
+    while let Some(event) = rx.recv().await {
+        recorder.on_event(event);
+    }
+    recorder.flush();
+
+    let sessions = recorder.drain_completed();
+    assert_eq!(sessions.len(), 1);
+    let lr = &sessions[0].loops[0];
+    assert!(
+        lr.turns.len() >= 2,
+        "expected at least 2 turns, got {}",
+        lr.turns.len()
+    );
+
+    assert!(matches!(lr.turns[0].triggered_by, TurnTrigger::User));
+    assert!(
+        matches!(lr.turns[1].triggered_by, TurnTrigger::Continuation),
+        "tool-use continuation turn should have Continuation trigger, got {:?}",
+        lr.turns[1].triggered_by
     );
 }

@@ -211,19 +211,19 @@ FUNCTION run_loop(
       // Determine TurnTrigger for TurnStart event.
       // Priority on the first turn:
       //   1. Branch continuation   → TurnTrigger::Branch   (explicit branch signal)
-      //   2. Any other continuation (Default/Rerun) → TurnTrigger::FollowUp
+      //   2. Any other continuation (Default/Rerun) → TurnTrigger::Continuation
       //      (the continuation itself is the follow-up, not a fresh user turn)
       //   3. Origin call (continuation_kind == None) → config.first_turn_trigger
       //      (User for Agent::prompt, SubAgent for sub-agent callers)
-      // Subsequent turns always use TurnTrigger::FollowUp.
+      // Subsequent turns always use TurnTrigger::Continuation.
       IF first_turn THEN
         turn_trigger ←
           IF context.continuation_kind == Branch(..) THEN TurnTrigger::Branch
-          ELSE IF context.continuation_kind is Some  THEN TurnTrigger::FollowUp
+          ELSE IF context.continuation_kind is Some  THEN TurnTrigger::Continuation
           ELSE config.first_turn_trigger
         first_turn ← false
       ELSE
-        turn_trigger ← TurnTrigger::FollowUp
+        turn_trigger ← TurnTrigger::Continuation
       END IF
 
       EMIT TurnStart { turn_index: turn_number, triggered_by: turn_trigger }

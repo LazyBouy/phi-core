@@ -34,7 +34,7 @@ pub enum ContinuationKind {
     /// The `tag` is an RFC 3339 UTC timestamp auto-generated at call time.
     /// Caller should modify `context.messages` to set up the alternative path
     /// before calling `agent_loop_continue`. The first turn emits
-    /// [`TurnTrigger::Branch`] instead of `FollowUp`.
+    /// [`TurnTrigger::Branch`] instead of `Continuation`.
     Branch { tag: String },
     /// A standalone context-compaction pass. No LLM call — messages only.
     Compaction,
@@ -48,9 +48,14 @@ pub enum TurnTrigger {
     /// This agent was invoked as a sub-agent by a parent agent.
     SubAgent,
     /// Continuation turn: tool round-trip, steering message, or `Default` / `Rerun` continuation.
-    FollowUp,
+    ///
+    /// Renamed from `FollowUp` — the old name implied user-initiated follow-ups, but this
+    /// variant covers ALL non-first turns including tool-use cycles where the model calls a
+    /// tool, receives the result, and continues generating.
+    #[serde(alias = "FollowUp")]
+    Continuation,
     /// First turn of a `Branch` continuation (`agent_loop_continue` with `ContinuationKind::Branch`).
-    /// Subsequent turns within the same branched loop use `FollowUp`.
+    /// Subsequent turns within the same branched loop use `Continuation`.
     Branch,
 }
 

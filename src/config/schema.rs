@@ -127,6 +127,9 @@ pub struct AgentInstanceSection {
     pub system_prompt: Option<String>,
     /// Override provider reference for this instance (supports `{{...}}` protocol).
     pub provider: Option<String>,
+    /// Per-instance workspace directory. Overrides `[agent].workspace` for this instance.
+    /// Used for `file:` resolution in system prompts and script callbacks.
+    pub workspace: Option<String>,
 }
 
 // ── Provider section ────────────────────────────────────────────────────────
