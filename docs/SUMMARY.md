@@ -55,17 +55,17 @@
 
 # Developer
 
-- [Conceptual Hierarchy](developer/overview.md)
-- [Agent](developer/agent.md)
-- [Session](developer/session.md)
-- [Loop](developer/loop.md)
-- [Turn](developer/turn.md)
-- [Message](developer/message.md)
-- [Tool](developer/tool.md)
-- [Provider](developer/provider.md)
-- [Event](developer/event.md)
-- [Compaction](developer/compaction.md)
-- [Configuration](developer/config.md)
+- [Conceptual Hierarchy](specs/overview.md)
+- [Agent](specs/developer/agent.md)
+- [Session](specs/developer/session.md)
+- [Loop](specs/developer/loop.md)
+- [Turn](specs/developer/turn.md)
+- [Message](specs/developer/message.md)
+- [Tool](specs/developer/tool.md)
+- [Provider](specs/developer/provider.md)
+- [Event](specs/developer/event.md)
+- [Compaction](specs/developer/compaction.md)
+- [Configuration](specs/developer/config.md)
 
 # Specs
 
