@@ -63,6 +63,15 @@ pub(super) fn extract_config_snapshot(
                 model: model.clone(),
                 provider: provider.clone(),
                 config_id: config_segment_from_loop_id(loop_id),
+                // Fallback path — extended fields unavailable from assistant messages
+                name: None,
+                api: None,
+                base_url: None,
+                reasoning: None,
+                context_window: None,
+                max_tokens: None,
+                thinking_level: None,
+                temperature: None,
             })
         } else {
             None

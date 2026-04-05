@@ -129,7 +129,7 @@ Events emitted during the agent loop for real-time UI updates:
 
 | Event | When |
 |-------|------|
-| `AgentStart { agent_id, session_id, loop_id, parent_loop_id, continuation_kind, timestamp }` | Loop begins. `loop_id` is `"{session_id}.{config_id}.{N}"`. `parent_loop_id` is `Some` for continuations and sub-agents. `continuation_kind` is `Some` for `agent_loop_continue` calls. |
+| `AgentStart { agent_id, session_id, loop_id, parent_loop_id, continuation_kind, config_snapshot, timestamp }` | Loop begins. `loop_id` is `"{session_id}.{config_id}.{N}"`. `parent_loop_id` is `Some` for continuations and sub-agents. `continuation_kind` is a `ContinuationKind` (`Initial` for first loops, `Default`/`Rerun`/`Branch`/`Compaction` for continuations). `config_snapshot` is `Option<LoopConfigSnapshot>` capturing model/provider settings for the loop. |
 | `AgentEnd { messages, timestamp, rejection }` | Loop finishes; `rejection` is `Some` when an InputFilter blocked input |
 | `TurnStart { turn_index, timestamp, triggered_by }` | New LLM call starting; `turn_index` is 0-based, `triggered_by` is `User \| SubAgent \| Continuation \| Branch` |
 | `TurnEnd { message, timestamp, tool_results }` | LLM call + tool execution complete |

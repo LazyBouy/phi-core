@@ -3,6 +3,7 @@
 use chrono::Utc;
 use phi_core::context::*;
 use phi_core::session::{LoopRecord, LoopStatus, Session, SessionFormation, SessionScope};
+use phi_core::ContinuationKind;
 use phi_core::*;
 
 // ---------------------------------------------------------------------------
@@ -39,7 +40,7 @@ fn make_loop_record(loop_id: &str, num_turns: u32, parent: Option<&str>) -> Loop
         session_id: "test-session".to_string(),
         agent_id: "test-agent".to_string(),
         parent_loop_id: parent.map(|s| s.to_string()),
-        continuation_kind: None,
+        continuation_kind: ContinuationKind::Initial,
         started_at: Utc::now(),
         ended_at: Some(Utc::now()),
         status: LoopStatus::Completed,
@@ -66,9 +67,6 @@ fn make_session(loops: Vec<LoopRecord>) -> Session {
         last_active_at: now,
         formation: SessionFormation::Explicit { timestamp: now },
         parent_spawn_ref: None,
-        model_config: None,
-        thinking_level: None,
-        temperature: None,
         scope: SessionScope::Ephemeral,
         loops,
     }

@@ -63,8 +63,8 @@ Agent
 | `retry_config` | `RetryConfig` | `[EXISTS]` | Retry policy for provider errors. Exponential backoff with jitter. Agent-level. |
 | `cache_config` | `CacheConfig` | `[EXISTS]` | Prompt caching behavior (enabled/disabled, strategy: Auto/Disabled/Manual). |
 | `tool_execution` | `ToolExecutionStrategy` | `[EXISTS]` | How tool calls are executed: Parallel (default), Sequential, Batched. |
-| `thinking_level` | `ThinkingLevel` | `[EXISTS]` on Agent | Controls depth of model reasoning (Off/Minimal/Low/Medium/High). Conceptually a Session-level attribute, currently set on Agent. |
-| `temperature` | `Option<f32>` | `[EXISTS]` on Agent | Sampling temperature. Conceptually a Session-level attribute, currently set on Agent. |
+| `thinking_level` | `ThinkingLevel` | `[EXISTS]` on Agent | Controls depth of model reasoning (Off/Minimal/Low/Medium/High). Agent default; per-loop values tracked in `LoopConfigSnapshot`. |
+| `temperature` | `Option<f32>` | `[EXISTS]` on Agent | Sampling temperature. Agent default; per-loop values tracked in `LoopConfigSnapshot`. |
 | `max_tokens` | `Option<u32>` | `[EXISTS]` | Max output tokens per response. None = use model default. |
 | `provider_override` | `Option<Arc<dyn StreamProvider>>` | `[EXISTS]` | Escape hatch for test injection or custom providers. Bypasses `ProviderRegistry` dispatch. |
 
@@ -183,5 +183,5 @@ Mutable state that changes during execution.
 
 - **Agent Profile as a separate struct** does not exist in code. The `system_prompt` field lives directly on `BasicAgent`. A future `AgentProfile` struct would hold `profile_id`, `SystemPromptStrategy`, name, and description, enabling profile sharing across agents.
 - **SystemPromptStrategy** now exists as a trait with a `compose(context) -> String` method. It follows a 3-entity model: **strategy template** (the trait implementation), **prompt instance** (concrete prompt for a given context), **profile ref** (agent profile reference). Full 5-layer composition (base personality, task context, tool/skill index, memory context, turn-specific instructions) is future work. `BasicAgent` retains a static `system_prompt` string as a fallback.
-- **thinking_level and temperature** are currently on Agent but conceptually belong at Session level (task-specific attributes). Moving them to Session would allow different tasks to use different reasoning depths without reconfiguring the agent.
+- **thinking_level and temperature** are Agent-level defaults. Per-loop values are captured in `LoopConfigSnapshot` on each `LoopRecord`. `AgentProfile::resolve_thinking_level()` and `resolve_temperature()` have been removed; resolution is now direct from `AgentLoopConfig`.
 - **Introspection** is the largest conceptual gap. It requires session log analysis, memory categorization (episodic/semantic/procedural), and feedback loops to Agent Profile evolution.

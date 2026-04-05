@@ -186,7 +186,7 @@ async fn test_session_recorder_continuation() {
     let child_lid = &parent.children_loop_ids[0];
     let child = session.get_loop(child_lid).expect("child loop not found");
     assert_eq!(child.parent_loop_id.as_deref(), Some(parent_lid.as_str()));
-    assert_eq!(child.continuation_kind, Some(ContinuationKind::Default));
+    assert_eq!(child.continuation_kind, ContinuationKind::Default);
 
     // Tree navigation.
     let roots: Vec<_> = session.root_loops().collect();
@@ -407,9 +407,6 @@ async fn test_session_list_ids() {
             timestamp: chrono::Utc::now(),
         },
         parent_spawn_ref: None,
-        model_config: None,
-        thinking_level: None,
-        temperature: None,
         scope: SessionScope::Ephemeral,
         loops: Vec::new(),
     };
@@ -443,9 +440,6 @@ fn test_session_delete() {
             timestamp: chrono::Utc::now(),
         },
         parent_spawn_ref: None,
-        model_config: None,
-        thinking_level: None,
-        temperature: None,
         scope: SessionScope::Ephemeral,
         loops: Vec::new(),
     };
@@ -670,7 +664,7 @@ async fn test_session_recorder_continuation_kind() {
     let rerun = session.get_loop(&rerun_lid).unwrap();
     assert!(matches!(
         rerun.continuation_kind,
-        Some(ContinuationKind::Rerun { .. })
+        ContinuationKind::Rerun { .. }
     ));
     assert!(session
         .get_loop(&parent_lid)
@@ -709,9 +703,10 @@ fn test_session_recorder_child_loop_ref() {
         session_id: parent_session_id.into(),
         loop_id: parent_loop_id.clone(),
         parent_loop_id: None,
-        continuation_kind: None,
+        continuation_kind: ContinuationKind::Initial,
         timestamp: now,
         metadata: None,
+        config_snapshot: None,
     };
     let tool_start = AgentEvent::ToolExecutionStart {
         loop_id: parent_loop_id.clone(),
@@ -724,9 +719,10 @@ fn test_session_recorder_child_loop_ref() {
         session_id: child_session_id.into(),
         loop_id: child_loop_id.clone(),
         parent_loop_id: Some(parent_loop_id.clone()),
-        continuation_kind: None,
+        continuation_kind: ContinuationKind::Initial,
         timestamp: now,
         metadata: None,
+        config_snapshot: None,
     };
     let child_end = AgentEvent::AgentEnd {
         loop_id: child_loop_id.clone(),
@@ -833,18 +829,20 @@ fn test_session_recorder_child_loop_ref_tool_end_before_child_end() {
         session_id: parent_session_id.into(),
         loop_id: parent_loop_id.clone(),
         parent_loop_id: None,
-        continuation_kind: None,
+        continuation_kind: ContinuationKind::Initial,
         timestamp: now,
         metadata: None,
+        config_snapshot: None,
     };
     let child_start = AgentEvent::AgentStart {
         agent_id: "child-agent".into(),
         session_id: child_session_id.into(),
         loop_id: child_loop_id.clone(),
         parent_loop_id: Some(parent_loop_id.clone()),
-        continuation_kind: None,
+        continuation_kind: ContinuationKind::Initial,
         timestamp: now,
         metadata: None,
+        config_snapshot: None,
     };
     // tool_end arrives BEFORE child_end (reversed ordering).
     let tool_end = AgentEvent::ToolExecutionEnd {
@@ -944,18 +942,20 @@ fn test_session_recorder_spawn_ref_enrichment_after_flush() {
         session_id: parent_session_id.into(),
         loop_id: parent_loop_id.clone(),
         parent_loop_id: None,
-        continuation_kind: None,
+        continuation_kind: ContinuationKind::Initial,
         timestamp: now,
         metadata: None,
+        config_snapshot: None,
     };
     let child_start = AgentEvent::AgentStart {
         agent_id: "child-agent-221".into(),
         session_id: child_session_id.into(),
         loop_id: child_loop_id.clone(),
         parent_loop_id: Some(parent_loop_id.clone()),
-        continuation_kind: None,
+        continuation_kind: ContinuationKind::Initial,
         timestamp: now,
         metadata: None,
+        config_snapshot: None,
     };
     let child_end = AgentEvent::AgentEnd {
         loop_id: child_loop_id.clone(),
@@ -1168,9 +1168,6 @@ async fn test_load_sessions_for_agent() {
                 timestamp: chrono::Utc::now(),
             },
             parent_spawn_ref: None,
-            model_config: None,
-            thinking_level: None,
-            temperature: None,
             scope: SessionScope::Ephemeral,
             loops: Vec::new(),
         })
@@ -1184,9 +1181,6 @@ async fn test_load_sessions_for_agent() {
             timestamp: chrono::Utc::now(),
         },
         parent_spawn_ref: None,
-        model_config: None,
-        thinking_level: None,
-        temperature: None,
         scope: SessionScope::Ephemeral,
         loops: Vec::new(),
     };
@@ -1235,9 +1229,10 @@ fn test_malformed_loop_id_handling() {
             session_id: "nodots".into(), // must match what session_id_from_loop_id returns
             loop_id: loop_id.clone(),
             parent_loop_id: None,
-            continuation_kind: None,
+            continuation_kind: ContinuationKind::Initial,
             timestamp: now,
             metadata: None,
+            config_snapshot: None,
         });
         recorder.on_event(AgentEvent::AgentEnd {
             loop_id: loop_id.clone(),
@@ -1268,9 +1263,10 @@ fn test_malformed_loop_id_handling() {
             session_id: "sess".into(),
             loop_id: loop_id.clone(),
             parent_loop_id: None,
-            continuation_kind: None,
+            continuation_kind: ContinuationKind::Initial,
             timestamp: now,
             metadata: None,
+            config_snapshot: None,
         });
         recorder.on_event(AgentEvent::AgentEnd {
             loop_id: loop_id.clone(),
@@ -1298,9 +1294,10 @@ fn test_malformed_loop_id_handling() {
             session_id: "parent".into(),
             loop_id: parent_loop_id.clone(),
             parent_loop_id: None,
-            continuation_kind: None,
+            continuation_kind: ContinuationKind::Initial,
             timestamp: now,
             metadata: None,
+            config_snapshot: None,
         });
         recorder.on_event(AgentEvent::ToolExecutionEnd {
             loop_id: parent_loop_id.clone(),
@@ -1656,9 +1653,10 @@ fn test_turn_aborted_loop_partial_turn_discarded() {
         session_id: "s".into(),
         loop_id: "loop-abort".into(),
         parent_loop_id: None,
-        continuation_kind: None,
+        continuation_kind: ContinuationKind::Initial,
         timestamp: now,
         metadata: None,
+        config_snapshot: None,
     });
     recorder.on_event(AgentEvent::TurnStart {
         loop_id: "loop-abort".into(),
@@ -1689,9 +1687,10 @@ fn test_turn_agent_end_cleans_orphaned_partial_turn() {
         session_id: "s".into(),
         loop_id: "loop-orphan".into(),
         parent_loop_id: None,
-        continuation_kind: None,
+        continuation_kind: ContinuationKind::Initial,
         timestamp: now,
         metadata: None,
+        config_snapshot: None,
     });
     recorder.on_event(AgentEvent::TurnStart {
         loop_id: "loop-orphan".into(),
@@ -1760,18 +1759,8 @@ fn test_session_new_fields_backward_compat() {
         serde_json::from_value(json).expect("backward-compat deserialization should succeed");
 
     assert_eq!(session.session_id, "s-compat");
-    assert!(
-        session.model_config.is_none(),
-        "model_config should default to None"
-    );
-    assert!(
-        session.thinking_level.is_none(),
-        "thinking_level should default to None"
-    );
-    assert!(
-        session.temperature.is_none(),
-        "temperature should default to None"
-    );
+    // model_config, thinking_level, temperature removed from Session —
+    // these are now tracked per-loop in LoopConfigSnapshot.
     assert_eq!(
         session.scope,
         SessionScope::Ephemeral,
@@ -1807,9 +1796,10 @@ fn test_before_task_fires_on_new_session() {
         session_id: "session-bt".into(),
         loop_id: "session-bt.default.0".into(),
         parent_loop_id: None,
-        continuation_kind: None,
+        continuation_kind: ContinuationKind::Initial,
         timestamp: now,
         metadata: None,
+        config_snapshot: None,
     });
 
     assert!(
@@ -1845,9 +1835,10 @@ fn test_after_task_fires_on_flush() {
         session_id: "session-at".into(),
         loop_id: "session-at.default.0".into(),
         parent_loop_id: None,
-        continuation_kind: None,
+        continuation_kind: ContinuationKind::Initial,
         timestamp: now,
         metadata: None,
+        config_snapshot: None,
     });
 
     recorder.on_event(AgentEvent::AgentEnd {
@@ -1900,9 +1891,10 @@ fn test_task_callbacks_not_fired_on_continuation() {
         session_id: "session-cont".into(),
         loop_id: "session-cont.default.0".into(),
         parent_loop_id: None,
-        continuation_kind: None,
+        continuation_kind: ContinuationKind::Initial,
         timestamp: now,
         metadata: None,
+        config_snapshot: None,
     });
 
     recorder.on_event(AgentEvent::AgentEnd {
@@ -1919,9 +1911,10 @@ fn test_task_callbacks_not_fired_on_continuation() {
         session_id: "session-cont".into(),
         loop_id: "session-cont.default.1".into(),
         parent_loop_id: Some("session-cont.default.0".into()),
-        continuation_kind: Some(ContinuationKind::Default),
+        continuation_kind: ContinuationKind::Default,
         timestamp: now,
         metadata: None,
+        config_snapshot: None,
     });
 
     assert_eq!(
@@ -1964,9 +1957,10 @@ fn test_before_task_can_abort() {
         session_id: "session-abort".into(),
         loop_id: "session-abort.default.0".into(),
         parent_loop_id: None,
-        continuation_kind: None,
+        continuation_kind: ContinuationKind::Initial,
         timestamp: now,
         metadata: None,
+        config_snapshot: None,
     });
 
     // Hook should have fired.

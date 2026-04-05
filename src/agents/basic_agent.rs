@@ -808,9 +808,10 @@ impl BasicAgent {
             session_id: self.session_id.clone(),
             loop_id: loop_id.clone(),
             parent_loop_id: self.last_loop_id.clone(),
-            continuation_kind: Some(ContinuationKind::Compaction),
+            continuation_kind: ContinuationKind::Compaction,
             timestamp: chrono::Utc::now(),
             metadata: None,
+            config_snapshot: None, // Compaction pass — no LLM config relevant
         });
 
         let msgs_before = self.messages.len();
@@ -1150,6 +1151,7 @@ impl Agent for BasicAgent {
         // Auto-generate the timestamp tag for Rerun/Branch (RFC 3339 UTC).
         let tag = chrono::Utc::now().to_rfc3339();
         let kind_with_tag = match kind {
+            ContinuationKind::Initial => ContinuationKind::Default, // Initial → Default when continuing
             ContinuationKind::Default => ContinuationKind::Default,
             ContinuationKind::Rerun { .. } => ContinuationKind::Rerun { tag },
             ContinuationKind::Branch { .. } => ContinuationKind::Branch { tag },

@@ -36,7 +36,8 @@ FUNCTION agent_loop(
     session_id:        context.session_id,
     loop_id:           context.loop_id,
     parent_loop_id:    None,    // None = origin call
-    continuation_kind: None,    // None = origin call
+    continuation_kind: Initial, // Initial = origin call (the #[default])
+    config_snapshot:   Some(LoopConfigSnapshot from config),
     timestamp:         now()
   }
 
@@ -138,7 +139,8 @@ FUNCTION agent_loop_continue(
     session_id:        context.session_id.unwrap(),
     loop_id:           context.loop_id OR new_uuid(),
     parent_loop_id:    context.parent_loop_id,    // None for Default, Some for Rerun/Branch
-    continuation_kind: context.continuation_kind,  // Some(Default|Rerun|Branch)
+    continuation_kind: context.continuation_kind,  // Default|Rerun|Branch|Compaction (ContinuationKind, not Option)
+    config_snapshot:   Some(LoopConfigSnapshot from config),
     timestamp:         now()
   }
 

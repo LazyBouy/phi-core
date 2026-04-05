@@ -18,7 +18,7 @@ Invocation Layer [EXISTS — phi-core Phase 1]
 │   ├── [[agent.instances]] → Named agent variations
 │   ├── [provider] → Default ModelConfig
 │   ├── [[provider.instances]] → Named provider configurations
-│   ├── [session] → Session overrides (model, thinking, temperature, scope)
+│   ├── [session] → Session configuration (scope)
 │   ├── [tools] → built-in names + plugin references
 │   ├── [skills] → Skill directory paths
 │   ├── [sub_agents] → Default sub-agent template
@@ -695,10 +695,10 @@ The config schema subsumes the P1 gaps — they become config sections rather th
 |-----|---------------|---------------|
 | G1: Compaction callbacks | `[callbacks].before_compaction_start` | Callback types + config mapping |
 | G3: Agent Profile | `[agent.profile]` + `[[agent.instances]]` | `AgentProfile` struct |
-| G4: Session model override | `[session].model` | Session field + resolution |
+| ~~G4: Session model override~~ | ~~`[session].model`~~ | Removed — model config now per-loop in `LoopConfigSnapshot` |
 | G5: Compaction config consolidation | `[compaction]` | Unified `CompactionConfig` |
 | G7: Session scope | `[session].scope` | `SessionScope` enum |
-| G9: Session task attributes | `[session].thinking_level`, `[session].temperature` | Session fields + resolution |
+| ~~G9: Session task attributes~~ | ~~`[session].thinking_level`, `[session].temperature`~~ | Removed — now per-loop in `LoopConfigSnapshot` |
 
 ---
 

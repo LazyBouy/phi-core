@@ -19,8 +19,12 @@ use serde::{Deserialize, Serialize};
 /// The runtime does **not** enforce context constraints — e.g. it does not verify
 /// that a `Rerun` uses an identical context to the original loop. That is the caller's
 /// responsibility. The distinction is purely semantic / for traceability.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub enum ContinuationKind {
+    /// First loop in a session — no prior loops exist.
+    /// This is the default when `AgentContext::continuation_kind` is `None`.
+    #[default]
+    Initial,
     /// Unspecified continuation — preserves the original `agent_loop_continue` semantics.
     /// Use when the Rerun/Branch distinction is not relevant to the caller.
     Default,
@@ -99,14 +103,21 @@ pub enum AgentEvent {
         /// The `loop_id` of the loop this continues from. `None` for origin calls
         /// (`agent_loop()` with no prior session). Set for all `agent_loop_continue()` calls.
         parent_loop_id: Option<String>,
-        /// How this continuation relates to prior loops. `None` for origin calls.
-        /// `Some(Default|Rerun|Branch)` for `agent_loop_continue()` calls.
-        continuation_kind: Option<ContinuationKind>,
+        /// How this loop relates to prior loops. `Initial` for origin calls (`agent_loop()`).
+        /// `Default`, `Rerun`, `Branch`, or `Compaction` for `agent_loop_continue()` calls.
+        #[serde(default)]
+        continuation_kind: ContinuationKind,
         /// Wall-clock time when the agent loop was entered.
         timestamp: chrono::DateTime<chrono::Utc>,
         /// Extensible bag for caller-supplied context (e.g., user info, request tags, trace IDs).
         /// Passed through as-is — the agent loop does not read or modify this field.
         metadata: Option<serde_json::Value>,
+        /// Snapshot of the model/provider configuration used for this loop.
+        /// Populated from `AgentLoopConfig` at loop entry. Includes model identity,
+        /// provider details, thinking level, and temperature — everything needed to
+        /// understand what config produced this loop's output.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        config_snapshot: Option<crate::session::LoopConfigSnapshot>,
     },
 
     /// Fires once when agent_loop() exits — after all turns and follow-ups complete.

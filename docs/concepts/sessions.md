@@ -97,7 +97,7 @@ chat" button, new document context).
 | `session_id` | `String` | Session this loop belongs to |
 | `agent_id` | `String` | Agent that ran this loop |
 | `parent_loop_id` | `Option<String>` | Preceding loop (same or different session) |
-| `continuation_kind` | `Option<ContinuationKind>` | How this loop relates to its parent |
+| `continuation_kind` | `ContinuationKind` | How this loop relates to its parent (`Initial` for first loops) |
 | `started_at` | `DateTime<Utc>` | Timestamp from `AgentStart` |
 | `ended_at` | `Option<DateTime<Utc>>` | Timestamp from `AgentEnd` |
 | `status` | `LoopStatus` | Lifecycle state |
@@ -135,30 +135,47 @@ when `ParallelLoopStart` arrives, before their individual `AgentStart` fires.
 
 | `parent_loop_id` | `continuation_kind` | Meaning |
 |---|---|---|
-| `None` | `None` | Fresh origin loop (`agent_loop`) |
-| Same-session parent | `Some(Default)` | Regular continuation |
-| Same-session parent | `Some(Rerun { tag })` | Retry / error recovery |
-| Same-session parent | `Some(Branch { tag })` | Branch exploration |
-| Different-session parent | `None` | Sub-agent loop (spawned by a tool) |
+| `None` | `Initial` | Fresh origin loop (`agent_loop`) |
+| Same-session parent | `Default` | Regular continuation |
+| Same-session parent | `Rerun { tag }` | Retry / error recovery |
+| Same-session parent | `Branch { tag }` | Branch exploration |
+| Different-session parent | `Initial` | Sub-agent loop (spawned by a tool) |
 
 ### `LoopConfigSnapshot`
 
-`LoopConfigSnapshot` captures only the model identifier and provider name from
+`LoopConfigSnapshot` captures model identity and key configuration from
 the `AgentLoopConfig` that ran the loop:
 
 ```rust
 pub struct LoopConfigSnapshot {
-    pub model: String,      // e.g. "claude-opus-4-6"
-    pub provider: String,   // e.g. "anthropic"
-    pub config_id: Option<String>, // from AgentLoopConfig.config_id
+    pub model: String,                    // e.g. "claude-opus-4-6"
+    pub provider: String,                 // e.g. "anthropic"
+    pub config_id: Option<String>,        // from AgentLoopConfig.config_id
+    pub name: Option<String>,             // model display name
+    pub api: Option<ApiProtocol>,         // which API protocol was used
+    pub base_url: Option<String>,         // provider base URL
+    pub reasoning: Option<bool>,          // whether model supports reasoning/thinking
+    pub context_window: Option<u32>,      // model context window size
+    pub max_tokens: Option<u32>,          // max output tokens
+    pub thinking_level: Option<ThinkingLevel>, // reasoning depth for this loop
+    pub temperature: Option<f32>,         // sampling temperature
 }
 ```
+
+The first three fields (`model`, `provider`, `config_id`) are always populated.
+The remaining fields use `Option` with `#[serde(skip_serializing_if = "Option::is_none")]`
+so they only appear when set, keeping serialized output compact.
 
 **Why not store the full `AgentLoopConfig`?** The full config contains API keys
 (in `ModelConfig.api_key`) and non-serialisable hook closures. Storing it would
 require stripping secrets and skipping closures for little extra value.
 `LoopConfigSnapshot` is sufficient for cost attribution, replay (the caller
 reconstructs the config), and identifying parallel branches (e.g. "haiku vs. opus").
+
+> **Note:** `thinking_level` and `temperature` were previously stored on the
+> `Session` struct. They are now tracked per-loop in `LoopConfigSnapshot`,
+> which more accurately reflects that these settings can vary between loops
+> (e.g. across parallel evaluation branches with different configs).
 
 ### `events` field
 
@@ -487,8 +504,8 @@ operations.
 
 ### 5. `continuation_kind` classifies loop origin
 
-**Decision:** Reuse the existing `ContinuationKind` enum (`Default`, `Rerun`,
-`Branch`) to classify loop relationships, supplemented by the
+**Decision:** Reuse the existing `ContinuationKind` enum (`Initial`, `Default`, `Rerun`,
+`Branch`, `Compaction`) to classify loop relationships, supplemented by the
 `parent_loop_id`/`session_id` cross-session check.
 
 **Why:** `ContinuationKind` is already threaded through `AgentStart` — no new

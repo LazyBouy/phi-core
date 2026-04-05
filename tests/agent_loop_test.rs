@@ -3061,7 +3061,7 @@ async fn test_continuation_kind_in_agent_start() {
         assert_eq!(loop_id, "ses-test.mock.mock.2");
         assert_eq!(parent_loop_id.as_deref(), Some("ses-test.mock.mock.1"));
         assert!(
-            matches!(continuation_kind, Some(ContinuationKind::Rerun { .. })),
+            matches!(continuation_kind, ContinuationKind::Rerun { .. }),
             "continuation_kind should be Rerun"
         );
     }

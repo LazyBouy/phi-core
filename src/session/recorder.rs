@@ -165,6 +165,7 @@ impl SessionRecorder {
                 continuation_kind,
                 timestamp,
                 metadata,
+                config_snapshot,
             } => {
                 // Ensure the session exists.
                 let now = *timestamp;
@@ -179,9 +180,6 @@ impl SessionRecorder {
                         last_active_at: now,
                         formation: SessionFormation::FirstLoop { timestamp: now },
                         parent_spawn_ref: None,
-                        model_config: None,
-                        thinking_level: None,
-                        temperature: None,
                         scope: SessionScope::Ephemeral,
                         loops: Vec::new(),
                     });
@@ -221,7 +219,7 @@ impl SessionRecorder {
                     ended_at: None,
                     status: LoopStatus::Running,
                     rejection: None,
-                    config: None,
+                    config: config_snapshot.clone(),
                     messages: Vec::new(),
                     turns: Vec::new(),
                     usage: Usage::default(),

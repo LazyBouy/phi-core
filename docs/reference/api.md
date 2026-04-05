@@ -147,7 +147,7 @@ All return `Self` for chaining (unless noted as `Result`).
 | `async prompt_messages(messages) -> UnboundedReceiver<AgentEvent>` | Send messages as prompt |
 | `async prompt_with_sender(text, tx: UnboundedSender<AgentEvent>)` | Send a text prompt, streaming events to a caller-provided sender for real-time consumption |
 | `async prompt_messages_with_sender(messages, tx)` | Send messages, streaming events to a caller-provided sender |
-| `async continue_loop() -> UnboundedReceiver<AgentEvent>` | Resume from current context with `ContinuationKind::Default` |
+| `async continue_loop() -> UnboundedReceiver<AgentEvent>` | Resume from current context with `ContinuationKind::Default`. `continuation_kind` on `AgentStart` is `ContinuationKind` (not `Option`). |
 | `async continue_loop_with_sender(tx: UnboundedSender<AgentEvent>, kind: ContinuationKind)` | Resume from current context with an explicit continuation kind, streaming events to a caller-provided sender |
 
 ### State Access

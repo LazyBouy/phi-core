@@ -66,9 +66,13 @@ pub async fn agent_loop(
         session_id: context.session_id.clone().unwrap(), // safe: just set above
         loop_id: context.loop_id.clone().unwrap(),   // safe: just set above
         parent_loop_id: context.parent_loop_id.clone(), // None for origin calls
-        continuation_kind: context.continuation_kind.clone(), // None for origin calls
+        continuation_kind: context
+            .continuation_kind
+            .clone()
+            .unwrap_or(ContinuationKind::Initial),
         timestamp: chrono::Utc::now(),
         metadata: None,
+        config_snapshot: Some(build_config_snapshot(config, context)),
     })
     .ok();
 
@@ -226,9 +230,13 @@ pub async fn agent_loop_continue(
         session_id: context.session_id.clone().unwrap(), // safe: asserted above
         loop_id: context.loop_id.clone().unwrap(),   // safe: just set above
         parent_loop_id: context.parent_loop_id.clone(), // set by Agent wrapper
-        continuation_kind: context.continuation_kind.clone(), // set by Agent wrapper
+        continuation_kind: context
+            .continuation_kind
+            .clone()
+            .unwrap_or(ContinuationKind::Initial),
         timestamp: chrono::Utc::now(),
         metadata: None,
+        config_snapshot: Some(build_config_snapshot(config, context)),
     })
     .ok();
 
@@ -247,4 +255,38 @@ pub async fn agent_loop_continue(
         after_loop(&new_messages, &loop_usage);
     }
     new_messages
+}
+
+/// Build a `LoopConfigSnapshot` from the current `AgentLoopConfig` and `AgentContext`.
+fn build_config_snapshot(
+    config: &AgentLoopConfig,
+    context: &AgentContext,
+) -> crate::session::LoopConfigSnapshot {
+    // Extract config_id from the loop_id's config_segment if available.
+    // loop_id format: "{session_id}.{config_segment}.{N}"
+    let config_id = context
+        .loop_id
+        .as_deref()
+        .and_then(|lid| {
+            let session_id = context.session_id.as_deref().unwrap_or("");
+            lid.strip_prefix(session_id)
+                .and_then(|rest| rest.strip_prefix('.'))
+                .and_then(|rest| rest.rsplit_once('.'))
+                .map(|(seg, _n)| seg.to_string())
+        })
+        .or_else(|| config.config_id.clone());
+
+    crate::session::LoopConfigSnapshot {
+        model: config.model_config.id.clone(),
+        provider: config.model_config.provider.clone(),
+        config_id,
+        name: Some(config.model_config.name.clone()),
+        api: Some(config.model_config.api),
+        base_url: Some(config.model_config.base_url.clone()),
+        reasoning: Some(config.model_config.reasoning),
+        context_window: Some(config.model_config.context_window),
+        max_tokens: Some(config.model_config.max_tokens),
+        thinking_level: Some(config.thinking_level),
+        temperature: config.temperature,
+    }
 }

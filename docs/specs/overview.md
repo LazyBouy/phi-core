@@ -63,11 +63,11 @@
 ## Model/Provider Fallback Hierarchy
 
 ```
-Loop model  →  Session model  →  Agent default model
-  [EXISTS]        [EXISTS]          [EXISTS]
+Loop model (LoopConfigSnapshot)  →  Agent default model
+         [EXISTS]                       [EXISTS]
 ```
 
-If the Loop has no model specified, it falls back to the Session's model. If the Session has no model, both fall back to the Agent's default model. This enables mid-session provider switching.
+Each loop captures its model config in `LoopConfigSnapshot` at `AgentStart` time. Session-level model override has been removed; the fallback is directly to the Agent's default model.
 
 ---
 
@@ -117,9 +117,9 @@ These are places where the conceptual model differs from current code. They repr
 | Concept | Status | Notes |
 |---------|--------|-------|
 | ~~Agent Profile~~ | `[EXISTS]` ✓ | `AgentProfile` struct in `agents/profile.rs` with profile_id, name, description, system_prompt, etc. |
-| ~~thinking_level on Session~~ | `[EXISTS]` �� | `Session.thinking_level: Option<ThinkingLevel>` (G9). Resolved via `AgentProfile::resolve_thinking_level()`. |
-| ~~temperature on Session~~ | `[EXISTS]` ✓ | `Session.temperature: Option<f32>` (G9). Resolved via `AgentProfile::resolve_temperature()`. |
-| ~~Session model~~ | `[EXISTS]` ✓ | `Session.model_config: Option<ModelConfig>` (G4). Completes Loop → Session → Agent fallback chain. |
+| ~~thinking_level on Session~~ | Removed | Session-level `thinking_level` removed. Now captured per-loop in `LoopConfigSnapshot`. `AgentProfile::resolve_thinking_level()` removed. |
+| ~~temperature on Session~~ | Removed | Session-level `temperature` removed. Now captured per-loop in `LoopConfigSnapshot`. `AgentProfile::resolve_temperature()` removed. |
+| ~~Session model~~ | Removed | Session-level `model_config` removed. Model config is now captured per-loop in `LoopConfigSnapshot`. |
 | ~~Session scope~~ | `[EXISTS]` ✓ | `SessionScope::Ephemeral \| Persistent` (G7). |
 | ~~SystemPromptStrategy~~ | `[EXISTS]` ✓ | Trait + 3-entity model (strategy template → prompt instance → agent ref). `file:` and `{{...}}` resolution. |
 | ~~Compaction config~~ | `[EXISTS]` ✓ | Strategies consolidated into `CompactionConfig` (G5). |
@@ -140,9 +140,9 @@ Prioritized list of features that belong in phi-core (per [First Principles](../
 |----|---------|--------|
 | **G1** | Compaction callbacks (`before_compaction_start` / `after_compaction_end`) | `[EXISTS]` — On `AgentLoopConfig`. |
 | **G3** | Agent Profile struct | `[EXISTS]` — `AgentProfile` in `agents/profile.rs`. |
-| **G4** | Session model override | `[EXISTS]` — `Session.model_config: Option<ModelConfig>`. |
+| **G4** | Session model override | Removed — `Session.model_config` removed. Model config now captured per-loop in `LoopConfigSnapshot`. |
 | **G7** | Session scope | `[EXISTS]` — `SessionScope::Ephemeral \| Persistent`. |
-| **G9** | Session task attributes | `[EXISTS]` — `Session.thinking_level`, `Session.temperature`. |
+| **G9** | Session task attributes | Removed — `Session.thinking_level`, `Session.temperature`, and `Session.model_config` moved to per-loop `LoopConfigSnapshot`. `AgentProfile::resolve_thinking_level()` and `resolve_temperature()` removed. |
 
 ### Priority 2 — Medium Refactors
 

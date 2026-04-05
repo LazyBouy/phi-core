@@ -12,10 +12,10 @@ Loop [EXISTS — LoopRecord]
 ├── HEADER
 │   ├── loop_id [EXISTS] — "{session_id}.{config_segment}.{N}"
 │   ├── status [EXISTS] — Pending/Running/Completed/Rejected/Aborted
-│   ├── continuation_kind [EXISTS] — Default/Rerun/Branch/Compaction
+│   ├── continuation_kind [EXISTS] — Initial/Default/Rerun/Branch/Compaction
 │   ├── parent_loop_id [EXISTS]
 │   ├── timing [EXISTS] — started_at, ended_at
-│   ├── Model [EXISTS] — falls back: Loop → Session → Agent default
+│   ├── Model [EXISTS] — falls back: Loop → Agent default
 │   ├── config [EXISTS] — LoopConfigSnapshot
 │   ├── usage, compaction_block [EXISTS]
 │   └── Callbacks: before_loop / after_loop / on_error [EXISTS]
@@ -35,7 +35,7 @@ Loop [EXISTS — LoopRecord]
 | `session_id` | `String` | `[EXISTS]` | Session this loop belongs to. |
 | `agent_id` | `String` | `[EXISTS]` | Agent that ran this loop. |
 | `status` | `LoopStatus` | `[EXISTS]` | Lifecycle state: Pending, Running, Completed, Rejected, Aborted. See Status section below. |
-| `continuation_kind` | `Option<ContinuationKind>` | `[EXISTS]` | How this loop relates to its parent. `None` for origin loops or sub-agent loops. `Some(Default)` for regular continuations. `Some(Rerun)` for retries. `Some(Branch)` for branch explorations. `Some(Compaction)` for standalone compaction passes. |
+| `continuation_kind` | `ContinuationKind` | `[EXISTS]` | How this loop relates to its parent. `Initial` for origin loops (`agent_loop`). `Default` for regular continuations. `Rerun` for retries. `Branch` for branch explorations. `Compaction` for standalone compaction passes. |
 | `parent_loop_id` | `Option<String>` | `[EXISTS]` | The loop that directly preceded this one. `None` for origin loops. For sub-agent loops, points to the tool-call loop in a different session. |
 | `started_at` | `DateTime<Utc>` | `[EXISTS]` | Timestamp from `AgentStart`. |
 | `ended_at` | `Option<DateTime<Utc>>` | `[EXISTS]` | Timestamp from `AgentEnd`. `None` while running or pending. |
@@ -48,12 +48,20 @@ The model/provider identity is captured as a lightweight snapshot, not the full 
 
 | Field | Type | Status | Description |
 |-------|------|--------|-------------|
-| `config` | `Option<LoopConfigSnapshot>` | `[EXISTS]` | Populated from the first `Message::Assistant` seen. `None` if loop ended before any assistant message. |
+| `config` | `Option<LoopConfigSnapshot>` | `[EXISTS]` | Populated from `AgentStart.config_snapshot` or the first `Message::Assistant` seen. `None` if loop ended before any assistant message and no snapshot was provided. |
 | `config.model` | `String` | `[EXISTS]` | Model id string (e.g., `"claude-opus-4-6"`, `"gpt-4o"`). |
 | `config.provider` | `String` | `[EXISTS]` | Provider name (e.g., `"anthropic"`, `"openai"`). |
 | `config.config_id` | `Option<String>` | `[EXISTS]` | Stable config identity from `AgentLoopConfig.config_id`. Matches the `config_segment` in `loop_id`. |
+| `config.name` | `Option<String>` | `[EXISTS]` | Model display name. |
+| `config.api` | `Option<ApiProtocol>` | `[EXISTS]` | Which API protocol was used (e.g., `AnthropicMessages`, `OpenAiCompletions`). |
+| `config.base_url` | `Option<String>` | `[EXISTS]` | Provider base URL. |
+| `config.reasoning` | `Option<bool>` | `[EXISTS]` | Whether this model supports reasoning/thinking. |
+| `config.context_window` | `Option<u32>` | `[EXISTS]` | Context window size in tokens. |
+| `config.max_tokens` | `Option<u32>` | `[EXISTS]` | Max output tokens per response. |
+| `config.thinking_level` | `Option<ThinkingLevel>` | `[EXISTS]` | Reasoning depth level for this loop. Formerly a Session-level attribute; now per-loop. |
+| `config.temperature` | `Option<f32>` | `[EXISTS]` | Sampling temperature. Formerly a Session-level attribute; now per-loop. |
 
-**Model fallback hierarchy**: Loop (`AgentLoopConfig.model_config`) -> Session (`[EXISTS]` — `Session.model_config: Option<ModelConfig>`) -> Agent default (`BasicAgent.model_config`).
+**Model fallback hierarchy**: Loop (`AgentLoopConfig.model_config`) -> Agent default (`BasicAgent.model_config`).
 
 ### Usage `[EXISTS]`
 
@@ -173,11 +181,11 @@ Each `LoopEvent` has:
 
 | `parent_loop_id` | `continuation_kind` | Meaning |
 |---|---|---|
-| `None` | `None` | Fresh origin loop (`agent_loop`) |
-| `Some(p)`, same session | `Some(Default)` | Regular continuation |
-| `Some(p)`, same session | `Some(Rerun)` | Retry / error recovery |
-| `Some(p)`, same session | `Some(Branch)` | Branch exploration |
-| `Some(p)`, different session | `None` | Sub-agent loop (spawned by a tool) |
+| `None` | `Initial` | Fresh origin loop (`agent_loop`) |
+| `Some(p)`, same session | `Default` | Regular continuation |
+| `Some(p)`, same session | `Rerun` | Retry / error recovery |
+| `Some(p)`, same session | `Branch` | Branch exploration |
+| `Some(p)`, different session | `Initial` | Sub-agent loop (spawned by a tool) |
 
 ---
 
@@ -192,6 +200,6 @@ Each `LoopEvent` has:
 
 ## Conceptual Notes
 
-- **Session-level model override** is not yet implemented. The fallback chain is currently Loop -> Agent default. Adding a Session layer would make it Loop -> Session -> Agent default, matching the conceptual hierarchy.
+- **Model fallback** is Loop -> Agent default. Session no longer carries model/thinking/temperature fields; these are tracked per-loop in `LoopConfigSnapshot`.
 - **Turns as a struct** are materialized on `LoopRecord.turns` as `Vec<Turn>`. Built by `SessionRecorder` from `TurnStart`/`TurnEnd` event pairs. The flat `messages` field is kept independently for compaction and context building. Old sessions without `turns` deserialize with an empty vec.
-- **LoopConfigSnapshot** intentionally does not store the full `AgentLoopConfig` because it contains API keys and non-serializable hook closures. The snapshot captures just enough for cost attribution, replay identification, and parallel branch differentiation.
+- **LoopConfigSnapshot** intentionally does not store the full `AgentLoopConfig` because it contains API keys and non-serializable hook closures. The snapshot captures model identity plus key parameters (thinking_level, temperature, context_window, max_tokens, etc.) for cost attribution, replay identification, parallel branch differentiation, and per-loop config tracking.

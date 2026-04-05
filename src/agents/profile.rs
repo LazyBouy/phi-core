@@ -81,21 +81,3 @@ impl Default for AgentProfile {
         }
     }
 }
-
-impl AgentProfile {
-    /// Resolve thinking level with optional session override.
-    ///
-    /// Resolution: session_override > profile value > ThinkingLevel::Off
-    pub fn resolve_thinking_level(&self, session_override: Option<ThinkingLevel>) -> ThinkingLevel {
-        session_override
-            .or(self.thinking_level)
-            .unwrap_or(ThinkingLevel::Off)
-    }
-
-    /// Resolve temperature with optional session override.
-    ///
-    /// Resolution: session_override > profile value > None
-    pub fn resolve_temperature(&self, session_override: Option<f32>) -> Option<f32> {
-        session_override.or(self.temperature)
-    }
-}

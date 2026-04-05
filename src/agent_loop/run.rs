@@ -216,7 +216,10 @@ pub(super) async fn run_loop(
                                     session_id: context.session_id.clone().unwrap_or_default(),
                                     agent_id: context.agent_id.clone().unwrap_or_default(),
                                     parent_loop_id: context.parent_loop_id.clone(),
-                                    continuation_kind: context.continuation_kind.clone(),
+                                    continuation_kind: context
+                                        .continuation_kind
+                                        .clone()
+                                        .unwrap_or_default(),
                                     started_at: Utc::now(),
                                     ended_at: None,
                                     status: crate::session::LoopStatus::Running,

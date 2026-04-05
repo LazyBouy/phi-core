@@ -15,7 +15,7 @@ Event [EXISTS]
 │   ├── Tool: ToolExecutionStart/Update/End, ProgressMessage [EXISTS]
 │   └── Input: InputRejected [EXISTS]
 ├── StreamDelta [EXISTS] — Text/Thinking/ToolCallDelta
-├── ContinuationKind [EXISTS] — Default/Rerun/Branch/Compaction
+├── ContinuationKind [EXISTS] — Initial/Default/Rerun/Branch/Compaction
 └── TurnTrigger [EXISTS] — User/SubAgent/Continuation/Branch
 ```
 
@@ -29,7 +29,7 @@ Event [EXISTS]
 
 | Variant | Status | Fields | Description |
 |---------|--------|--------|-------------|
-| `AgentStart` | [EXISTS] | `agent_id`, `session_id`, `loop_id`, `parent_loop_id`, `continuation_kind`, `timestamp`, `metadata` | Fires once when `agent_loop()` is entered, before any LLM call |
+| `AgentStart` | [EXISTS] | `agent_id`, `session_id`, `loop_id`, `parent_loop_id`, `continuation_kind`, `config_snapshot`, `timestamp`, `metadata` | Fires once when `agent_loop()` is entered, before any LLM call. `continuation_kind: ContinuationKind` (non-optional). `config_snapshot: Option<LoopConfigSnapshot>` carries model/provider identity. |
 | `AgentEnd` | [EXISTS] | `loop_id`, `messages`, `usage`, `timestamp`, `rejection` | Fires once when `agent_loop()` exits; `rejection` is `Some` if an InputFilter blocked the input |
 
 ### Loop-scoped Events
@@ -78,7 +78,7 @@ Event [EXISTS]
 Events form a nested bracket structure:
 
 ```
-AgentStart                         -- session-scoped
+AgentStart (+ config_snapshot)     -- session-scoped
   TurnStart                        -- turn-scoped (0-based index)
     MessageStart                   -- message-scoped (assistant message)
       MessageUpdate (N times)      -- streaming deltas
@@ -126,6 +126,7 @@ How an `agent_loop_continue` call relates to the session's prior loops. Surfaced
 
 | Variant | Status | Description |
 |---------|--------|-------------|
+| `Initial` | [EXISTS] | First loop in a session via `agent_loop()`. The `#[default]` variant. |
 | `Default` | [EXISTS] | Unspecified continuation; preserves original semantics |
 | `Rerun { tag }` | [EXISTS] | Retry from equivalent state; tag is RFC 3339 UTC timestamp |
 | `Branch { tag }` | [EXISTS] | Exploration of a different path from a branching point |

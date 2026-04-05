@@ -214,16 +214,12 @@ pub struct ProviderInstance {
 
 // ── Session section ─────────────────────────────────────────────────────────
 
-/// Session-level overrides.
+/// Session-level configuration.
 #[derive(Debug, Deserialize, Default, Clone)]
 #[serde(default)]
 pub struct SessionSection {
     /// Session scope: "ephemeral" or "persistent".
     pub scope: Option<String>,
-    /// Session-level thinking level override.
-    pub thinking_level: Option<String>,
-    /// Session-level temperature override.
-    pub temperature: Option<f32>,
 }
 
 // ── Tools section ───────────────────────────────────────────────────────────

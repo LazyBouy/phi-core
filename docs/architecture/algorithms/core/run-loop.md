@@ -35,17 +35,21 @@ FUNCTION run_loop(
       IF cancel.is_cancelled THEN RETURN loop_usage END IF
 
       // Determine TurnTrigger for TurnStart event.
+      // NOTE: context.continuation_kind is Option<ContinuationKind> on AgentContext.
+      // None means Initial (first loop); Some(x) means a continuation.
+      // The pseudocode below abstracts this as direct ContinuationKind values.
+      //
       // Priority on the first turn:
       //   1. Branch continuation   → TurnTrigger::Branch   (explicit branch signal)
-      //   2. Any other continuation (Default/Rerun) → TurnTrigger::Continuation
+      //   2. Any other continuation (Default/Rerun/Compaction) → TurnTrigger::Continuation
       //      (the continuation itself is the follow-up, not a fresh user turn)
-      //   3. Origin call (continuation_kind == None) → config.first_turn_trigger
+      //   3. Initial (origin agent_loop call) → config.first_turn_trigger
       //      (User for Agent::prompt, SubAgent for sub-agent callers)
       // Subsequent turns always use TurnTrigger::Continuation.
       IF first_turn THEN
         turn_trigger ←
           IF context.continuation_kind == Branch(..) THEN TurnTrigger::Branch
-          ELSE IF context.continuation_kind is Some  THEN TurnTrigger::Continuation
+          ELSE IF context.continuation_kind != Initial   THEN TurnTrigger::Continuation
           ELSE config.first_turn_trigger
         first_turn ← false
       ELSE

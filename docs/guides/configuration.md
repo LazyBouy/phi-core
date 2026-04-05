@@ -619,13 +619,11 @@ Agent instances and sub-agents reference these via the ID protocol (e.g., `provi
 
 ## Session Configuration
 
-The `[session]` section controls session scope and provides session-level overrides.
+The `[session]` section controls session scope.
 
 ```toml
 [session]
 scope = "persistent"       # "ephemeral" (default) or "persistent"
-thinking_level = "high"    # Overrides the profile's thinking_level
-temperature = 0.1          # Overrides the profile's temperature
 ```
 
 ### Session Scope
@@ -637,15 +635,7 @@ temperature = 0.1          # Overrides the profile's temperature
 
 **Note:** Setting `scope = "persistent"` declares intent but does not automatically configure a storage backend. The caller must set up session persistence using the [session recorder](../concepts/sessions.md).
 
-### Override Resolution Order
-
-For thinking level and temperature, session overrides take precedence:
-
-```
-Session override > Profile value > Crate default
-```
-
-This is implemented via `AgentProfile::resolve_thinking_level()` and `AgentProfile::resolve_temperature()`.
+Thinking level and temperature are configured per-loop via `LoopConfigSnapshot` (captured on each `AgentStart` event) rather than at the session level. Set them on the agent profile or `AgentLoopConfig`.
 
 ---
 
@@ -1137,8 +1127,6 @@ Each entry in `[[provider.instances]]` accepts all fields from `[provider]` abov
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `scope` | string | `"ephemeral"` | `"ephemeral"` or `"persistent"` |
-| `thinking_level` | string | None | Session-level override |
-| `temperature` | float | None | Session-level override |
 
 ### `[tools]`
 

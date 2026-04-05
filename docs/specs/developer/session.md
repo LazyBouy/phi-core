@@ -15,8 +15,6 @@ Session [EXISTS]
 │   ├── scope [EXISTS] — Ephemeral / Persistent (SessionScope enum)
 │   ├── created_at, last_active_at [EXISTS]
 │   ├── parent_spawn_ref [EXISTS] — cross-session link
-│   ├── Model override [EXISTS]
-│   ├── thinking_level, temperature [EXISTS on Session]
 │   ├── Task Name, Task Status [CONCEPTUAL]
 │   └── Callbacks: before_task / after_task [EXISTS]
 ├── LINE ITEMS: Loops [EXISTS]
@@ -37,9 +35,6 @@ Session [EXISTS]
 | `created_at` | `DateTime<Utc>` | `[EXISTS]` | Timestamp of the first `AgentStart` event for this session. |
 | `last_active_at` | `DateTime<Utc>` | `[EXISTS]` | Updated each time a new loop opens (on `AgentStart`). Reflects when the last loop started, not when it last had activity. |
 | `parent_spawn_ref` | `Option<SpawnRef>` | `[EXISTS]` | Cross-session link when this session was spawned as a sub-agent. Points back to parent session, loop, tool call. Inverse of `LoopRecord.child_loop_refs`. |
-| Model override | `ModelConfig` | `[EXISTS]` | Session-level model that overrides the Agent default. Would sit between Agent default and Loop-level model in the fallback hierarchy. |
-| `thinking_level` | `Option<ThinkingLevel>` | `[EXISTS]` | Session-level reasoning depth override (G9). Takes precedence over agent profile's thinking_level. Resolved via `AgentProfile::resolve_thinking_level(session_override)`. |
-| `temperature` | `Option<f32>` | `[EXISTS]` | Session-level temperature override (G9). Takes precedence over agent profile's temperature. Resolved via `AgentProfile::resolve_temperature(session_override)`. |
 | Task Name | `String` | `[CONCEPTUAL]` | Human-readable label for the task this session represents. |
 | Task Status | enum | `[CONCEPTUAL]` | Status of the task (e.g., Pending, Running, Completed, Failed). Derived from loop statuses but would be a first-class field. |
 
@@ -119,7 +114,6 @@ Methods on the `Session` struct for querying and aggregating.
 ## Conceptual Notes
 
 - **Session scope** (Ephemeral vs Persistent) does not exist in code. All sessions are currently ephemeral by default. Adding scope would gate whether Introspection is required.
-- **Model override at Session level** is not implemented. The fallback hierarchy is currently Loop -> Agent default. Adding Session-level override would make it Loop -> Session -> Agent default.
-- **thinking_level and temperature** live on `BasicAgent` today. They are conceptually per-task (Session) attributes since different tasks may need different reasoning depths.
+- **Model/thinking/temperature per-loop** -- These settings are no longer on `Session`. They are tracked per-loop via `LoopConfigSnapshot` on each `LoopRecord` (see [loop.md](loop.md)). The fallback hierarchy is Loop -> Agent default.
 - **Task Name and Task Status** would give sessions first-class task identity, enabling task dashboards and workflow tracking.
 - **before_task / after_task callbacks** now exist on `SessionRecorderConfig`. `before_task` fires on the first `AgentStart` with a new `session_id`; `after_task` fires on `flush()`. This mirrors the existing before_loop/after_loop and before_turn/after_turn callback pattern at the Session level.

@@ -671,7 +671,7 @@ Entity: LoopRecord
   ended_at:            Option<DateTime<Utc>>
   status:              LoopStatus          [Pending | Running | Completed | Rejected | Aborted]
   rejection:           Option<String>
-  config:              Option<LoopConfigSnapshot>  [model + provider + config_id]
+  config:              Option<LoopConfigSnapshot>  [model, provider, config_id + name, api, base_url, reasoning, context_window, max_tokens, thinking_level, temperature]
   messages:            Vec<AgentMessage>   [from AgentEnd.messages — authoritative]
   usage:               Usage
   metadata:            Option<JSON>

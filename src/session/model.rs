@@ -1,7 +1,17 @@
-use crate::provider::ModelConfig;
 use crate::types::*;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// Deserialize a value that may be `null` or missing as `T::default()`.
+/// Combines `#[serde(default)]` (handles missing) with null-as-default (handles explicit null).
+fn deserialize_null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    let opt = Option::deserialize(deserializer)?;
+    Ok(opt.unwrap_or_default())
+}
 
 // ---------------------------------------------------------------------------
 // SessionFormation
@@ -93,9 +103,14 @@ pub enum LoopStatus {
 ///   analysis).
 /// - Support replay by telling the caller which config to reconstruct.
 /// - Distinguish branches in evaluational parallelism (e.g. "haiku vs. opus").
+/// - Track per-loop config (thinking_level, temperature) for debugging.
 ///
-/// Populated from the first `Message::Assistant` seen in the loop
-/// (`TurnEnd.message` or `AgentEnd.messages`).
+/// Populated from `AgentStart.config_snapshot` (preferred) or extracted from
+/// the first `Message::Assistant` seen in the loop (fallback for older sessions).
+///
+/// New fields (added after the initial struct) are `Option` with
+/// `#[serde(default, skip_serializing_if = "Option::is_none")]` for backward
+/// compatibility with existing serialized sessions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoopConfigSnapshot {
     /// The model id string (e.g. `"claude-opus-4-6"`, `"gpt-4o"`).
@@ -108,6 +123,32 @@ pub struct LoopConfigSnapshot {
     /// `{session_id}.{config_segment}.{N}`. Useful to correlate a `LoopRecord`
     /// back to its named configuration.
     pub config_id: Option<String>,
+
+    // ── Extended fields (all Optional for backward compat) ─────────────────
+    /// Human-friendly model name (e.g. `"Claude Sonnet 4"`, `"GPT-4o"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Which API protocol was used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api: Option<crate::provider::ApiProtocol>,
+    /// Base URL for API requests (useful for debugging which endpoint was hit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Whether this model supports reasoning/thinking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<bool>,
+    /// Context window size in tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
+    /// Default max output tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    /// Thinking/reasoning level used for this loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<crate::types::ThinkingLevel>,
+    /// Sampling temperature used for this loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -274,11 +315,11 @@ impl Turn {
 ///
 /// | `parent_loop_id` | `continuation_kind` | Meaning |
 /// |---|---|---|
-/// | `None` | `None` | Fresh origin loop (`agent_loop`) |
-/// | `Some(p)`, same session | `Some(Default)` | Regular continuation |
-/// | `Some(p)`, same session | `Some(Rerun)` | Retry / error recovery |
-/// | `Some(p)`, same session | `Some(Branch)` | Branch exploration |
-/// | `Some(p)`, different session | `None` | Sub-agent loop (spawned by a tool) |
+/// | `None` | `Initial` | Fresh origin loop (`agent_loop`) |
+/// | `Some(p)`, same session | `Default` | Regular continuation |
+/// | `Some(p)`, same session | `Rerun` | Retry / error recovery |
+/// | `Some(p)`, same session | `Branch` | Branch exploration |
+/// | `Some(p)`, different session | `Initial` | Sub-agent loop (spawned by a tool) |
 ///
 /// ## Tree navigation
 ///
@@ -306,11 +347,12 @@ pub struct LoopRecord {
 
     /// How this loop relates to its parent.
     ///
-    /// - `None` if this is an origin loop or a sub-agent loop.
-    /// - `Some(Default)` for regular same-session continuations.
-    /// - `Some(Rerun)` for retries / error recovery.
-    /// - `Some(Branch {..})` for branch explorations.
-    pub continuation_kind: Option<ContinuationKind>,
+    /// - `Initial` for origin loops (`agent_loop`) and sub-agent loops.
+    /// - `Default` for regular same-session continuations.
+    /// - `Rerun` for retries / error recovery.
+    /// - `Branch {..}` for branch explorations.
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub continuation_kind: ContinuationKind,
 
     // ── Timing ────────────────────────────────────────────────────────────
     /// Timestamp from `AgentStart`.
@@ -465,23 +507,6 @@ pub struct Session {
     /// `AgentStart` carries a `parent_loop_id` that belongs to a different
     /// `session_id`.
     pub parent_spawn_ref: Option<SpawnRef>,
-
-    // ── Session-level config overrides (G4, G7, G9) ────────────────────────
-    /// Session-level model config override (G4).
-    /// When set, this model is used for all loops in this session instead of the
-    /// agent's default.
-    #[serde(default)]
-    pub model_config: Option<ModelConfig>,
-
-    /// Session-level thinking level override (G9).
-    /// Takes precedence over the agent profile's thinking_level.
-    #[serde(default)]
-    pub thinking_level: Option<ThinkingLevel>,
-
-    /// Session-level temperature override (G9).
-    /// Takes precedence over the agent profile's temperature.
-    #[serde(default)]
-    pub temperature: Option<f32>,
 
     /// Session scope — ephemeral (in-memory only) or persistent (written to store) (G7).
     #[serde(default)]
