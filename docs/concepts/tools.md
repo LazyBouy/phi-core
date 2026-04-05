@@ -1,3 +1,5 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
+
 # Tools
 
 ## The AgentTool Trait
@@ -46,8 +48,8 @@ pub struct ToolContext {
 | `tool_call_id` | Unique ID for this tool call (for correlating events) |
 | `tool_name` | Name of the tool being executed |
 | `cancel` | Cancellation token — check `ctx.cancel.is_cancelled()` in long-running tools |
-| `on_update` | Callback for streaming partial `ToolResult` updates to the UI (emits `ToolExecutionUpdate`) |
-| `on_progress` | Callback for emitting user-facing progress messages (emits `ProgressMessage`) |
+| `on_update` | Callback for streaming partial `ToolResult` updates to the UI — carries structured data (`ToolResult` with `content` + `details`), emits `AgentEvent::ToolExecutionUpdate`. Use when you need progress percentages, partial results, or structured metadata. |
+| `on_progress` | Callback for lightweight text-only status messages — takes a single `String`, emits `AgentEvent::ProgressMessage`. Use for simple human-readable status lines (e.g., "Compiling...", "Almost done..."). |
 
 `ToolContext` implements `Clone` and `Debug`.
 
@@ -426,11 +428,22 @@ The LLM itself doesn't see updates — it works with final results only. This is
 
 When the LLM returns multiple tool calls in a single response (e.g., "read file A, read file B, run bash C"), `ToolExecutionStrategy` controls how they run:
 
+The enum is defined with `#[derive(Default)]` and `Parallel` carries the `#[default]` attribute:
+
+```rust
+pub enum ToolExecutionStrategy {
+    Sequential,
+    #[default]
+    Parallel,
+    Batched { size: usize },
+}
+```
+
 | Strategy | Behavior |
 |----------|----------|
 | `Sequential` | One at a time. Steering checked between each tool. Use for debugging or tools with shared mutable state. |
-| **`Parallel`** (default) | All tool calls run concurrently via `futures::join_all`. Steering checked after all complete. Best latency for independent tools. |
-| `Batched { size }` | Run in groups of N. Steering checked between batches. Balances speed with human-in-the-loop control. |
+| **`Parallel`** (`#[default]`) | All tool calls run concurrently via `futures::join_all`. Steering checked after all complete. Best latency for independent tools. |
+| `Batched { size: usize }` | Run in groups of `size`. Steering checked between batches. Balances speed with human-in-the-loop control. |
 
 ### Configuration
 

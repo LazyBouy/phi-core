@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # Messages & Events
 
 ## Message Types
@@ -48,6 +49,13 @@ pub enum AgentMessage {
     Extension(ExtensionMessage),
 }
 
+pub struct LlmMessage {
+    pub message: Message,
+    /// Which turn produced this message. `None` for messages that predate
+    /// turn tracking or are created outside the agent loop.
+    pub turn_id: Option<TurnId>,
+}
+
 pub struct ExtensionMessage {
     pub role: String,
     pub kind: String,
@@ -62,7 +70,7 @@ let ext = ExtensionMessage::new("status_update", serde_json::json!({"status": "r
 let msg = AgentMessage::Extension(ext);
 ```
 
-The `kind` field categorizes the extension (e.g., `"status_update"`, `"ui_event"`, `"notification"`). Use `as_llm()` to extract the `Message` if it's an LLM message. LlmMessage carries TurnId { loop_id, turn_index } for compaction tracking. The default `convert_to_llm` function filters out `Extension` messages before sending to the provider.
+The `kind` field categorizes the extension (e.g., `"status_update"`, `"ui_event"`, `"notification"`). Use `as_llm()` to extract the `Message` if it's an LLM message. `LlmMessage` wraps a `Message` with an optional `TurnId { loop_id, turn_index }` for compaction tracking — this allows the compaction system to identify which turn produced each message. The default `convert_to_llm` function filters out `Extension` messages before sending to the provider.
 
 All core message types implement `Serialize`, `Deserialize`, `Clone`, and `PartialEq`, enabling state persistence and test assertions.
 
@@ -81,15 +89,23 @@ pub enum Content {
 
 An assistant message can contain multiple content blocks — e.g., thinking + text + tool calls.
 
+The `signature` field on `Content::Thinking` is a cryptographic integrity token issued by the LLM provider (Anthropic calls it `signature`, OpenAI calls it `encrypted_content`, Gemini calls it `thought_signature`). It must be echoed back **unmodified** in multi-turn conversations — tampering or omitting it causes the provider to reject the request. It is `None` on providers that don't support extended thinking or on the first-turn generation.
+
 ## StopReason
 
 ```rust
 pub enum StopReason {
-    Stop,       // Natural completion
-    Length,     // Hit max tokens
-    ToolUse,    // Wants to call tools
-    Error,      // Provider error
-    Aborted,    // Cancelled by user
+    Stop,              // Natural completion
+    Length,            // Hit max tokens
+    ToolUse,           // Wants to call tools
+    Error,             // Provider error
+    Aborted,           // Cancelled by user
+    MaxTurns,          // Reached maximum allowed turns
+    UserStop,          // Explicit user stop command
+    Handoff,           // Handing off to a human operator
+    GuardRail,         // Stopped by content moderation / safety filter
+    ContextCompacted,  // Context was compacted to fit within limits
+    Paused,            // Paused waiting for external input
 }
 ```
 

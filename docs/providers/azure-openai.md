@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # Azure OpenAI Provider
 
 Handles the OpenAI Responses API format with Azure-specific authentication and URL patterns.

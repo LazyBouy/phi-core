@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # OpenAPI Tool Adapter
 
 Auto-generate `AgentTool` implementations from OpenAPI 3.0 specs. Point an agent at any API spec and it instantly gets callable tools for every operation.

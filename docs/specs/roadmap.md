@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # Implementation Roadmap
 
 > Generated from: `../reference/glossary.md`, `../specs/architecture.md`, `../architecture/algorithms.md`
@@ -1040,7 +1041,7 @@ meet or exceed documented expectations.
   - Depends on: REQ-067, REQ-082
   - Definition of Done: The chosen policy is documented; behavior is consistent regardless of where in the loop cancellation is detected.
 
-- [ ] **REQ-162:** [AMBIGUOUS] Document heuristic token counting limitations: note that `estimate_tokens` is a 4-char heuristic; define a `TokenCounter` abstraction point that allows a caller to inject a precise counter (e.g., tiktoken integration) without changing the compaction logic. *(Source: [OV])*
+- [x] **REQ-162:** `TokenCounter` trait in `context/token.rs` with `HeuristicTokenCounter` (chars/4) as default. Pluggable via `ContextConfig.token_counter`. Threaded through all hot-path call sites. *(Source: [OV])*
   - Depends on: REQ-054
   - Definition of Done: A `TokenCounter` trait or injection point exists; the default implementation uses the 4-char heuristic; a precise implementation can be substituted via configuration.
 

@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # Context Pruning
 
 Context pruning is a model-directed mechanism for surgically removing irrelevant content from the working context during a run. Unlike compaction (which is threshold-triggered and bulk), pruning gives the model fine-grained control over what stays in the context window.

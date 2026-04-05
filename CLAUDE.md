@@ -102,3 +102,12 @@ let agent = BasicAgent::new(ModelConfig::anthropic("mock", "mock", "test"))
 - Retry logic (`provider/retry.rs`) uses exponential backoff with ±20% jitter; only retries `RateLimited` and `Network` errors
 - The `context/skills.rs` module loads `<name>/SKILL.md` files with YAML frontmatter per the AgentSkills standard
 - Lifecycle callbacks have three tiers: turn-level (`BeforeTurnFn`/`AfterTurnFn`/`OnErrorFn`), loop-level (`BeforeLoopFn`/`AfterLoopFn` — fire before `AgentStart` / after `AgentEnd`), and tool-level (`BeforeToolExecutionFn`/`AfterToolExecutionFn` — fire around each `ToolExecutionStart`/`ToolExecutionEnd`); `BeforeToolExecutionUpdateFn`/`AfterToolExecutionUpdateFn` additionally wrap each `ToolExecutionUpdate` event. Returning `false` from any `Before*` hook short-circuits the corresponding action. Hook ordering is strictly enforced — hooks fire before their paired event is emitted.
+
+## Documentation Alignment
+
+Documentation in `docs/` must accurately reflect the current codebase at all times. Code is always the source of truth.
+
+- **Update docs with code changes**: When modifying code, update all affected documentation in the same commit. This includes status tags, API signatures, config examples, and pseudocode.
+- **Status tags**: `[EXISTS]` = implemented in code, `[PLANNED]` = designed but not yet implemented, `[CONCEPTUAL]` = idea stage. Review and update these tags whenever the referenced code changes.
+- **Verification header**: Every doc file carries `<!-- Last verified: YYYY-MM-DD by Claude Code -->` at the top, updated on each review pass.
+- **No forward references**: Do not document features as existing unless the code is merged. Use `[PLANNED]` or `[CONCEPTUAL]` for future work.

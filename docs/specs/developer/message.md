@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # Message
 
 The message entities form the communication substrate of the entire system. Messages flow through Agent, Session, Loop, and Turn. The type hierarchy separates atomic content blocks, conversation-level messages, agent-level routing envelopes, and token usage tracking.

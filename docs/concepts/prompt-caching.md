@@ -1,3 +1,5 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
+
 # Prompt Caching
 
 phi-core automatically optimizes API costs through prompt caching. For providers that support it, stable content (system prompts, tool definitions, conversation history) is cached between turns, giving you up to **90% savings** on input tokens.
@@ -14,7 +16,7 @@ In a multi-turn agent loop, each request sends the full context: system prompt +
 | **OpenAI** | Automatic (>1024 tokens) | 50% on hits | None needed |
 | **Google Gemini** | Implicit (automatic) | Varies | None needed |
 | **Azure OpenAI** | Automatic (same as OpenAI) | 50% on hits | None needed |
-| **Amazon Bedrock** | Automatic (where supported) | Varies | None needed |
+| **Amazon Bedrock** | Not yet implemented | N/A | `CacheConfig` accepted but no breakpoints placed |
 
 ### What Gets Cached (Anthropic)
 
@@ -32,11 +34,26 @@ Caching is **enabled by default** with automatic breakpoint placement. No config
 
 ### Disable Caching
 
+Use `CacheStrategy::Disabled` to turn off all cache breakpoint placement while keeping the config structure intact. Alternatively, set `enabled: false` on the `CacheConfig` master switch.
+
 ```rust
 use phi_core::{BasicAgent, CacheConfig, CacheStrategy};
 use phi_core::provider::ModelConfig;
 
 let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
+
+// Option 1: CacheStrategy::Disabled (preferred — explicit intent)
+let agent = BasicAgent::new(ModelConfig::anthropic(
+    "claude-sonnet-4-20250514",
+    "Claude Sonnet 4",
+    &api_key,
+))
+.with_cache_config(CacheConfig {
+    strategy: CacheStrategy::Disabled,
+    ..Default::default()
+});
+
+// Option 2: Master switch (equivalent effect)
 let agent = BasicAgent::new(ModelConfig::anthropic(
     "claude-sonnet-4-20250514",
     "Claude Sonnet 4",
@@ -97,5 +114,5 @@ That's an **84% cost reduction** with zero configuration.
 
 1. **Keep system prompts stable** — changing the system prompt between turns invalidates the cache
 2. **Don't shuffle tools** — tool order matters for cache prefix matching
-3. **Let it work automatically** — the default `CacheStrategy::Auto` is optimal for most use cases
+3. **Let it work automatically** — the default `CacheStrategy::Auto` is optimal for most use cases. The three strategies are `Auto` (recommended), `Disabled` (no breakpoints), and `Manual` (fine-grained control)
 4. **Monitor `cache_hit_rate()`** — if it's consistently low, check if your system prompt or tools are changing unexpectedly

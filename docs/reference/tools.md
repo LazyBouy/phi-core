@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # Built-in Tools
 
 phi-core ships with six coding-oriented tools. Get them all with `default_tools()`:

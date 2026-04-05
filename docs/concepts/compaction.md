@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # Context Compaction
 
 Compaction manages context window pressure by creating non-destructive overlays on session history. Nothing is deleted or replaced — original messages remain authoritative in `LoopRecord.messages`.

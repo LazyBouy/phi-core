@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # Event Lifecycle
 
 `AgentEvent` is the runtime's event vocabulary -- it captures every significant happening in the agent loop that a UI, logger, or analysis consumer might react to. Events are emitted through an `mpsc::UnboundedSender<AgentEvent>` channel during execution and consumed by `SessionRecorder` (or any external subscriber) on the receiving end.
@@ -184,7 +185,7 @@ The `SessionRecorder` consumes events and builds a structured tree:
 
 ## Conceptual Notes
 
-- **before_task / after_task callbacks** [CONCEPTUAL] -- `AgentStart` and `AgentEnd` are session-scoped and should trigger `before_task` / `after_task` callbacks. Currently these callbacks do not exist; `before_loop` / `after_loop` serve a similar role at the loop level but are not semantically session-scoped.
-- **Session Scope** [CONCEPTUAL] -- The plan envisions sessions having an explicit scope (Ephemeral vs Persistent). Persistent sessions would mandate Introspection. This scope would influence which events trigger persistence.
+- **before_task / after_task callbacks** [EXISTS] -- Session-level callbacks on `SessionRecorderConfig` (G2). `BeforeTaskFn` fires on first `AgentStart` with new session_id; `AfterTaskFn` fires on `flush()`. These are semantically session-scoped, unlike `before_loop`/`after_loop` which fire per-loop.
+- **Session Scope** [EXISTS] -- `SessionScope` enum (`Ephemeral` / `Persistent`) on the `Session` struct (G7). Set via config `[session] scope = "persistent"`.
 - **Error Events** -- The current design uses `StopReason::Error` and the `on_error` callback for LLM errors. A dedicated `AgentEvent::Error` variant for more granular error reporting (tool failures, network issues, etc.) is noted as a potential improvement in the source comments.
 - **Event Replay** -- `LoopRecord.events` stores the full event stream (as `Vec<LoopEvent>`), enabling replay or analysis of past runs. `SessionRecorderConfig.include_streaming_events` controls whether the high-volume `MessageUpdate` deltas are included.

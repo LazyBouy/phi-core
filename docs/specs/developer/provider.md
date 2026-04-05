@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # Provider System
 
 The provider system abstracts all LLM backends behind a single `StreamProvider` trait. The caller constructs a `ModelConfig` (the model's "identity card"), and the `ProviderRegistry` dispatches to the correct concrete provider at runtime. This design allows seamless switching between Anthropic, OpenAI, Google, Bedrock, Azure, and 15+ OpenAI-compatible providers without changing application code.
@@ -12,7 +13,7 @@ Provider [EXISTS]
 ├── StreamProvider trait [EXISTS] — stream() method
 ├── ProviderRegistry [EXISTS] — dispatch by ApiProtocol
 ├── OpenAiCompat [EXISTS] — quirk flags for 15+ providers
-└── ContextTranslationStrategy [CONCEPTUAL] — mid-session provider switching
+└── ContextTranslationStrategy [EXISTS] — cross-provider content translation (G8, src/provider/context_translation.rs)
 ```
 
 ---
@@ -180,6 +181,6 @@ Error taxonomy for provider failures. The agent loop uses this for retry/recover
 
 ## Conceptual Notes
 
-- **ContextTranslationStrategy** [CONCEPTUAL] -- Enables seamless mid-session provider switching (e.g. OpenAI to Anthropic). Would map context from one provider's message format to another, with per-provider-pair mapping config. Currently, switching providers mid-session requires the caller to manage format differences manually.
-- **Model fallback chain** -- Model resolution follows: Loop (`AgentLoopConfig.model_config`) -> Session model override [CONCEPTUAL] -> Agent default (`BasicAgent.model_config`). Currently the Session-level override does not exist as a struct field.
+- **ContextTranslationStrategy** [EXISTS] -- Trait in `src/provider/context_translation.rs` (G8). `DefaultContextTranslation` handles cross-provider content translation: Anthropic keeps Thinking blocks, OpenAI converts to Text with `[Reasoning]` prefix, Google/Bedrock drops Thinking. Set on `AgentLoopConfig.context_translation`.
+- **Model fallback chain** -- Model resolution follows: Loop (`AgentLoopConfig.model_config`) -> Session model override [EXISTS] (`Session.model_config: Option<ModelConfig>`) -> Agent default (`BasicAgent.model_config`).
 - **provider_override** -- `AgentLoopConfig.provider_override: Option<Arc<dyn StreamProvider>>` bypasses `ProviderRegistry` dispatch entirely. Used for testing with `MockProvider` or injecting custom provider implementations.

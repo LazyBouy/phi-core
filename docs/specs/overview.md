@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # Developer Conceptual Hierarchy
 
 > A developer-facing map of every concept in phi-core, centered on the Agent entity.
@@ -18,7 +19,7 @@
            │              │           │           │              │
     ┌──────▼──────┐ ┌─────▼─────┐ ┌──▼───┐ ┌────▼─────┐ ┌──────▼──────┐
     │   Profile   │ │ Sessions  │ │Skills│ │   MCP    │ │Introspection│
-    │    [C]      │ │   [E]     │ │ [E]  │ │   [E]    │ │    [C]      │
+    │    [E]      │ │   [E]     │ │ [E]  │ │   [E]    │ │    [C]      │
     │ personality │ │  (Tasks)  │ │      │ │connectors│ │   memory    │
     └──────┬──────┘ └─────┬─────┘ └──────┘ └──────────┘ └──────┬──────┘
            │              │                                     │
@@ -63,7 +64,7 @@
 
 ```
 Loop model  →  Session model  →  Agent default model
-  [EXISTS]       [CONCEPTUAL]       [EXISTS]
+  [EXISTS]        [EXISTS]          [EXISTS]
 ```
 
 If the Loop has no model specified, it falls back to the Session's model. If the Session has no model, both fall back to the Agent's default model. This enables mid-session provider switching.
@@ -75,7 +76,7 @@ If the Loop has no model specified, it falls back to the Session's model. If the
 | Entity | Code Location | Status | Deep Dive |
 |--------|--------------|--------|-----------|
 | Agent | `agents/basic_agent.rs` | `[EXISTS]` | [agent.md](agent.md) |
-| Agent Profile | scattered fields | `[CONCEPTUAL]` as struct | [agent.md](agent.md) |
+| Agent Profile | `agents/profile.rs` | `[EXISTS]` | [agent.md](agent.md) |
 | Session | `session/model.rs` | `[EXISTS]` | [session.md](session.md) |
 | Loop (LoopRecord) | `session/model.rs` | `[EXISTS]` | [loop.md](loop.md) |
 | Turn | `session/model.rs` + event-pair | `[EXISTS]` events; `[EXISTS]` struct | [turn.md](turn.md) |
@@ -113,19 +114,19 @@ Callbacks live on the entity they observe:
 
 These are places where the conceptual model differs from current code. They represent future refactoring opportunities:
 
-| Concept | Current Code | Conceptual Target |
-|---------|-------------|-------------------|
-| Agent Profile | Scattered fields on BasicAgent | Dedicated `AgentProfile` struct with `profile_id` |
-| thinking_level | On BasicAgent and Session [EXISTS] | Should be Session-level (task attribute) |
-| temperature | On BasicAgent and Session [EXISTS] | Should be Session-level (task attribute) |
-| Session model | model_config exists on Session [EXISTS] | Session should carry model override |
-| Session scope | SessionScope enum [EXISTS] | Ephemeral vs Persistent (Introspection mandatory for Persistent) |
-| SystemPromptStrategy | Trait exists with `compose(context) -> String` | ~~Dynamic trait with layered composition~~ Trait exists; full 5-layer impl is future work |
-| Compaction config | Now consolidated in `CompactionConfig` (strategies are fields on it) | ~~Single CompactionConfig location~~ Done |
-| before_task / after_task | Now on `SessionRecorderConfig` | ~~Session-level callbacks~~ Done |
-| ContextTranslationStrategy | `[EXISTS]` — `ContextTranslationStrategy` trait + `DefaultContextTranslation` in `provider/context_translation.rs` | Read-only translation with per-provider rules (Thinking → Text for OpenAI, dropped for Google/Bedrock) |
-| Introspection | Not in code | Memory extraction with 3 categories (episodic, semantic, procedural) |
-| Permissions | Not in code | Include/exclude rules on Agent |
+| Concept | Status | Notes |
+|---------|--------|-------|
+| ~~Agent Profile~~ | `[EXISTS]` ✓ | `AgentProfile` struct in `agents/profile.rs` with profile_id, name, description, system_prompt, etc. |
+| ~~thinking_level on Session~~ | `[EXISTS]` �� | `Session.thinking_level: Option<ThinkingLevel>` (G9). Resolved via `AgentProfile::resolve_thinking_level()`. |
+| ~~temperature on Session~~ | `[EXISTS]` ✓ | `Session.temperature: Option<f32>` (G9). Resolved via `AgentProfile::resolve_temperature()`. |
+| ~~Session model~~ | `[EXISTS]` ✓ | `Session.model_config: Option<ModelConfig>` (G4). Completes Loop → Session → Agent fallback chain. |
+| ~~Session scope~~ | `[EXISTS]` ✓ | `SessionScope::Ephemeral \| Persistent` (G7). |
+| ~~SystemPromptStrategy~~ | `[EXISTS]` ✓ | Trait + 3-entity model (strategy template → prompt instance → agent ref). `file:` and `{{...}}` resolution. |
+| ~~Compaction config~~ | `[EXISTS]` ✓ | Strategies consolidated into `CompactionConfig` (G5). |
+| ~~before_task / after_task~~ | `[EXISTS]` ✓ | On `SessionRecorderConfig` (G2). |
+| ~~ContextTranslationStrategy~~ | `[EXISTS]` ✓ | Trait + `DefaultContextTranslation` in `provider/context_translation.rs` (G8). |
+| Introspection | `[CONCEPTUAL]` | Memory extraction with 3 categories (episodic, semantic, procedural). Not in code. |
+| Permissions | `[CONCEPTUAL]` | Include/exclude rules on Agent. Not in code. |
 
 ---
 
@@ -133,15 +134,15 @@ These are places where the conceptual model differs from current code. They repr
 
 Prioritized list of features that belong in phi-core (per [First Principles](../../architecture/overview.md#first-principles-core-vs-external)) but are not yet implemented. Each gap is derived from `[CONCEPTUAL]` items in the entity specs.
 
-### Priority 1 — Small, High-Value
+### Priority 1 — Small, High-Value — ALL IMPLEMENTED ✓
 
-| ID | Feature | Why Core | Effort | Spec Ref |
-|----|---------|----------|--------|----------|
-| **G1** | Compaction callbacks (`before_compaction_start` / `after_compaction_end`) | Compaction runs deep inside `run_loop`. Only way for consumers to index discarded content or verify compaction quality. | ~30 LOC | `config.md`, callback ownership table above |
-| **G4** | Session model override (`model: Option<ModelConfig>` on Session) | Completes model fallback chain: Loop → Session → Agent. Without it, per-task model selection requires separate `AgentLoopConfig` per loop. | ~10 LOC | `session.md`, hierarchy above |
-| **G3** | Agent Profile struct | Agent identity (name, description, default model, system prompt) scattered across `BasicAgent` fields. Dedicated struct enables profile sharing, serialization, UI display. | ~50 LOC | `agent.md`, misalignment table above |
-| **G7** | Session scope (`SessionScope::Ephemeral \| Persistent`) | Determines session retention and whether introspection is mandatory. Foundational metadata for session lifecycle. | ~20 LOC | `session.md` |
-| **G9** | Session task attributes (`thinking_level`, `temperature` on Session) | Currently on `BasicAgent` (global). Different tasks need different reasoning depths. Resolution: Loop → Session → Agent default. | ~30 LOC | `session.md`, `agent.md`, misalignment table above |
+| ID | Feature | Status |
+|----|---------|--------|
+| **G1** | Compaction callbacks (`before_compaction_start` / `after_compaction_end`) | `[EXISTS]` — On `AgentLoopConfig`. |
+| **G3** | Agent Profile struct | `[EXISTS]` — `AgentProfile` in `agents/profile.rs`. |
+| **G4** | Session model override | `[EXISTS]` — `Session.model_config: Option<ModelConfig>`. |
+| **G7** | Session scope | `[EXISTS]` — `SessionScope::Ephemeral \| Persistent`. |
+| **G9** | Session task attributes | `[EXISTS]` — `Session.thinking_level`, `Session.temperature`. |
 
 ### Priority 2 — Medium Refactors
 

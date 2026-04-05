@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # Configuration
 
 ## AgentLoopConfig
@@ -113,6 +114,7 @@ pub struct ExecutionLimits {
     pub max_turns: usize,              // Default: 50
     pub max_total_tokens: usize,       // Default: 1,000,000
     pub max_duration: Duration,        // Default: 600s
+    pub max_cost: Option<f64>,         // Default: None (no cost cap)
 }
 ```
 

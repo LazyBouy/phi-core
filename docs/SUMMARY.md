@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # Summary
 
 [Introduction](introduction.md)
@@ -51,7 +52,22 @@
 # Architecture
 
 - [Overview](architecture/overview.md)
-- [Algorithms (Pseudocode)](architecture/algorithms.md)
+- [Algorithms](architecture/algorithms.md)
+  - [Agent Loop](architecture/algorithms/core/agent-loop.md)
+  - [Run Loop](architecture/algorithms/core/run-loop.md)
+  - [Streaming](architecture/algorithms/core/streaming.md)
+  - [Tool Execution](architecture/algorithms/core/tool-execution.md)
+  - [Compaction](architecture/algorithms/context/compaction.md)
+  - [Decision Logic](architecture/algorithms/context/decision-logic.md)
+  - [Agent Lifecycle](architecture/algorithms/lifecycle/agent-lifecycle.md)
+  - [Concurrency](architecture/algorithms/lifecycle/concurrency.md)
+  - [Retry](architecture/algorithms/providers/retry.md)
+  - [Error Classification](architecture/algorithms/providers/error-classification.md)
+  - [Sub-Agent](architecture/algorithms/providers/sub-agent.md)
+  - [Bash Tool](architecture/algorithms/tools/bash.md)
+  - [File Tools](architecture/algorithms/tools/file-tools.md)
+  - [MCP](architecture/algorithms/tools/mcp.md)
+  - [OpenAPI](architecture/algorithms/tools/openapi.md)
 
 # Developer
 

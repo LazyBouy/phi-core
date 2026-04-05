@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # Turn
 
 A single LLM call-and-response cycle within a Loop. One Loop may have many Turns: the initial response plus one per tool-call round-trip or steering message injection.

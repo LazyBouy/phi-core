@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # API Reference
 
 ## Top-Level Functions
@@ -32,7 +33,7 @@ Resume from existing context. The last message must not be an assistant message.
 ### `default_tools()`
 
 ```rust
-pub fn default_tools() -> Vec<Box<dyn AgentTool>>
+pub fn default_tools() -> Vec<Arc<dyn AgentTool>>
 ```
 
 Returns: `BashTool`, `ReadFileTool`, `WriteFileTool`, `EditFileTool`, `ListFilesTool`, `SearchTool`.
@@ -88,7 +89,7 @@ All return `Self` for chaining (unless noted as `Result`).
 
 | Method | Description |
 |--------|-------------|
-| `with_tools(tools: Vec<Box<dyn AgentTool>>) -> Self` | Set tools (replaces existing) |
+| `with_tools(tools: Vec<Arc<dyn AgentTool>>) -> Self` | Set tools (replaces existing) |
 | `with_sub_agent(sub: SubAgentTool) -> Self` | Add a sub-agent tool |
 | `with_skills(skills: SkillSet) -> Self` | Load skills and append their index to the system prompt |
 | `async with_mcp_server_stdio(command, args, env) -> Result<Self, McpError>` | Connect to MCP server via stdio and add its tools |
@@ -102,7 +103,6 @@ All return `Self` for chaining (unless noted as `Result`).
 | Method | Description |
 |--------|-------------|
 | `with_workspace(path: impl Into<PathBuf>) -> Self` | Set the agent's workspace directory |
-| `with_system_prompt_strategy(strategy: SystemPromptStrategy) -> Self` | Set a system prompt strategy for dynamic prompt assembly |
 
 **Context & Limits**
 
@@ -132,7 +132,7 @@ All return `Self` for chaining (unless noted as `Result`).
 | `on_before_turn(f: Fn(&[AgentMessage], usize) -> bool) -> Self` | Called before each LLM call; return `false` to abort |
 | `on_after_turn(f: Fn(&[AgentMessage], &Usage)) -> Self` | Called after each LLM response and tool execution |
 | `on_error(f: Fn(&str)) -> Self` | Called when the LLM returns `StopReason::Error` |
-| `on_before_tool_execution(f: Fn(&str, &str, &Value) -> bool) -> Self` | Called before each tool call `(call_id, name, args)`; return `false` to skip |
+| `on_before_tool_execution(f: Fn(&str, &str, &Value) -> bool) -> Self` | Called before each tool call `(name, call_id, args)`; return `false` to skip |
 | `on_after_tool_execution(f: Fn(&str, &str, bool)) -> Self` | Called after each tool call `(name, call_id, is_error)` |
 | `on_before_tool_execution_update(f: Fn(&str, &str, &str) -> bool) -> Self` | Called before each streaming tool update `(name, call_id, text)`; return `false` to suppress the event |
 | `on_after_tool_execution_update(f: Fn(&str, &str, &str)) -> Self` | Called after each streaming tool update `(name, call_id, text)` |
@@ -165,7 +165,7 @@ All return `Self` for chaining (unless noted as `Result`).
 
 | Method | Description |
 |--------|-------------|
-| `set_tools(tools: Vec<Box<dyn AgentTool>>)` | Replace the tool set |
+| `set_tools(tools: Vec<Arc<dyn AgentTool>>)` | Replace the tool set |
 | `clear_messages()` | Clear all messages |
 | `append_message(msg: AgentMessage)` | Add a message to history |
 | `replace_messages(msgs: Vec<AgentMessage>)` | Replace all messages |
@@ -195,7 +195,7 @@ All return `Self` for chaining (unless noted as `Result`).
 
 | Type | Signature | Description |
 |------|-----------|-------------|
-| `BeforeTaskFn` | `Arc<dyn Fn(&str) + Send + Sync>` | Called on first `AgentStart` with a new `session_id`. Parameter is the session ID. |
+| `BeforeTaskFn` | `Arc<dyn Fn(&Session) -> bool + Send + Sync>` | Called on first `AgentStart` with a new `session_id`. Parameter is the `Session`. Return `false` to reject. |
 | `AfterTaskFn` | `Arc<dyn Fn(&Session) + Send + Sync>` | Called in `flush()` when the session is finalized. Parameter is the completed `Session`. |
 
 These are set on `SessionRecorderConfig` and fire at the session level (not per-loop). See [Sessions](../concepts/sessions.md#session-lifecycle-callbacks) for usage.
@@ -205,13 +205,44 @@ These are set on `SessionRecorderConfig` and fire at the session level (not per-
 The crate re-exports key types from `lib.rs`:
 
 ```rust
-pub use agents::{Agent, BasicAgent, QueueMode};  // Agent trait + BasicAgent struct
+// Agent system
+pub use agents::{Agent, AgentProfile, BasicAgent, QueueMode};
 pub use agents::SubAgentTool;
-pub use agent_loop::{agent_loop, agent_loop_continue};
-pub use context::{CompactionStrategy, DefaultCompaction};
-pub use retry::RetryConfig;
-pub use skills::SkillSet;
-pub use types::*;  // Message, Content, AgentMessage, AgentEvent, etc.
-                    // Note: AgentMessage::Llm wraps LlmMessage (which contains
-                    // Message + Option<TurnId>), not Message directly.
+
+// Agent loop
+pub use agent_loop::{agent_loop, agent_loop_continue, agent_loop_parallel};
+pub use agent_loop::evaluation::{
+    ElaborateEvaluation, LlmJudgeEvaluation, PickFirstEvaluation,
+    TokenEfficientEvaluation, TransparentEvaluation,
+};
+
+// Config-driven construction
+pub use config::{
+    agent_from_config, agent_from_config_with_registry, agents_from_config,
+    parse_config, parse_config_file, AgentConfig, ConfigError, ConfigFormat,
+};
+
+// Context management
+pub use context::{
+    CompactionStrategy, CompactionConfig, CompactionScope, ContextConfig,
+    DefaultCompaction, DefaultBlockCompaction, BlockCompactionStrategy,
+    ContextTracker, CompactionBlock, CompactedSection, TurnMap, TurnRange,
+    build_context_from_session, compact_session_loops,
+};
+pub use context::skills::SkillSet;
+
+// Session persistence
+pub use session::{
+    Session, SessionRecorder, SessionRecorderConfig, SessionScope, SessionError,
+    LoopRecord, LoopEvent, LoopStatus, Turn, LoopConfigSnapshot,
+    ParallelGroupRecord, ChildLoopRef, SpawnRef, SessionFormation,
+    save_session, load_session, list_session_ids, delete_session, load_sessions_for_agent,
+};
+
+// Provider
+pub use provider::retry::RetryConfig;
+
+// Types (glob re-export)
+pub use types::*;  // Message, Content, AgentMessage, AgentEvent, Usage, LlmMessage,
+                    // StopReason, StreamDelta, TurnTrigger, ThinkingLevel, CacheConfig, etc.
 ```

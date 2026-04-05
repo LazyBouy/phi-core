@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # Known Bugs
 
 Tracked bugs in phi-core. Mark with ~~strikethrough~~ and `[FIXED]` when resolved.

@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # Context Translation
 
 Context translation solves a fundamental problem in multi-provider agent systems: when an agent switches providers mid-session, content types from the original provider may be silently dropped or cause errors on the new provider. The `ContextTranslationStrategy` trait provides a read-only translation layer that produces temporary copies of messages, never modifying the canonical history.

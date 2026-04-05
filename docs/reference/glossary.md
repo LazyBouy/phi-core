@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # phi-core — Project Overview
 
 ## 1. Purpose Statement
@@ -98,7 +99,7 @@ A child instance of the agent loop spawned internally when a `SubAgentTool` is c
 - **Single event consumer per run.** `agent_loop()` returns a single `UnboundedReceiver<AgentEvent>`. Fan-out to multiple consumers requires application-level bridging.
 - **No agent-to-agent networking.** Sub-agents run in-process only. No remote agent delegation.
 - **No persistent storage.** Conversation state is held in memory. Serialization to disk is the caller's responsibility (the library provides `serialize`/`deserialize` helpers).
-- **No token counting via external libraries.** Token estimation uses the fast heuristic of 4 characters per token (`src/context/:estimate_tokens()`). Precision counting (via tiktoken etc.) is a non-goal.
+- **No built-in precision token counting.** The default `HeuristicTokenCounter` uses 4 characters per token. A pluggable `TokenCounter` trait (`src/context/token.rs`) allows callers to supply a custom counter (e.g., tiktoken-based), but no precision implementation ships with the library.
 - **No multi-modal generation.** Images can be sent *to* the model (as `Content::Image`), but image *generation* is not supported.
 - **No structured output / JSON mode.** The library passes raw messages; enforcing structured output is the caller's responsibility via system prompt.
 - **Skipped tools on steering.** When steering messages arrive mid-batch, remaining tool calls in that batch are skipped with an error result — their outputs are never computed. This is a documented behavior, not a bug.
@@ -119,7 +120,7 @@ A child instance of the agent loop spawned internally when a `SubAgentTool` is c
 | **ToolContext** | A struct passed to `AgentTool::execute()` containing the call ID, name, cancellation token, and optional progress callbacks. |
 | **AgentEvent** | The streaming event enum emitted to the consumer during a run. Covers agent lifecycle, turn lifecycle, message streaming, and tool execution. |
 | **StreamDelta** | A partial content update emitted during LLM streaming: `Text`, `Thinking`, or `ToolCallDelta`. |
-| **StopReason** | Why the LLM ended its response: `Stop` (natural end), `Length` (token limit), `ToolUse` (returned tool calls), `Error` (failure), `Aborted` (cancellation). |
+| **StopReason** | Why the LLM ended its response. Variants: `Stop` (natural end), `Length` (token limit), `ToolUse` (returned tool calls), `Error` (failure), `Aborted` (cancellation), `MaxTurns`, `UserStop`, `Handoff`, `GuardRail`, `ContextCompacted`, `Paused`. |
 | **AgentMessage** | The top-level message enum stored in the conversation history. Either `Llm(LlmMessage)` (sent to the LLM; LlmMessage wraps Message + optional TurnId for turn tracking) or `Extension(ExtensionMessage)` (app-only metadata). |
 | **Message** | The LLM-protocol message enum: `User`, `Assistant`, or `ToolResult`. |
 | **Content** | A single content block within a message: `Text`, `Image` (base64), `Thinking`, or `ToolCall`. |
@@ -127,7 +128,7 @@ A child instance of the agent loop spawned internally when a `SubAgentTool` is c
 | **ContextConfig** | Configuration for the automatic context compaction: token budget, lines-to-keep per tool output, number of recent/first messages to preserve. |
 | **CompactionStrategy** | A trait for customizing how messages are compacted when the token budget is exceeded. The default implementation uses 3 tiers. |
 | **CompactionBlock** | The model used by the compaction system to represent compacted message regions. Replaces the previous inline approach in `compact_messages()` with a structured block-based representation. |
-| **ExecutionLimits** | Hard caps on agent execution: `max_turns`, `max_total_tokens`, `max_duration`. When exceeded, the loop appends a system message and stops. |
+| **ExecutionLimits** | Hard caps on agent execution: `max_turns`, `max_total_tokens`, `max_duration`, `max_cost: Option<f64>`. When exceeded, the loop appends a system message and stops. |
 | **ToolExecutionStrategy** | How multiple tool calls from one LLM response are dispatched: `Sequential`, `Parallel` (default), or `Batched { size }`. |
 | **CacheConfig** / **CacheStrategy** | Controls prompt caching breakpoint placement for providers that support it (Anthropic). Strategies: `Auto`, `Disabled`, `Manual`. |
 | **ThinkingLevel** | Controls extended reasoning depth: `Off`, `Minimal`, `Low`, `Medium`, `High`. Translated to provider-specific parameters. |

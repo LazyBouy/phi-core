@@ -1,3 +1,5 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
+
 # Context Management
 
 Long-running agents accumulate messages that exceed the model's context window. phi-core provides token tracking, overflow detection, tiered compaction, and execution limits.
@@ -96,6 +98,9 @@ pub struct ContextConfig {
     pub system_prompt_tokens: usize,    // Default: 4,000
     pub compaction: CompactionConfig,   // Primary compaction settings
 
+    // Custom token counter (serde-skipped). None → HeuristicTokenCounter (chars/4).
+    pub token_counter: Option<Arc<dyn TokenCounter>>,
+
     // Legacy backward-compat fields (prefer CompactionConfig equivalents):
     pub keep_recent: usize,             // Default: 10
     pub keep_first: usize,             // Default: 2
@@ -106,7 +111,7 @@ pub struct CompactionConfig {
     // ── WHEN to compact ──
     pub compact_at_pct: f64,                     // Default: 0.90 (90%)
     pub compact_budget_threshold_pct: f64,       // Default: 0.05 (5%)
-    pub compaction_scope: CompactionScope,       // FixedCount(3) or TokenBudget
+    pub compaction_scope: CompactionScope,       // Default: FixedCount(3)
 
     // ── HOW to compact ──
     pub keep_first_turns: usize,                 // Default: 2
@@ -115,6 +120,15 @@ pub struct CompactionConfig {
     pub tool_output_max_lines: usize,            // Default: 50
 }
 ```
+
+### `CompactionScope`
+
+Controls how many earlier loops are included in compaction and context loading:
+
+| Variant | Description |
+|---|---|
+| `FixedCount(usize)` | Compact a fixed number of earlier loops on the active chain. Default: `FixedCount(3)`. |
+| `TokenBudget` | Walk the chain backward, accumulating per-loop token estimates, and stop when `max_context_tokens` would be exceeded. Loops whose raw messages exceed the budget are still included — their compacted summaries will fit. |
 
 See [compaction.md](compaction.md) for full details on the non-destructive overlay model.
 
@@ -143,8 +157,11 @@ pub struct ExecutionLimits {
     pub max_turns: usize,              // Default: 50
     pub max_total_tokens: usize,       // Default: 1,000,000
     pub max_duration: Duration,        // Default: 600s (10 min)
+    pub max_cost: Option<f64>,         // Default: None (no cost cap)
 }
 ```
+
+`max_cost` caps cumulative dollar cost for the run. Requires `AgentLoopConfig.cost_config` to be set — without pricing rates the accumulated cost is always 0.0 and this limit has no effect.
 
 When a limit is reached, the agent stops with a message like `"[Agent stopped: Max turns reached (50/50)]"`.
 

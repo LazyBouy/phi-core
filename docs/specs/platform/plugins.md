@@ -1,4 +1,7 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # WASM Plugin Architecture
+
+> **Scope note:** WASM plugins are a baby-phi platform feature, not phi-core. This spec defines the design for future implementation in baby-phi.
 
 The plugin system allows tools, callbacks, and filters to be defined as WebAssembly modules loaded at runtime. This removes the compile-time lock-in: users can extend the agent without recompiling the host binary.
 

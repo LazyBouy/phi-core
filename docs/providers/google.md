@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # Google Gemini Provider
 
 Two providers for Google's Gemini models:

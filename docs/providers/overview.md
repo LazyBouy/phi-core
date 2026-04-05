@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # Providers Overview
 
 phi-core supports multiple LLM providers through the `StreamProvider` trait and `ApiProtocol`

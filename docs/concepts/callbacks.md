@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # Lifecycle Callbacks
 
 phi-core provides four tiers of lifecycle callbacks that let you observe and control the agent loop without modifying its internals. Loop-level, turn-level, and tool-level callbacks are set on `AgentLoopConfig` (or via `Agent` builder methods). Session-level callbacks (`before_task` / `after_task`) are set on `SessionRecorderConfig`.
@@ -94,11 +95,11 @@ let agent = BasicAgent::new(ModelConfig::anthropic("claude-sonnet-4-20250514", "
 
 ### `before_tool_execution`
 
-Called before each tool starts, after the `ToolExecutionStart` event would normally emit. Receives the call ID, tool name, and arguments. Return `false` to skip the tool — a `ToolExecutionEnd` with an error result is emitted and the tool's `execute()` is never called.
+Called before each tool starts, after the `ToolExecutionStart` event would normally emit. Receives the tool name, call ID, and arguments. Return `false` to skip the tool — a `ToolExecutionEnd` with an error result is emitted and the tool's `execute()` is never called.
 
 ```rust
 let agent = BasicAgent::new(ModelConfig::anthropic("claude-sonnet-4-20250514", "Claude Sonnet 4", &api_key))
-    .on_before_tool_execution(|call_id, name, _args| {
+    .on_before_tool_execution(|name, call_id, _args| {
         println!("About to run tool: {}", name);
         // Return false to block specific tools:
         name != "bash" // block bash, allow everything else
@@ -171,6 +172,11 @@ before_loop
               (before_tool_execution_update → ToolExecutionUpdate → after_tool_execution_update)*
             ToolExecutionEnd →
           after_tool_execution
+        [if context budget exceeded:]
+          before_compaction_start
+            → CompactionStarted
+            CompactionEnded →
+          after_compaction_end
       TurnEnd →
     after_turn
   AgentEnd →
@@ -259,7 +265,7 @@ let agent = BasicAgent::new(ModelConfig::anthropic("claude-sonnet-4-20250514", "
         println!("Messages: {}, Tokens: {}/{}", msgs.len(), usage.input, usage.output);
     })
     .on_error(|err| eprintln!("Error: {}", err))
-    .on_before_tool_execution(|_id, name, _args| {
+    .on_before_tool_execution(|name, _id, _args| {
         println!("Running: {}", name);
         true
     })
@@ -289,7 +295,7 @@ let config = AgentLoopConfig {
     after_turn: Some(Arc::new(|_msgs, _usage| { /* log */ })),
     on_error: Some(Arc::new(|err| eprintln!("{}", err))),
     // Tool-level
-    before_tool_execution: Some(Arc::new(|id, name, args| true)),
+    before_tool_execution: Some(Arc::new(|name, id, args| true)),
     after_tool_execution: Some(Arc::new(|name, id, is_error| {})),
     before_tool_execution_update: Some(Arc::new(|name, id, text| true)),
     after_tool_execution_update: Some(Arc::new(|name, id, text| {})),

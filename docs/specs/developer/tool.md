@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # Tool System
 
 The tool system defines how agents interact with the external world. Every capability an agent has -- running shell commands, reading files, calling APIs, delegating to sub-agents -- is expressed as a tool implementing the `AgentTool` trait. The agent loop discovers tools by name from a registry, executes them with lifecycle events, and feeds results back to the LLM.

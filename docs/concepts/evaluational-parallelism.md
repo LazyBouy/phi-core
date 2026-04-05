@@ -1,3 +1,5 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
+
 # Evaluational Parallelism
 
 Evaluational parallelism runs the **same prompt** through multiple `AgentLoopConfig`s
@@ -271,7 +273,9 @@ outputs are preserved verbatim:
 2. **Tier 2 — paragraph summary**: keep only the first paragraph and last paragraph
    (separated by `...`).
 3. **Tier 3 — hard char limit**: truncate to a per-response char limit derived from
-   the remaining budget, minimum 200 chars.
+   the remaining budget, minimum 200 chars. The formula is
+   `max(200, (token_budget * 4) / n)` where `n` is the number of texts being compacted
+   and the `* 4` factor converts from tokens to chars (1 token ~ 4 chars estimate).
 
 After each tier, the combined token estimate is re-checked. If the budget is satisfied,
 the judge proceeds with the compacted context and intact outputs.

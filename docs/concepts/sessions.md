@@ -1,3 +1,5 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
+
 # Sessions
 
 A **Session** is a named container (keyed by `session_id`) that groups all
@@ -102,6 +104,7 @@ chat" button, new document context).
 | `rejection` | `Option<String>` | Input-filter rejection reason (if any) |
 | `config` | `Option<LoopConfigSnapshot>` | Model/provider that ran this loop |
 | `messages` | `Vec<AgentMessage>` | All new messages produced (from `AgentEnd`) |
+| `turns` | `Vec<Turn>` | Materialized turn records (one per LLM call-response cycle). Built from `TurnStart`/`TurnEnd` event pairs. Empty for old sessions or loops that ended before any turn completed. |
 | `usage` | `Usage` | Token usage for this loop |
 | `metadata` | `Option<Value>` | Caller-supplied metadata from `AgentStart` |
 | `events` | `Vec<LoopEvent>` | Full ordered event stream |
@@ -366,8 +369,8 @@ the delta.
 
 | Field | Type | Description |
 |---|---|---|
-| `before_task` | `Option<BeforeTaskFn>` | Fires on the first `AgentStart` with a new `session_id`. Use for session initialization, billing setup, or audit logging. |
-| `after_task` | `Option<AfterTaskFn>` | Fires in `flush()` when the session is finalized. Use for billing finalization, metrics emission, or cleanup. |
+| `before_task` | `Option<BeforeTaskFn>` | `Arc<dyn Fn(&Session) -> bool>`. Fires on the first `AgentStart` with a new `session_id`. Return `false` to reject. Use for session initialization, billing setup, or audit logging. |
+| `after_task` | `Option<AfterTaskFn>` | `Arc<dyn Fn(&Session)>`. Fires in `flush()` when the session is finalized. Use for billing finalization, metrics emission, or cleanup. |
 
 These are **session-level** (not loop-level) hooks. Unlike `before_loop`/`after_loop` on `AgentLoopConfig` which fire around each individual agent loop, `before_task` and `after_task` fire once per session lifecycle:
 
@@ -375,9 +378,10 @@ These are **session-level** (not loop-level) hooks. Unlike `before_loop`/`after_
 use phi_core::session::{SessionRecorder, SessionRecorderConfig};
 
 let config = SessionRecorderConfig {
-    before_task: Some(Arc::new(|session_id| {
-        println!("Session started: {}", session_id);
+    before_task: Some(Arc::new(|session: &phi_core::session::Session| -> bool {
+        println!("Session started: {}", session.session_id);
         // Initialize billing, start audit trail, etc.
+        true // return false to reject the session
     })),
     after_task: Some(Arc::new(|session| {
         println!("Session finalized: {} ({} loops)", session.session_id, session.loops.len());

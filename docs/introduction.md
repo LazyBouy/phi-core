@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # phi-core
 
 **Simple, effective agent loop in Rust.**
@@ -18,6 +19,11 @@ phi-core is a library for building LLM-powered agents that can use tools. It pro
 - **Steering & follow-ups** — Interrupt the agent mid-run or queue work for after it finishes
 - **Cancellation** — `CancellationToken`-based abort at any point
 - **Builder pattern** — Ergonomic `BasicAgent` struct with chainable configuration; `Agent` trait for polymorphism
+- **Config-driven construction** — TOML/JSON/YAML config → `agent_from_config()` → `Arc<dyn Agent>`
+- **Session persistence** — `SessionRecorder` materializes structured session/loop/turn records from events
+- **Sub-agents** — Delegate tasks to child agent loops via `SubAgentTool`
+- **MCP integration** — Connect to external tool servers via Model Context Protocol (stdio + HTTP)
+- **Evaluational parallelism** — Run N configs concurrently, select the best result via `EvaluationStrategy`
 
 ## Ecosystem
 

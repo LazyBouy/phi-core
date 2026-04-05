@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # Agent
 
 The central entity in the system. An Agent combines a given identity (Agent Profile), capabilities (tools, skills, MCP connections), permissions, and introspection into a single runtime unit that executes Sessions (tasks).
@@ -10,12 +11,12 @@ The `Agent` trait defines the runtime interface (prompting, state access, contro
 Agent
 ├── HEADER
 │   ├── agent_id [EXISTS] — UUID, immutable
-│   ├── Agent Profile [CONCEPTUAL as struct; EXISTS as scattered fields]
-│   │   ├── profile_id [CONCEPTUAL] — distinct from agent_id; shareable
+│   ├── Agent Profile [EXISTS] — AgentProfile struct (src/agents/profile.rs)
+│   │   ├── profile_id [EXISTS] — distinct from agent_id; shareable across agents
 │   │   ├── SystemPromptStrategy [EXISTS] — how system prompt is composed
-│   │   │   └── Currently: static system_prompt string [EXISTS]
-│   │   ├── Agent Name [CONCEPTUAL]
-│   │   └── Agent Description [CONCEPTUAL]
+│   │   │   └── static system_prompt string [EXISTS], file: prefix [EXISTS], {{...}} 3-entity chain [EXISTS]
+│   │   ├── Agent Name [EXISTS] — Option<String> on AgentProfile
+│   │   └── Agent Description [EXISTS] — Option<String> on AgentProfile
 │   ├── Limits (Agent-level)
 │   │   ├── context_config [EXISTS]
 │   │   ├── execution_limits [EXISTS]
@@ -49,12 +50,12 @@ Agent
 | Field | Type | Status | Description |
 |-------|------|--------|-------------|
 | `agent_id` | `String` (UUID v4) | `[EXISTS]` | Stable identifier assigned at construction. Included in every `AgentStart` event. Immutable for the lifetime of the agent instance. |
-| **Agent Profile** | — | `[CONCEPTUAL]` as struct; `[EXISTS]` as scattered fields | Personality container. Conceptually separate from Agent (multiple agents could share one profile). Currently fields live directly on `BasicAgent`. |
-| `profile_id` | `String` | `[CONCEPTUAL]` | Distinct from `agent_id`. Would allow profile sharing across agents. |
-| `SystemPromptStrategy` | trait | `[EXISTS]` | Defines how the system prompt is composed per turn. A trait with `compose(context) -> String` supporting layered prompt building. Uses a 3-entity model: **strategy template** (the trait implementation defining composition logic), **prompt instance** (a concrete prompt produced by the strategy for a given context), and **profile ref** (reference to the agent profile providing personality/identity). Currently `BasicAgent` also retains a static `system_prompt` string as a fallback. |
-| `system_prompt` | `String` | `[EXISTS]` | Static system prompt string. Conceptually belongs to the Agent Profile. |
-| Agent Name | `String` | `[CONCEPTUAL]` | Human-readable name for the agent. |
-| Agent Description | `String` | `[CONCEPTUAL]` | Description of the agent's purpose and capabilities. |
+| **Agent Profile** | `AgentProfile` | `[EXISTS]` | Reusable identity blueprint (`src/agents/profile.rs`). Separate struct from Agent — multiple agents can share one profile via config instances. Fields: profile_id, name, description, system_prompt, thinking_level, temperature, max_tokens, config_id, skills, workspace. |
+| `profile_id` | `String` | `[EXISTS]` | Distinct from `agent_id`. Allows profile sharing across agents. Auto-generated UUID if not set. |
+| `SystemPromptStrategy` | trait | `[EXISTS]` | Defines block structure for multi-block prompt composition (`src/agents/system_prompt.rs`). Uses a 3-entity model: **strategy template** (block definitions with order + max_length), **prompt instance** (content filling blocks, supports `file:` paths), **agent reference** (via `{{system_prompt.name}}`). See [configuration guide](../../guides/configuration.md#system-prompt-strategy). |
+| `system_prompt` | `Option<String>` | `[EXISTS]` | System prompt string. Lives on `AgentProfile.system_prompt`. Supports inline text, `file:path` (relative to workspace), or `{{...}}` reference to a prompt instance. Resolution: agent > profile instance > base profile. |
+| Agent Name | `Option<String>` | `[EXISTS]` | Human-readable name. Lives on `AgentProfile.name`. |
+| Agent Description | `Option<String>` | `[EXISTS]` | Description of the agent's purpose. Lives on `AgentProfile.description`. |
 | `workspace` | `Option<PathBuf>` | `[EXISTS]` | Working directory. Lives on `AgentProfile` as blueprint default; `BasicAgent` stores an agent-level override. Resolution: agent workspace > profile workspace > current directory. |
 | `model_config` | `ModelConfig` | `[EXISTS]` | Default model for this agent. Falls back here when Session and Loop don't specify their own. Contains: model id, API key, base URL, API protocol, cost rates, context window size. |
 | `context_config` | `Option<ContextConfig>` | `[EXISTS]` | Token budget and compaction policy. Agent-level limit. |
@@ -171,8 +172,10 @@ Mutable state that changes during execution.
 
 | File | What it contains |
 |------|-----------------|
-| `src/agents/agent.rs` | `Agent` trait — runtime interface (prompting, state, control, steering queues). `QueueMode` enum. |
+| `src/agents/agent.rs` | `Agent` trait — runtime interface (~40 methods: prompting, state, control, steering queues, hook setters). `QueueMode` enum. |
 | `src/agents/basic_agent.rs` | `BasicAgent` struct — default in-memory implementation. Builder pattern. All fields listed above. |
+| `src/agents/profile.rs` | `AgentProfile` struct — reusable identity blueprint with profile_id, name, description, system_prompt, thinking_level, temperature, max_tokens, config_id, skills, workspace. |
+| `src/agents/system_prompt.rs` | `SystemPromptStrategy` trait, `SystemPrompt` struct, `PromptBlockDef`, built-in strategies (Custom, Agent, Minimal). Compose logic with `file:` resolution. |
 
 ---
 

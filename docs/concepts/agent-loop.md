@@ -1,3 +1,5 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
+
 # The Agent Loop
 
 The agent loop is the core of phi-core. It implements the fundamental cycle:
@@ -99,9 +101,12 @@ pub struct AgentLoopConfig {
     pub after_tool_execution: Option<AfterToolExecutionFn>,
     pub before_tool_execution_update: Option<BeforeToolExecutionUpdateFn>,
     pub after_tool_execution_update: Option<AfterToolExecutionUpdateFn>,
+    pub before_compaction_start: Option<BeforeCompactionStartFn>,
+    pub after_compaction_end: Option<AfterCompactionEndFn>,
     pub input_filters: Vec<Arc<dyn InputFilter>>,
-    pub compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
     pub first_turn_trigger: TurnTrigger,
+    pub context_translation: Option<Arc<dyn ContextTranslationStrategy>>,
+    pub prun_pending: Option<Arc<Mutex<Vec<PrunRequest>>>>,
 }
 ```
 
@@ -129,8 +134,12 @@ pub struct AgentLoopConfig {
 | `after_tool_execution` | Called after each tool call completes (see [Callbacks](callbacks.md)) |
 | `before_tool_execution_update` | Called before each streaming tool update; return `false` to suppress the event (see [Callbacks](callbacks.md)) |
 | `after_tool_execution_update` | Called after each streaming tool update event (see [Callbacks](callbacks.md)) |
+| `before_compaction_start` | Called before compaction starts with `(estimated_tokens, message_count)`; return `false` to skip compaction for this cycle (see [Callbacks](callbacks.md)) |
+| `after_compaction_end` | Called after compaction completes with `(messages_before, messages_after, tokens_before, tokens_after)` (see [Callbacks](callbacks.md)) |
 | `input_filters` | Input filters applied to user messages before the LLM call (see [Tools](tools.md)) |
-| `compaction_strategy` | Custom compaction strategy (see [Custom Compaction](#custom-compaction) below) |
+| `first_turn_trigger` | The `TurnTrigger` for the first `TurnStart` event; defaults to `TurnTrigger::User`, set to `SubAgent` by sub-agent callers |
+| `context_translation` | Optional `ContextTranslationStrategy` for cross-provider compatibility — translates content types (e.g., `Content::Thinking`) when targeting a different provider (G8) |
+| `prun_pending` | Shared state for `PrunTool` to communicate pruning requests to the loop; set automatically by `with_prun_tool()` |
 
 ## Steering & Follow-Ups
 
@@ -215,8 +224,9 @@ By default, when context exceeds the token budget in `ContextConfig`, phi-core r
 Example of a custom `CompactionStrategy`:
 
 ```rust
-use phi_core::context::{CompactionStrategy, ContextConfig, compact_messages};
+use phi_core::context::{CompactionStrategy, ContextConfig, CompactionConfig, compact_messages};
 use phi_core::types::*;
+use std::sync::Arc;
 
 struct MyCompaction;
 
@@ -231,11 +241,23 @@ impl CompactionStrategy for MyCompaction {
     }
 }
 
+// Modern pattern: set strategies via ContextConfig.compaction
+let context_config = ContextConfig {
+    compaction: CompactionConfig {
+        // in_memory_strategy: used when AgentContext.session is None (sub-agents, tests)
+        in_memory_strategy: Some(Arc::new(MyCompaction)),
+        // block_strategy: used when AgentContext.session is Some (session-backed execution)
+        // block_strategy: Some(Arc::new(MyBlockCompaction)),
+        ..CompactionConfig::default()
+    },
+    ..ContextConfig::default()
+};
+
 let agent = BasicAgent::new(model_config)
-    .with_compaction_strategy(MyCompaction);
+    .with_context_config(context_config);
 ```
 
-The strategy is called once per turn, right before the LLM call, whenever `context_config` is `Some`. When `compaction_strategy` is `None`, `DefaultCompaction` (which wraps `compact_messages()`) is used automatically.
+The in-memory strategy is called once per turn, right before the LLM call, whenever `context_config` is `Some` and `AgentContext.session` is `None`. When `in_memory_strategy` is `None`, `DefaultCompaction` (which wraps `compact_messages()`) is used automatically. When a session is present, `block_strategy` is used instead (defaulting to `DefaultBlockCompaction`).
 
 ### Use Cases
 

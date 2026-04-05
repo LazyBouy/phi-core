@@ -1,16 +1,19 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # Invocation Layer
+
+> **Scope note:** The invocation layer is split between phi-core (library-level config parsing and agent construction) and baby-phi (platform-level UI, CLI adapter, WASM plugins). This spec covers the full vision; the phi-core portion is largely implemented.
 
 The config-driven invocation layer is the single entry point for constructing and running agents. All agent features — profile, session config, tools, callbacks, compaction, execution limits — are expressed as config and resolved through one pipeline.
 
-**Status:** `[PARTIAL]` -- Phase 1 config pipeline (parse -> build -> agent) exists with multi-agent support, tool registry, and system prompt strategies. Remaining: WASM plugins.
+**Status:** `[EXISTS]` — Phase 1 config pipeline (parse → build → agent) is fully implemented in phi-core with multi-agent support, tool registry, system prompt strategies, `file:` resolution, per-instance workspace, and `{{...}}` reference protocol. **Remaining (baby-phi scope):** WASM plugins, CLI adapter, UI adapter.
 
 **Why:** Features exist but are invoked through scattered Rust builder APIs. There is no unified config → CLI → UI pipeline. The invocation layer makes every feature discoverable and configurable without writing Rust code.
 
 ## Concept Overview
 
 ```
-Invocation Layer [PLANNED]
-├── Config Schema [PLANNED] — TOML format defining all agent parameters
+Invocation Layer [EXISTS — phi-core Phase 1]
+├── Config Schema [EXISTS] — TOML/JSON/YAML format defining all agent parameters
 │   ├── [agent.profile] → AgentProfile
 │   ├── [[agent.instances]] → Named agent variations
 │   ├── [provider] → Default ModelConfig
@@ -24,9 +27,9 @@ Invocation Layer [PLANNED]
 │   ├── [compaction] → compaction policy + callbacks
 │   ├── [execution] → limits, retry, cache, tool strategy
 │   └── [hooks] → context transformation (Phase 2 plugin refs)
-├── Config Parser [PLANNED] — TOML → typed Rust structs
-├── Agent Constructor [PLANNED] — from_config(config) → Agent
-└── Resolution Order [PLANNED] — config file → env vars → defaults
+├── Config Parser [EXISTS] — TOML/JSON/YAML → typed Rust structs (src/config/parser.rs)
+├── Agent Constructor [EXISTS] — agent_from_config() / agents_from_config() (src/config/builder.rs)
+└── Resolution Order [EXISTS] — config file → env vars → defaults
 ```
 
 ---
@@ -381,8 +384,8 @@ These require executable code (closures/trait impls today). Phase 2 maps them to
 | `before_tool_execution_update` | `AgentLoopConfig` | `[callbacks].before_tool_execution_update = "..."` |
 | `after_tool_execution_update` | `AgentLoopConfig` | `[callbacks].after_tool_execution_update = "..."` |
 | `on_error` | `AgentLoopConfig` | `[callbacks].on_error = "..."` |
-| `before_compaction_start` | Planned (G1) | `[callbacks].before_compaction_start = "..."` |
-| `after_compaction_end` | Planned (G1) | `[callbacks].after_compaction_end = "..."` |
+| `before_compaction_start` | `AgentLoopConfig` (G1) | `[callbacks].before_compaction_start = "..."` |
+| `after_compaction_end` | `AgentLoopConfig` (G1) | `[callbacks].after_compaction_end = "..."` |
 | `convert_to_llm` | `AgentLoopConfig` | `[hooks].convert_to_llm = "..."` |
 | `transform_context` | `AgentLoopConfig` | `[hooks].transform_context = "..."` |
 | `input_filters` | `AgentLoopConfig` | `[[filters]]` with plugin refs |

@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # MCP Integration
 
 ## What is MCP?
@@ -115,7 +116,9 @@ MCP operations return `McpError`:
 
 - `McpError::Transport` — connection or I/O failure
 - `McpError::Protocol` — unexpected response format
-- `McpError::JsonRpc` — server returned a JSON-RPC error
+- `McpError::JsonRpc` — server returned a JSON-RPC error (`code` + `message`)
+- `McpError::Serialization` — JSON serialization/deserialization failure
+- `McpError::Io` — standard I/O error
 - `McpError::ConnectionClosed` — server process exited
 
 When an MCP tool returns `isError: true`, the adapter converts it to a `ToolError::Failed`, which the agent loop sends back to the LLM with `is_error: true` so it can self-correct.

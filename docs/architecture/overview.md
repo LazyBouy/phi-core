@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # Architecture Overview
 
 > For detailed component specifications, trait signatures, sequence diagrams, and data models,
@@ -50,13 +51,18 @@ Batteries-included single-agent layer. Most users interact with this.
 **Adds on top of Layer 1:**
 - Concrete providers — Anthropic, OpenAI-compat, Google, Azure, Bedrock, Vertex
 - Provider registry — dispatch by API protocol
+- Context translation — cross-provider content type compatibility (G8)
 - Prompt caching — automatic cache breakpoint placement
 - Retry with backoff — exponential, jitter, respects retry-after
-- Context management — token estimation, smart truncation, execution limits
-- Built-in tools — bash, read_file, write_file, edit_file, list_files, search
+- Context management — token estimation, compaction, execution limits, cost tracking
+- `AgentProfile` + `SystemPromptStrategy` — reusable agent blueprints with multi-block prompt composition
+- Config-driven construction — TOML/JSON/YAML → `agent_from_config()` → `Arc<dyn Agent>`
+- Built-in tools — bash, read_file, write_file, edit_file, list_files, search, prun (context pruning)
+- Tool registry — name-based tool resolution from config
+- Session persistence — `SessionRecorder` materializes Turn structs from events
 - MCP client — stdio + HTTP transports, tool adapter
-- `Agent` trait — the runtime interface (prompting, state, control)
-- `BasicAgent` struct — default in-memory implementation of `Agent`; stateful builder wrapping it all together
+- `Agent` trait — the runtime interface (prompting, state, control, ~40 methods)
+- `BasicAgent` struct — default in-memory implementation of `Agent`; stateful builder
 - `SubAgentTool` — delegates tasks to a child `agent_loop()` as a tool
 
 ### Layer 3: Orchestration (planned)
@@ -83,52 +89,88 @@ Multi-agent coordination. Not yet implemented — the architecture is designed t
 ```
 phi-core/
 ├── src/
-│   ├── lib.rs                  # Public re-exports
+│   ├── lib.rs                     # Public re-exports
 │   │
 │   │── Layer 1: Core Loop ─────────────────────
 │   ├── types/
-│   │   ├── mod.rs              # Re-exports, Message, AgentMessage
-│   │   ├── content.rs          # Content enum (Text, Image, Thinking, ToolCall)
-│   │   ├── extension.rs        # ExtensionMessage
-│   │   ├── agent_message.rs    # AgentMessage enum
-│   │   ├── usage.rs            # Usage (token metrics)
-│   │   ├── tool.rs             # AgentTool trait, ToolDefinition
-│   │   ├── event.rs            # AgentEvent enum
-│   │   ├── context.rs          # AgentContext
-│   │   └── parallel.rs         # ToolExecutionStrategy
-│   ├── agent_loop/             # Core loop: prompt → LLM → tools → repeat
+│   │   ├── mod.rs                 # Re-exports, Message, AgentMessage
+│   │   ├── content.rs             # Content enum (Text, Image, Thinking, ToolCall), StopReason
+│   │   ├── extension.rs           # ExtensionMessage
+│   │   ├── agent_message.rs       # AgentMessage enum, LlmMessage (Message + TurnId)
+│   │   ├── usage.rs               # Usage, CacheConfig, CacheStrategy, ThinkingLevel
+│   │   ├── tool.rs                # AgentTool trait, ToolDefinition, ToolContext
+│   │   ├── event.rs               # AgentEvent enum, TurnTrigger, StreamDelta
+│   │   ├── context.rs             # AgentContext, InRunEntry (2-stream pruning)
+│   │   └── parallel.rs            # ToolExecutionStrategy
+│   ├── agent_loop/
+│   │   ├── core.rs                # agent_loop(), agent_loop_continue()
+│   │   ├── run.rs                 # run_loop() — inner turn engine
+│   │   ├── streaming.rs           # stream_assistant_response() — LLM call + retry
+│   │   ├── tools.rs               # execute_tool_calls()
+│   │   ├── config.rs              # AgentLoopConfig, callback type aliases
+│   │   ├── helpers.rs             # Input filtering, message conversion
+│   │   ├── parallel.rs            # agent_loop_parallel()
+│   │   ├── evaluation.rs          # EvaluationStrategy trait + 5 built-in strategies
+│   │   └── script_callback.rs     # ScriptCallback for shell/Python hooks
 │   │
 │   │── Layer 2: Agent + Providers ─────────────
 │   ├── agents/
-│   │   ├── agent.rs            # Agent trait (runtime interface)
-│   │   ├── basic_agent.rs      # BasicAgent struct (default in-memory impl)
-│   │   └── sub_agent.rs        # SubAgentTool (child agent_loop as a tool)
-│   ├── context/                # Token estimation, compaction, limits
+│   │   ├── agent.rs               # Agent trait (runtime interface, ~40 methods)
+│   │   ├── basic_agent.rs         # BasicAgent struct (default in-memory impl)
+│   │   ├── profile.rs             # AgentProfile struct
+│   │   ├── system_prompt.rs       # SystemPromptStrategy, SystemPrompt, PromptBlockDef
+│   │   └── sub_agent.rs           # SubAgentTool (child agent_loop as a tool)
+│   ├── config/
+│   │   ├── schema.rs              # AgentConfig + all TOML/JSON/YAML config sections
+│   │   ├── builder.rs             # agent_from_config(), agents_from_config()
+│   │   ├── parser.rs              # Multi-format parsing + env var substitution
+│   │   └── reference.rs           # {{...}} ID reference protocol parser
+│   ├── context/
+│   │   ├── config.rs              # ContextConfig, CompactionConfig, CompactionScope
+│   │   ├── compaction.rs          # CompactionBlock, CompactedSection
+│   │   ├── compact_messages.rs    # compact_messages() — legacy tiered compaction
+│   │   ├── strategy.rs            # CompactionStrategy, BlockCompactionStrategy traits
+│   │   ├── orchestration.rs       # compact_session_loops(), build_context_from_session()
+│   │   ├── execution.rs           # ExecutionLimits, ExecutionTracker
+│   │   ├── tracker.rs             # ContextTracker (hybrid token counting)
+│   │   ├── token.rs               # TokenCounter trait, HeuristicTokenCounter
+│   │   └── skills.rs              # SkillSet (SKILL.md loader)
+│   ├── session/
+│   │   ├── model.rs               # Session, LoopRecord, Turn, LoopStatus
+│   │   ├── recorder.rs            # SessionRecorder (event → session state machine)
+│   │   ├── storage.rs             # save_session(), load_session(), list/delete
+│   │   └── helpers.rs             # Internal utilities
 │   ├── provider/
-│   │   ├── retry.rs            # Retry with exponential backoff
-│   │   ├── traits.rs           # StreamProvider trait, StreamEvent, ProviderError
-│   │   ├── model.rs            # ModelConfig, ApiProtocol, OpenAiCompat
-│   │   ├── registry.rs         # ProviderRegistry (protocol → provider)
-│   │   ├── anthropic.rs        # Anthropic Messages API
-│   │   ├── openai_compat.rs    # OpenAI Chat Completions (15+ providers)
-│   │   ├── openai_responses.rs # OpenAI Responses API
-│   │   ├── google.rs           # Google Generative AI
-│   │   ├── google_vertex.rs    # Google Vertex AI
-│   │   ├── bedrock.rs          # AWS Bedrock ConverseStream
-│   │   ├── azure_openai.rs     # Azure OpenAI
-│   │   ├── mock.rs             # Mock provider for testing
-│   │   └── sse.rs              # SSE utilities
+│   │   ├── traits.rs              # StreamProvider trait, StreamEvent, ProviderError
+│   │   ├── model.rs               # ModelConfig, ApiProtocol, OpenAiCompat
+│   │   ├── registry.rs            # ProviderRegistry (protocol → provider)
+│   │   ├── retry.rs               # Retry with exponential backoff
+│   │   ├── context_translation.rs # ContextTranslationStrategy (G8)
+│   │   ├── anthropic.rs           # Anthropic Messages API
+│   │   ├── openai_compat.rs       # OpenAI Chat Completions (15+ providers)
+│   │   ├── openai_responses.rs    # OpenAI Responses API
+│   │   ├── google.rs              # Google Generative AI
+│   │   ├── google_vertex.rs       # Google Vertex AI
+│   │   ├── bedrock.rs             # AWS Bedrock ConverseStream
+│   │   ├── azure_openai.rs        # Azure OpenAI
+│   │   ├── mock.rs                # Mock provider for testing
+│   │   └── sse.rs                 # SSE utilities
 │   ├── tools/
-│   │   ├── bash.rs             # BashTool
-│   │   ├── file.rs             # ReadFileTool, WriteFileTool
-│   │   ├── edit.rs             # EditFileTool
-│   │   ├── list.rs             # ListFilesTool
-│   │   └── search.rs           # SearchTool
-│   └── mcp/
-│       ├── client.rs           # MCP client (stdio + HTTP)
-│       ├── tool_adapter.rs     # McpToolAdapter (MCP tool → AgentTool)
-│       ├── transport.rs        # Transport implementations
-│       └── types.rs            # MCP protocol types
+│   │   ├── bash.rs                # BashTool
+│   │   ├── file.rs                # ReadFileTool, WriteFileTool
+│   │   ├── edit.rs                # EditFileTool
+│   │   ├── list.rs                # ListFilesTool
+│   │   ├── search.rs              # SearchTool
+│   │   ├── prun.rs                # PrunTool, PrunWithMemoTool (context pruning)
+│   │   └── registry.rs            # ToolRegistry (name → factory)
+│   ├── mcp/
+│   │   ├── client.rs              # MCP client (stdio + HTTP)
+│   │   ├── tool_adapter.rs        # McpToolAdapter (MCP tool → AgentTool)
+│   │   ├── transport.rs           # Transport implementations
+│   │   └── types.rs               # MCP protocol types
+│   └── openapi/                   # (feature-gated: "openapi")
+│       ├── adapter.rs             # OpenApiToolAdapter
+│       └── types.rs               # OpenApiConfig, OperationFilter
 ```
 
 ## Data Flow

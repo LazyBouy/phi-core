@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # Compaction System
 
 The compaction system manages context window pressure by summarizing, truncating, or dropping older conversation turns when the token count approaches the model's limit. Two strategies coexist: a legacy in-memory approach that rewrites the message array, and a modern block-based approach that creates non-destructive overlays on `LoopRecord`s.

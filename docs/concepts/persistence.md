@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # State Persistence
 
 phi-core supports saving and restoring agent conversation state, enabling pause/resume workflows, state transfer between processes, and conversation checkpointing.

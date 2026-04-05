@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # Configuration Guide
 
 Define your entire agent in a config file — model, tools, compaction, limits — and construct it with two lines of Rust:
@@ -224,42 +225,106 @@ system_prompt = "file:/etc/phi/prompts/coder.md"
 
 The `file:` prefix works at all levels: `[agent].system_prompt`, `[agent.profile].system_prompt`, and `[[agent.profile.instances]].system_prompt`.
 
-#### Strategy Reference (`{{...}}` protocol)
+#### Strategy Reference (`{{...}}` protocol) {#system-prompt-strategy}
 
-For advanced multi-block prompt composition, reference a system prompt instance:
+For advanced multi-block prompt composition, reference a system prompt instance. This uses a 3-entity chain: **strategy** (block template) → **prompt instance** (block content) → **agent reference**.
 
 ```toml
+# 1. Define the strategy template — block structure with ordering and size limits
+[[system_prompt_strategy.instances]]
+id = "{{coding_strategy}}"
+
+[[system_prompt_strategy.instances.blocks]]
+name = "identity"
+order = 0
+max_length = 2000
+
+[[system_prompt_strategy.instances.blocks]]
+name = "instructions"
+order = 1
+max_length = 3000
+
+[[system_prompt_strategy.instances.blocks]]
+name = "constraints"
+order = 2
+max_length = 1000
+
+# 2. Define the prompt instance — fills content into the strategy's blocks
+#    Block values can be inline text or file: references (relative to workspace)
+[[system_prompt.instances]]
+id = "{{coding_prompt}}"
+description = "System prompt for coding agents"
+type = "{{system_prompt_strategy.coding_strategy}}"
+identity = "You are an expert software engineer at a fintech company."
+instructions = "file:prompts/coding_instructions.md"
+constraints = "Never modify production databases. Always write tests."
+
+# 3. Reference the prompt instance from the agent
 [agent]
-system_prompt = "{{system_prompt.my_prompt}}"
+system_prompt = "{{system_prompt.coding_prompt}}"
+workspace = "workspace"
 ```
 
-This triggers the 3-entity chain:
-1. Finds `[[system_prompt.instances]]` with matching ID
-2. Finds the referenced `[[system_prompt_strategy.instances]]` (block template)
-3. Composes blocks in strategy order, resolving `file:` paths in block content
+The builder resolves the chain: finds the prompt instance → finds its strategy → sorts blocks by `order` → resolves `file:` paths → truncates each block to `max_length` → joins with double newlines.
 
-See [System Prompt Strategy](#system-prompt-strategy) for the full 3-entity model.
+See the Field Reference for [`[system_prompt_strategy]`](#system_prompt_strategy) and [`[system_prompt]`](#system_prompt) sections.
 
 #### Profile Instance Override
 
-When using named profile instances, the instance's `system_prompt` participates in resolution:
+When using named profile instances, the instance's `system_prompt` participates in resolution. The `system_prompt` field on a profile instance supports all three modes — inline text, `file:` path, or `{{...}}` reference to a system_prompt instance:
 
 ```toml
+# ── System prompt strategy + instance (reusable prompt definition) ───
+[[system_prompt_strategy.instances]]
+id = "{{simple}}"
+
+[[system_prompt_strategy.instances.blocks]]
+name = "identity"
+order = 0
+max_length = 5000
+
+[[system_prompt.instances]]
+id = "{{coder_prompt}}"
+type = "{{system_prompt_strategy.simple}}"
+identity = "file:prompts/coder.md"
+
+[[system_prompt.instances]]
+id = "{{reviewer_prompt}}"
+type = "{{system_prompt_strategy.simple}}"
+identity = "file:prompts/reviewer.md"
+
+# ── Profile instances reference system_prompt instances ──────────────
 [agent.profile]
+name = "base"
 system_prompt = "You are a general assistant."   # base fallback
 
 [[agent.profile.instances]]
-id = "{{specialist}}"
-system_prompt = "file:specialist_prompt.md"      # overrides base for this instance
+id = "{{coder}}"
+system_prompt = "{{system_prompt.coder_prompt}}"   # profile → system_prompt instance
+temperature = 0.2
+max_tokens = 16384
+
+[[agent.profile.instances]]
+id = "{{reviewer}}"
+system_prompt = "{{system_prompt.reviewer_prompt}}" # profile → system_prompt instance
+temperature = 0.1
+max_tokens = 8192
+
+# ── Agent instances reference profile instances ──────────────────────
+[[agent.instances]]
+name = "code-writer"
+agent_profile = "{{agent_profile.coder}}"          # agent → profile → system_prompt
 
 [[agent.instances]]
-name = "my-specialist"
-agent_profile = "{{agent_profile.specialist}}"   # uses specialist's system_prompt
+name = "code-reviewer"
+agent_profile = "{{agent_profile.reviewer}}"       # agent → profile → system_prompt
 
 [[agent.instances]]
-name = "my-generalist"
-# no agent_profile → falls back to base [agent.profile].system_prompt
+name = "generalist"
+# no agent_profile → uses base [agent.profile].system_prompt
 ```
+
+**Full reference chain:** `agent.instances` → `agent.profile.instances` (via `agent_profile`) → `system_prompt.instances` (via `system_prompt`) → `system_prompt_strategy.instances` (via `type`). Each layer can override or inherit from the one above.
 
 When an agent instance omits `agent_profile`, it is built using the base `[agent.profile]` directly (no instance override). The base profile's `system_prompt`, `temperature`, and other fields apply as defaults.
 
@@ -985,8 +1050,9 @@ tools = ["web_search"]
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `system_prompt` | string | None | Agent-level system prompt (overrides profile) |
+| `system_prompt` | string | None | Agent-level system prompt (overrides profile). Supports: inline text, `file:path` (relative to workspace), or `{{...}}` reference to a `[[system_prompt.instances]]` entry. |
 | `profile` | table | (empty) | Profile blueprint (see below) |
+| `workspace` | string | None | Workspace directory for `file:` resolution and tool paths |
 | `instances` | array | `[]` | Named agent instances |
 
 ### `[agent.profile]`
@@ -996,7 +1062,7 @@ tools = ["web_search"]
 | `profile_id` | string | UUID | Unique profile identifier |
 | `name` | string | None | Human-readable name |
 | `description` | string | None | Profile description |
-| `system_prompt` | string | None | Default system prompt |
+| `system_prompt` | string | None | Default system prompt. Supports: inline text, `file:path`, or `{{...}}` reference. |
 | `thinking_level` | string | None | `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"` |
 | `temperature` | float | None | LLM temperature (0.0-2.0) |
 | `max_tokens` | integer | None | Max output tokens |
@@ -1012,10 +1078,13 @@ Each entry in `[[agent.profile.instances]]`:
 |-------|------|---------|-------------|
 | `id` | string | **required** | `{{...}}` ID in the `agent_profile` namespace |
 | `description` | string | None | Human-readable description of this variant |
+| `name` | string | (from profile) | Override name |
+| `system_prompt` | string | (from profile) | Override system prompt (supports inline, `file:`, or `{{...}}`) |
 | `thinking_level` | string | (from profile) | Override thinking level |
 | `temperature` | float | (from profile) | Override temperature |
 | `max_tokens` | integer | (from profile) | Override max output tokens |
 | `config_id` | string | None | Stable identity for loop_id generation |
+| `skills` | array | (from profile) | Override skill names |
 
 ### `AgentInstanceSection`
 
@@ -1023,12 +1092,12 @@ Each entry in `[[agent.instances]]`:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `name` | string | **required** | Instance name |
+| `name` | string | `"unnamed"` | Instance name |
+| `agent_profile` | string | None | Profile instance reference (`{{...}}` syntax) |
+| `profile` | table | None | Inline profile override (not a reference) |
 | `system_prompt` | string | None | Instance-specific system prompt |
 | `provider` | string | (default provider) | Provider reference (`{{...}}` syntax) |
-| `agent_profile` | string | None | Profile instance reference (`{{...}}` syntax) |
-| `max_turns` | integer | None | Override max turns |
-| `tools` | array | None | Override tool list |
+| `workspace` | string | None | Per-instance workspace directory (overrides `[agent].workspace`) |
 
 ### `[provider]`
 
@@ -1091,6 +1160,41 @@ Each entry in `[[provider.instances]]` accepts all fields from `[provider]` abov
 | `keep_recent_turns` | integer | `10` | Verbatim turns from end |
 | `max_summary_tokens` | integer | `2000` | Summary token budget |
 | `tool_output_max_lines` | integer | `50` | Tool output line cap |
+
+### `[system_prompt_strategy]` {#system_prompt_strategy}
+
+Strategy templates define block structure for multi-block system prompts.
+
+#### `[[system_prompt_strategy.instances]]`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `id` | string | **required** | `{{...}}` ID for this strategy template |
+| `description` | string | None | Human-readable description |
+| `blocks` | array | `[]` | Block definitions (see below) |
+
+#### `[[system_prompt_strategy.instances.blocks]]`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | **required** | Block name (e.g., `"identity"`, `"instructions"`, `"constraints"`) |
+| `order` | integer | `0` | Assembly order — lower appears first in the composed prompt |
+| `max_length` | integer | unlimited | Maximum character budget for this block |
+
+### `[system_prompt]` {#system_prompt}
+
+Prompt instances fill content into a strategy's blocks.
+
+#### `[[system_prompt.instances]]`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `id` | string | **required** | `{{...}}` ID for this prompt instance |
+| `description` | string | None | Human-readable description |
+| `type` | string | None | `{{...}}` reference to a strategy instance (e.g., `"{{system_prompt_strategy.coding}}"`) |
+| *(block names)* | string | — | Each block defined in the strategy gets a field here. Value is inline text or `"file:path"` (relative to workspace). |
+
+**Note:** Block content fields use `#[serde(flatten)]` — they appear as top-level keys on the instance, not nested under a `blocks` table.
 
 ### `[execution]`
 
@@ -1241,3 +1345,16 @@ agent.retry_config();       // RetryConfig
 agent.session();            // Option<&Session>
 agent.build_config();       // AgentLoopConfig (full loop config)
 ```
+
+---
+
+<!-- TODO: Add more configuration examples:
+  - Multi-agent setup with different providers per agent
+  - System prompt strategy with file-based blocks (full working example)
+  - OpenRouter / Ollama local config with compat flags
+  - Sub-agent with tool delegation — show how [[sub_agents.instances]] link to [[agent.instances]] and how parent agent delegates tasks to sub-agents via provider/tool references
+  - Session-level callback scripts (before_task / after_task)
+  - Per-instance workspace with file: system prompts
+  - Compaction instances referenced by profile
+  - Cost tracking and max_cost enforcement
+-->

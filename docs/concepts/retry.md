@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # Retry with Backoff
 
 When an LLM provider returns a transient error — rate limit (HTTP 429) or network failure — phi-core automatically retries with exponential backoff and jitter. No configuration required; it works out of the box.

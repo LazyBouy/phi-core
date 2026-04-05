@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # Skills
 
 Skills extend an agent with domain expertise using the [AgentSkills](https://agentskills.io) open standard. A skill is a directory containing a `SKILL.md` file with instructions the agent can load on demand.

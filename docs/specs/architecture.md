@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # phi-core — System Architecture
 
 ## 1. Component Map
@@ -858,7 +859,7 @@ All fields on `Agent`:
 | `after_turn` | `Option<AfterTurnFn>` | Signature: `fn(&[AgentMessage], &Usage)` |
 | `on_error` | `Option<OnErrorFn>` | Signature: `fn(&str)` |
 | `input_filters` | `Vec<Arc<dyn InputFilter>>` | Applied in order before LLM call |
-| `compaction_strategy` | `Option<Arc<dyn CompactionStrategy>>` | Overrides default tiered compaction |
+| *(compaction strategies)* | *(moved to `ContextConfig.compaction`)* | `in_memory_strategy` and `block_strategy` fields on `CompactionConfig` (G5) |
 | `cancel` | `Option<CancellationToken>` | Created when `prompt()` starts, consumed by `abort()` |
 | `is_streaming` | `bool` | Set true on `prompt()` entry, false on exit |
 | `agent_id` | `String` | UUID v4 generated once at `Agent::new()`; stable for the Agent's lifetime. Injected into every `AgentContext` built by this agent. |

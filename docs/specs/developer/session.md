@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # Session
 
 A named container grouping all `LoopRecord`s for one agent session. A Session represents a task the agent performs. It has identity, formation history, configuration, and contains an ordered sequence of Loops (iterations).
@@ -11,11 +12,11 @@ Session [EXISTS]
 ├── HEADER
 │   ├── session_id, agent_id [EXISTS]
 │   ├── formation [EXISTS] — Explicit / FirstLoop / InactivityTimeout
-│   ├── scope [CONCEPTUAL] — Ephemeral / Persistent
+│   ├── scope [EXISTS] — Ephemeral / Persistent (SessionScope enum)
 │   ├── created_at, last_active_at [EXISTS]
 │   ├── parent_spawn_ref [EXISTS] — cross-session link
 │   ├── Model override [EXISTS]
-│   ├── thinking_level, temperature [CONCEPTUAL on Session]
+│   ├── thinking_level, temperature [EXISTS on Session]
 │   ├── Task Name, Task Status [CONCEPTUAL]
 │   └── Callbacks: before_task / after_task [EXISTS]
 ├── LINE ITEMS: Loops [EXISTS]
@@ -32,13 +33,13 @@ Session [EXISTS]
 | `session_id` | `String` | `[EXISTS]` | Stable identifier. Matches `AgentStart.session_id`. Generated as UUID v4 at `BasicAgent::new()`. |
 | `agent_id` | `String` | `[EXISTS]` | The agent that owns this session. Taken from the first `AgentStart` event. |
 | `formation` | `SessionFormation` | `[EXISTS]` | How the session was created. See Formation section below. |
-| `scope` | enum | `[CONCEPTUAL]` | Ephemeral (no persistence, fire-and-forget) or Persistent (Introspection mandatory, session logs retained). |
+| `scope` | `SessionScope` | `[EXISTS]` | `Ephemeral` (default, in-memory only) or `Persistent` (session logs retained). Declared via config `[session] scope = "persistent"`. |
 | `created_at` | `DateTime<Utc>` | `[EXISTS]` | Timestamp of the first `AgentStart` event for this session. |
 | `last_active_at` | `DateTime<Utc>` | `[EXISTS]` | Updated each time a new loop opens (on `AgentStart`). Reflects when the last loop started, not when it last had activity. |
 | `parent_spawn_ref` | `Option<SpawnRef>` | `[EXISTS]` | Cross-session link when this session was spawned as a sub-agent. Points back to parent session, loop, tool call. Inverse of `LoopRecord.child_loop_refs`. |
 | Model override | `ModelConfig` | `[EXISTS]` | Session-level model that overrides the Agent default. Would sit between Agent default and Loop-level model in the fallback hierarchy. |
-| `thinking_level` | `ThinkingLevel` | `[EXISTS]` on Agent; `[CONCEPTUAL]` on Session | Reasoning depth for this task. Currently lives on `BasicAgent`, conceptually belongs here. |
-| `temperature` | `Option<f32>` | `[EXISTS]` on Agent; `[CONCEPTUAL]` on Session | Sampling temperature for this task. Currently lives on `BasicAgent`, conceptually belongs here. |
+| `thinking_level` | `Option<ThinkingLevel>` | `[EXISTS]` | Session-level reasoning depth override (G9). Takes precedence over agent profile's thinking_level. Resolved via `AgentProfile::resolve_thinking_level(session_override)`. |
+| `temperature` | `Option<f32>` | `[EXISTS]` | Session-level temperature override (G9). Takes precedence over agent profile's temperature. Resolved via `AgentProfile::resolve_temperature(session_override)`. |
 | Task Name | `String` | `[CONCEPTUAL]` | Human-readable label for the task this session represents. |
 | Task Status | enum | `[CONCEPTUAL]` | Status of the task (e.g., Pending, Running, Completed, Failed). Derived from loop statuses but would be a first-class field. |
 

@@ -1,4 +1,7 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # Multi-User Sandboxing
+
+> **Scope note:** Multi-user sandboxing is a baby-phi platform feature, not phi-core. This spec defines the design for future implementation in baby-phi.
 
 The multi-user layer enables multiple users to run agents on the same host with isolated plugins, sessions, and resources. Each user's custom code runs in a sandbox that cannot access other users' data.
 

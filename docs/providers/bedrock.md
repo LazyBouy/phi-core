@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # Amazon Bedrock Provider
 
 Handles the AWS Bedrock ConverseStream API. Selected automatically when

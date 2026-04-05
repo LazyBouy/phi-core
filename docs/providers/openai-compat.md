@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # OpenAI Compatible Provider
 
 One implementation (`OpenAiCompatProvider`) covers OpenAI, xAI, Groq, Cerebras, OpenRouter,

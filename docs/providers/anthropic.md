@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # Anthropic Provider
 
 Handles the Anthropic Messages API with SSE streaming. Selected automatically when `ModelConfig.api == ApiProtocol::AnthropicMessages`.

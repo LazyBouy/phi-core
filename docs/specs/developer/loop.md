@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # Loop
 
 A complete record of one agent-loop execution, stored as `LoopRecord`. Loops are the iterations within a Session. Each Loop contains Turns (steps), tracks its model/provider configuration, accumulates usage, and links to parent/child loops for tree navigation.
@@ -52,7 +53,7 @@ The model/provider identity is captured as a lightweight snapshot, not the full 
 | `config.provider` | `String` | `[EXISTS]` | Provider name (e.g., `"anthropic"`, `"openai"`). |
 | `config.config_id` | `Option<String>` | `[EXISTS]` | Stable config identity from `AgentLoopConfig.config_id`. Matches the `config_segment` in `loop_id`. |
 
-**Model fallback hierarchy**: Loop (`AgentLoopConfig.model_config`) -> Session (`[CONCEPTUAL]`) -> Agent default (`BasicAgent.model_config`).
+**Model fallback hierarchy**: Loop (`AgentLoopConfig.model_config`) -> Session (`[EXISTS]` — `Session.model_config: Option<ModelConfig>`) -> Agent default (`BasicAgent.model_config`).
 
 ### Usage `[EXISTS]`
 

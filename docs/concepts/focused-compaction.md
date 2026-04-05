@@ -1,3 +1,5 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
+
 # Focused Compaction
 
 Focused compaction extends the [context compaction](compaction.md) system with two features: **focus messages** that steer what the compaction summary emphasizes, and **compaction instances** that let you define named compaction configurations reusable across agent profiles.
@@ -9,13 +11,16 @@ The `focus_message` field on `CompactionConfig` is an optional string prepended 
 Without a focus message, compaction produces a generic summary. With one, the summary retains details relevant to your domain:
 
 ```rust
-use phi_core::context::CompactionConfig;
+use phi_core::context::{ContextConfig, CompactionConfig};
 
-let config = CompactionConfig {
+let config = ContextConfig {
     max_context_tokens: 200_000,
-    focus_message: Some(
-        "Focus on specification details, API contracts, and architectural decisions.".to_string()
-    ),
+    compaction: CompactionConfig {
+        focus_message: Some(
+            "Focus on specification details, API contracts, and architectural decisions.".to_string()
+        ),
+        ..Default::default()
+    },
     ..Default::default()
 };
 ```
@@ -32,14 +37,17 @@ The focus message does not change the compaction trigger logic (thresholds, turn
 
 ## Compaction Instances
 
-Compaction instances are named variations of the compaction defaults, declared with `[[compaction.instances]]` in the config file. Each instance uses the `{{...}}` ID reference protocol to declare its name, and overrides specific fields from the parent `[compaction]` section. Fields not set on the instance fall through to the parent defaults.
+Compaction instances are named variations of the compaction defaults, declared with `[[context.compaction.instances]]` in the config file. Each instance uses the `{{...}}` ID reference protocol to declare its name, and overrides specific fields from the parent `[compaction]` section. Fields not set on the instance fall through to the parent defaults.
 
 ### Config example
 
 ```toml
-# ── Compaction defaults ─────────────────────────────────────────
-[compaction]
+# ── Context config (max_context_tokens lives on ContextConfig, not CompactionConfig) ──
+[context]
 max_context_tokens = 200000
+
+# ── Compaction defaults ─────────────────────────────────────────
+[context.compaction]
 compact_at_pct = 0.85
 compact_budget_threshold_pct = 0.05
 keep_first_turns = 2
@@ -49,14 +57,14 @@ tool_output_max_lines = 50
 focus_message = "Retain key decisions and code changes."
 
 # ── Named compaction instances ──────────────────────────────────
-[[compaction.instances]]
+[[context.compaction.instances]]
 id = "{{%coding%}}"
 description = "Compaction tuned for coding tasks"
 focus_message = "Focus on file paths, function signatures, and design rationale."
 keep_recent_turns = 6
 max_summary_tokens = 3000
 
-[[compaction.instances]]
+[[context.compaction.instances]]
 id = "{{%research%}}"
 description = "Compaction tuned for research tasks"
 focus_message = "Preserve citations, data sources, and methodology."
@@ -93,23 +101,26 @@ use phi_core::context::CompactionConfig;
 use phi_core::agent_loop::AgentLoopConfig;
 use phi_core::provider::ModelConfig;
 
-let compaction = CompactionConfig {
+let context = phi_core::context::ContextConfig {
     max_context_tokens: 200_000,
-    compact_at_pct: 0.85,
-    compact_budget_threshold_pct: 0.05,
-    keep_first_turns: 2,
-    keep_recent_turns: 6,
-    max_summary_tokens: 3_000,
-    tool_output_max_lines: 50,
-    focus_message: Some(
-        "Focus on file paths, function signatures, and design rationale.".to_string()
-    ),
+    compaction: CompactionConfig {
+        compact_at_pct: 0.85,
+        compact_budget_threshold_pct: 0.05,
+        keep_first_turns: 2,
+        keep_recent_turns: 6,
+        max_summary_tokens: 3_000,
+        tool_output_max_lines: 50,
+        focus_message: Some(
+            "Focus on file paths, function signatures, and design rationale.".to_string()
+        ),
+        ..Default::default()
+    },
     ..Default::default()
 };
 
 let config = AgentLoopConfig {
     model_config: ModelConfig::anthropic("claude-sonnet-4-20250514", "Sonnet", &api_key),
-    compaction_config: Some(compaction),
+    context_config: Some(context),
     ..Default::default()
 };
 ```
@@ -122,8 +133,8 @@ use phi_core::provider::ModelConfig;
 
 let agent = BasicAgent::new(ModelConfig::anthropic("claude-sonnet-4-20250514", "Sonnet", &api_key))
     .with_context_config(phi_core::context::ContextConfig {
+        max_context_tokens: 200_000,
         compaction: CompactionConfig {
-            max_context_tokens: 200_000,
             focus_message: Some("Retain specification details and API contracts.".to_string()),
             ..Default::default()
         },

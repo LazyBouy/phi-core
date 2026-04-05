@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-04-05 by Claude Code -->
 # Sub-Agents
 
 Sub-agents let a parent agent delegate tasks to child agent loops, each with their own system prompt, tools, and `ModelConfig`. The parent LLM invokes them like any other tool.
@@ -68,12 +69,14 @@ When the parent LLM calls multiple sub-agents in a single response, they run con
 |--------|---------|
 | `with_description()` | What the parent LLM sees (helps it decide when to delegate) |
 | `with_system_prompt()` | The sub-agent's own instructions |
-| `with_model_config(config)` | Replace the entire model config after construction |
 | `with_provider_override(provider)` | Bypass `ProviderRegistry` (primarily for tests) |
 | `with_tools()` | Tools available to the sub-agent (accepts `Vec<Arc<dyn AgentTool>>`) |
 | `with_max_turns(N)` | Turn limit (default: 10). Primary guard against runaway execution. |
+| `with_max_tokens(N)` | Max tokens for LLM responses |
 | `with_thinking()` | Enable extended thinking for the sub-agent |
 | `with_cache_config()` | Prompt caching settings |
+| `with_tool_execution(strategy)` | Tool execution strategy (Parallel, Sequential, Batched) |
+| `with_retry_config(config)` | Retry configuration for transient errors |
 | `with_parent_loop_id(id: String)` | Sets `parent_loop_id` on the child's `AgentContext`. The child's `AgentStart` event will carry this value, enabling parent→child ancestry tracing across the event stream. |
 
 ## Event Forwarding
