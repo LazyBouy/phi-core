@@ -8,6 +8,7 @@
 //! or ProviderError::Network, and this module decides what to do.
 
 use crate::provider::ProviderError;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tracing::warn;
 
@@ -30,7 +31,7 @@ Attempt 1: 1000ms * (0.8–1.2) = 800–1200ms
 Attempt 2: 2000ms * (0.8–1.2) = 1600–2400ms
 Attempt 3: 4000ms * (0.8–1.2) = 3200–4800ms → capped at 30s
 */
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetryConfig {
     /// Maximum number of retry attempts (0 = no retries, fail immediately).
     pub max_retries: usize,
