@@ -30,11 +30,30 @@ Python analogy:
   # Arc is implicit in Python (reference counting + GIL)
 */
 
-use super::transport::{HttpTransport, McpTransport, StdioTransport};
+use super::transport::{HttpTransport, McpTransport, StdioTransport, DEFAULT_REQUEST_TIMEOUT};
 use super::types::*;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
+
+/// Configuration knobs for [`McpClient`] construction.
+///
+/// Currently only carries the per-request timeout, but kept as a struct so future
+/// options can be added without breaking the public API.
+#[derive(Debug, Clone)]
+pub struct McpClientConfig {
+    /// Per-request timeout applied to every transport `send()` call.
+    pub request_timeout: Duration,
+}
+
+impl Default for McpClientConfig {
+    fn default() -> Self {
+        Self {
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
+        }
+    }
+}
 
 /// High-level MCP client that manages connection lifecycle and protocol.
 pub struct McpClient {
@@ -45,12 +64,27 @@ pub struct McpClient {
 
 impl McpClient {
     /// Connect to an MCP server via stdio (spawn a child process).
+    ///
+    /// Uses the default per-request timeout (`DEFAULT_REQUEST_TIMEOUT`, 30 s).
+    /// For a custom timeout, use [`McpClient::connect_stdio_with_config`].
     pub async fn connect_stdio(
         command: &str, // EXECUTABLE — binary to spawn as the MCP server subprocess
         args: &[&str], // ARGV — command-line args for the subprocess
         env: Option<HashMap<String, String>>, // ENV OVERRIDES — extra env vars; None = inherit parent env
     ) -> Result<Self, McpError> {
-        let transport = StdioTransport::new(command, args, env).await?;
+        Self::connect_stdio_with_config(command, args, env, McpClientConfig::default()).await
+    }
+
+    /// Connect to an MCP server via stdio with custom configuration.
+    pub async fn connect_stdio_with_config(
+        command: &str,
+        args: &[&str],
+        env: Option<HashMap<String, String>>,
+        config: McpClientConfig,
+    ) -> Result<Self, McpError> {
+        let transport = StdioTransport::new(command, args, env)
+            .await?
+            .with_timeout(config.request_timeout);
         let mut client = Self {
             transport: Arc::new(Mutex::new(Box::new(transport))),
             server_info: None,
@@ -61,8 +95,19 @@ impl McpClient {
     }
 
     /// Connect to an MCP server via HTTP.
+    ///
+    /// Uses the default per-request timeout (`DEFAULT_REQUEST_TIMEOUT`, 30 s).
+    /// For a custom timeout, use [`McpClient::connect_http_with_config`].
     pub async fn connect_http(url: &str) -> Result<Self, McpError> {
-        let transport = HttpTransport::new(url)?;
+        Self::connect_http_with_config(url, McpClientConfig::default()).await
+    }
+
+    /// Connect to an MCP server via HTTP with custom configuration.
+    pub async fn connect_http_with_config(
+        url: &str,
+        config: McpClientConfig,
+    ) -> Result<Self, McpError> {
+        let transport = HttpTransport::new_with_timeout(url, config.request_timeout)?;
         let mut client = Self {
             transport: Arc::new(Mutex::new(Box::new(transport))),
             server_info: None,

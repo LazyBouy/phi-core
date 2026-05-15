@@ -404,19 +404,41 @@ pub(super) async fn execute_single_tool(
     This is "errors as data" — the failure is part of the conversation, not an exception.
     */
     let (result, is_error) = match tool {
-        Some(tool) => match tool.execute(args.clone(), ctx).await {
-            Ok(r) => (r, false),
-            Err(e) => (
-                ToolResult {
-                    content: vec![Content::Text {
-                        text: e.to_string(), // Display trait → "Tool not found: bash", etc.
-                    }],
-                    details: serde_json::Value::Null,
-                    child_loop_id: None,
+        Some(tool) => {
+            // Resolve the effective per-tool timeout: per-tool override > config-level > None.
+            // When `None`, fall through to the original unbounded execute (preserving prior behaviour).
+            let effective_timeout = tool.timeout().or(config.tool_timeout);
+            // Clone ctx.cancel BEFORE moving ctx into execute, so we can signal cooperative
+            // cleanup on a timeout fire.
+            let tool_cancel = ctx.cancel.clone();
+
+            let exec_result = match effective_timeout {
+                None => tool.execute(args.clone(), ctx).await,
+                Some(d) => match tokio::time::timeout(d, tool.execute(args.clone(), ctx)).await {
+                    Ok(r) => r,
+                    Err(_) => {
+                        // Best-effort cooperative cleanup — tools that check `is_cancelled()`
+                        // can free resources before the next turn starts.
+                        tool_cancel.cancel();
+                        Err(ToolError::Timeout { duration: d })
+                    }
                 },
-                true,
-            ),
-        },
+            };
+
+            match exec_result {
+                Ok(r) => (r, false),
+                Err(e) => (
+                    ToolResult {
+                        content: vec![Content::Text {
+                            text: e.to_string(), // Display trait → "Tool not found: bash", etc.
+                        }],
+                        details: serde_json::Value::Null,
+                        child_loop_id: None,
+                    },
+                    true,
+                ),
+            }
+        }
         None => (
             ToolResult {
                 content: vec![Content::Text {

@@ -44,9 +44,18 @@ use super::types::*;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
+
+/// Default per-request timeout for MCP transports.
+///
+/// A stuck MCP subprocess or unresponsive HTTP server would otherwise block the
+/// agent loop indefinitely (the transport mutex serialises all requests). 30 s
+/// is conservative for normal tool-call latency and aggressive enough to fail
+/// fast on hangs. Override via the `with_timeout` builder.
+pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Transport trait for MCP communication.
 /*
@@ -78,6 +87,7 @@ pub struct StdioTransport {
     stdin: Arc<Mutex<tokio::process::ChildStdin>>, // write requests here
     stdout: Arc<Mutex<BufReader<tokio::process::ChildStdout>>>, // read responses here
     child: Arc<Mutex<Child>>,                      // keep handle to kill on close()
+    request_timeout: Duration,                     // per-request timeout for send()
 }
 
 impl StdioTransport {
@@ -130,7 +140,18 @@ impl StdioTransport {
             stdin: Arc::new(Mutex::new(stdin)),
             stdout: Arc::new(Mutex::new(BufReader::new(stdout))), // wrap for line-buffered reads
             child: Arc::new(Mutex::new(child)),
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
         })
+    }
+
+    /// Override the per-request timeout. Default is `DEFAULT_REQUEST_TIMEOUT` (30 s).
+    ///
+    /// Applies to each `send()` call independently — write + read + parse share the
+    /// same budget. On timeout, `send()` returns `McpError::Timeout` and the next
+    /// caller gets a fresh budget.
+    pub fn with_timeout(mut self, request_timeout: Duration) -> Self {
+        self.request_timeout = request_timeout;
+        self
     }
 }
 
@@ -140,37 +161,45 @@ impl McpTransport for StdioTransport {
         &self,
         request: JsonRpcRequest, // OUTGOING — serialized to newline-terminated JSON, written to the child's stdin
     ) -> Result<JsonRpcResponse, McpError> {
-        let mut line = serde_json::to_string(&request)?;
-        line.push('\n');
+        let timeout = self.request_timeout;
+        let work = async {
+            let mut line = serde_json::to_string(&request)?;
+            line.push('\n');
 
-        // Write request
-        {
-            let mut stdin = self.stdin.lock().await;
-            stdin
-                .write_all(line.as_bytes())
-                .await
-                .map_err(|e| McpError::Transport(format!("Write error: {}", e)))?;
-            stdin
-                .flush()
-                .await
-                .map_err(|e| McpError::Transport(format!("Flush error: {}", e)))?;
-        }
-
-        // Read response
-        let mut response_line = String::new();
-        {
-            let mut stdout = self.stdout.lock().await;
-            let bytes_read = stdout
-                .read_line(&mut response_line)
-                .await
-                .map_err(|e| McpError::Transport(format!("Read error: {}", e)))?;
-            if bytes_read == 0 {
-                return Err(McpError::ConnectionClosed);
+            // Write request
+            {
+                let mut stdin = self.stdin.lock().await;
+                stdin
+                    .write_all(line.as_bytes())
+                    .await
+                    .map_err(|e| McpError::Transport(format!("Write error: {}", e)))?;
+                stdin
+                    .flush()
+                    .await
+                    .map_err(|e| McpError::Transport(format!("Flush error: {}", e)))?;
             }
-        }
 
-        let response: JsonRpcResponse = serde_json::from_str(response_line.trim())?;
-        Ok(response)
+            // Read response
+            let mut response_line = String::new();
+            {
+                let mut stdout = self.stdout.lock().await;
+                let bytes_read = stdout
+                    .read_line(&mut response_line)
+                    .await
+                    .map_err(|e| McpError::Transport(format!("Read error: {}", e)))?;
+                if bytes_read == 0 {
+                    return Err(McpError::ConnectionClosed);
+                }
+            }
+
+            let response: JsonRpcResponse = serde_json::from_str(response_line.trim())?;
+            Ok::<_, McpError>(response)
+        };
+
+        match tokio::time::timeout(timeout, work).await {
+            Ok(result) => result,
+            Err(_) => Err(McpError::Timeout { duration: timeout }),
+        }
     }
 
     async fn close(&self) -> Result<(), McpError> {
@@ -189,15 +218,28 @@ impl McpTransport for StdioTransport {
 pub struct HttpTransport {
     client: reqwest::Client,
     base_url: String,
+    request_timeout: Duration,
 }
 
 impl HttpTransport {
-    /// Create a new HTTP transport.
+    /// Create a new HTTP transport with the default request timeout.
     pub fn new(url: &str) -> Result<Self, McpError> {
-        let client = reqwest::Client::new();
+        Self::new_with_timeout(url, DEFAULT_REQUEST_TIMEOUT)
+    }
+
+    /// Create a new HTTP transport with a custom request timeout.
+    ///
+    /// The timeout is enforced by the outer `tokio::time::timeout` in `send()`,
+    /// which hard-cancels the inner future (connect + read + JSON parse) on expiry.
+    /// We deliberately do not set `reqwest::Client::builder().timeout(d)` to avoid
+    /// a race between reqwest's internal timer and the outer tokio timer — having
+    /// both fire at the same duration produces a non-deterministic error
+    /// classification.
+    pub fn new_with_timeout(url: &str, request_timeout: Duration) -> Result<Self, McpError> {
         Ok(Self {
-            client,
+            client: reqwest::Client::new(),
             base_url: url.trim_end_matches('/').to_string(),
+            request_timeout,
         })
     }
 }
@@ -208,26 +250,34 @@ impl McpTransport for HttpTransport {
         &self,
         request: JsonRpcRequest, // OUTGOING — sent as HTTP POST body to base_url; response parsed from JSON reply
     ) -> Result<JsonRpcResponse, McpError> {
-        let resp = self
-            .client
-            .post(&self.base_url)
-            .json(&request)
-            .send()
-            .await
-            .map_err(|e| McpError::Transport(format!("HTTP error: {}", e)))?;
+        let timeout = self.request_timeout;
+        let work = async {
+            let resp = self
+                .client
+                .post(&self.base_url)
+                .json(&request)
+                .send()
+                .await
+                .map_err(|e| McpError::Transport(format!("HTTP error: {}", e)))?;
 
-        if !resp.status().is_success() {
-            return Err(McpError::Transport(format!(
-                "HTTP {} from server",
-                resp.status()
-            )));
+            if !resp.status().is_success() {
+                return Err(McpError::Transport(format!(
+                    "HTTP {} from server",
+                    resp.status()
+                )));
+            }
+
+            let response: JsonRpcResponse = resp
+                .json()
+                .await
+                .map_err(|e| McpError::Transport(format!("Response parse error: {}", e)))?;
+            Ok::<_, McpError>(response)
+        };
+
+        match tokio::time::timeout(timeout, work).await {
+            Ok(result) => result,
+            Err(_) => Err(McpError::Timeout { duration: timeout }),
         }
-
-        let response: JsonRpcResponse = resp
-            .json()
-            .await
-            .map_err(|e| McpError::Transport(format!("Response parse error: {}", e)))?;
-        Ok(response)
     }
 
     async fn close(&self) -> Result<(), McpError> {
@@ -282,5 +332,95 @@ mod tests {
         // Trailing slash stripped
         let transport = HttpTransport::new("http://localhost:8080/mcp/").unwrap();
         assert_eq!(transport.base_url, "http://localhost:8080/mcp");
+    }
+
+    #[tokio::test]
+    async fn stdio_send_times_out_on_silent_child() {
+        // `sleep 60` accepts no input and never writes — perfect "stuck child" stand-in.
+        let transport = StdioTransport::new("sleep", &["60"], None)
+            .await
+            .unwrap()
+            .with_timeout(Duration::from_millis(150));
+
+        let request = JsonRpcRequest::new("test/timeout", None);
+        let start = std::time::Instant::now();
+        let result = transport.send(request).await;
+        let elapsed = start.elapsed();
+
+        match result {
+            Err(McpError::Timeout { duration }) => {
+                assert_eq!(duration, Duration::from_millis(150));
+            }
+            other => panic!("expected McpError::Timeout, got {:?}", other),
+        }
+        // Wall-clock must reflect the timeout, not block on the 60s sleep.
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "send() should have returned promptly after timeout, took {:?}",
+            elapsed
+        );
+        transport.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stdio_send_succeeds_within_timeout() {
+        // A tiny bash echo-server: read one line then write a valid JSON-RPC response
+        // for each request. Loop forever so the transport can issue multiple sends.
+        let script = r#"while IFS= read -r _line; do printf '{"jsonrpc":"2.0","id":1,"result":{"ok":true}}\n'; done"#;
+        let transport = StdioTransport::new("bash", &["-c", script], None)
+            .await
+            .unwrap()
+            .with_timeout(Duration::from_secs(5));
+
+        let request = JsonRpcRequest::new("test/ok", None);
+        let response = transport.send(request).await.expect("send should succeed");
+        assert!(response.result.is_some());
+        assert!(response.error.is_none());
+        transport.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn http_send_times_out_on_silent_server() {
+        // Bind a listener that accepts connections but never writes — reqwest will hang
+        // on the response read, and our outer tokio::time::timeout must fire.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Background task: accept connections forever, hold them open without replying.
+        tokio::spawn(async move {
+            loop {
+                if let Ok((stream, _)) = listener.accept().await {
+                    // Keep the connection open; never write.
+                    tokio::spawn(async move {
+                        let _stream = stream;
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                    });
+                }
+            }
+        });
+
+        let url = format!("http://{}/", addr);
+        let transport = HttpTransport::new_with_timeout(&url, Duration::from_millis(200)).unwrap();
+        let request = JsonRpcRequest::new("test/timeout", None);
+        let start = std::time::Instant::now();
+        let result = transport.send(request).await;
+        let elapsed = start.elapsed();
+
+        match result {
+            Err(McpError::Timeout { duration }) => {
+                assert_eq!(duration, Duration::from_millis(200));
+            }
+            other => panic!("expected McpError::Timeout, got {:?}", other),
+        }
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "send() should have returned promptly after timeout, took {:?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn stdio_default_timeout_is_30s() {
+        // Verify the documented default constant.
+        assert_eq!(DEFAULT_REQUEST_TIMEOUT, Duration::from_secs(30));
     }
 }

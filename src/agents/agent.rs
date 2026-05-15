@@ -257,6 +257,16 @@ pub trait Agent: Send {
         ToolExecutionStrategy::default()
     }
 
+    /// The agent's per-tool execution timeout. Default: `None` (no per-tool timeout).
+    ///
+    /// When `Some(d)`, each `AgentTool::execute()` call is bounded by `d`. An
+    /// individual tool's `AgentTool::timeout()` override takes precedence. On timeout
+    /// the tool's child cancel token is fired and a `ToolError::Timeout` is returned
+    /// to the LLM — the agent loop continues.
+    fn tool_timeout(&self) -> Option<std::time::Duration> {
+        None
+    }
+
     /// The agent's retry config. Default: `RetryConfig::default()`.
     fn retry_config(&self) -> crate::provider::retry::RetryConfig {
         crate::provider::retry::RetryConfig::default()
@@ -371,6 +381,7 @@ pub trait Agent: Send {
             execution_limits: self.execution_limits().cloned(),
             cache_config: self.cache_config(),
             tool_execution: self.tool_execution(),
+            tool_timeout: self.tool_timeout(),
             retry_config: self.retry_config(),
             before_turn: None,
             after_turn: None,

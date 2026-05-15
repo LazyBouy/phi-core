@@ -48,7 +48,7 @@ pub mod tool_adapter;
 pub mod transport;
 pub mod types;
 
-pub use client::McpClient;
+pub use client::{McpClient, McpClientConfig};
 pub use tool_adapter::McpToolAdapter;
-pub use transport::{HttpTransport, McpTransport, StdioTransport};
+pub use transport::{HttpTransport, McpTransport, StdioTransport, DEFAULT_REQUEST_TIMEOUT};
 pub use types::{McpContent, McpError, McpToolCallResult, McpToolInfo, ServerInfo};

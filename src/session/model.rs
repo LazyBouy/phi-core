@@ -618,6 +618,14 @@ pub enum SessionError {
     Serialize(#[from] serde_json::Error),
     #[error("Session not found: {session_id}")]
     NotFound { session_id: String },
+    /// Returned by [`SessionStore`](crate::session::SessionStore) when an exclusive
+    /// advisory lock could not be acquired on the target session file within the retry
+    /// budget — typically because another process is currently writing the same session.
+    #[error("Session {session_id} is locked by another writer")]
+    Locked { session_id: String },
+    /// Async runtime failure when spawning blocking I/O work (e.g. `tokio::task::JoinError`).
+    #[error("Background task error: {0}")]
+    Task(String),
 }
 
 // ---------------------------------------------------------------------------

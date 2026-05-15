@@ -201,6 +201,8 @@ pub enum McpError {
     Io(#[from] std::io::Error),
     #[error("Connection closed")]
     ConnectionClosed,
+    #[error("Request timed out after {duration:?}")]
+    Timeout { duration: std::time::Duration },
 }
 
 #[cfg(test)]

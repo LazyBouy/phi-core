@@ -22,10 +22,21 @@ async fn run_parallel_branches(
 ) -> Vec<ParallelLoopOutcome> {
     let branch_futures: Vec<_> = contexts
         .into_iter()
-        .zip(configs.into_iter())
+        .zip(configs)
         .enumerate()
         .map(|(i, (mut ctx, config))| {
-            let loop_id = ctx.loop_id.clone().unwrap_or_default();
+            // Branch loop_ids are set deterministically by the dispatcher
+            // (`agent_loop_parallel` below, lines that build `branch_contexts`). A `None` here
+            // would mean the dispatcher contract was violated upstream — surface that loudly
+            // rather than silently falling back to the empty string.
+            let loop_id = ctx.loop_id.clone().unwrap_or_else(|| {
+                tracing::warn!(
+                    "run_parallel_branches: branch context {} missing loop_id; this should \
+                     have been set by the dispatcher. Falling back to empty string.",
+                    i
+                );
+                String::new()
+            });
             let prompts = prompts.clone();
             let main_tx = tx.clone();
             let cancel = cancel.clone();
@@ -148,14 +159,15 @@ pub async fn agent_loop_parallel(
         );
     }
 
-    // Ensure shared session / agent identity.
-    if base_context.agent_id.is_none() {
-        base_context.agent_id = Some(uuid::Uuid::new_v4().to_string());
-    }
-    if base_context.session_id.is_none() {
-        base_context.session_id = Some(uuid::Uuid::new_v4().to_string());
-    }
-    let session_id = base_context.session_id.clone().unwrap();
+    // Ensure shared session / agent identity. `get_or_insert_with` populates the field if None
+    // and returns `&mut String` either way — clone for the owned local we need below.
+    base_context
+        .agent_id
+        .get_or_insert_with(|| uuid::Uuid::new_v4().to_string());
+    let session_id = base_context
+        .session_id
+        .get_or_insert_with(|| uuid::Uuid::new_v4().to_string())
+        .clone();
 
     // Assign deterministic loop_ids: {session_id}.{config_segment}.{N}
     let loop_ids: Vec<String> = configs

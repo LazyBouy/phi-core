@@ -30,6 +30,7 @@ reqwest-eventsource = "0.6"
 futures = "0.3"
 rand = "0.10.0"
 base64 = "0.22"
+fs2 = "0.4"
 openapiv3 = { version = "2", optional = true }
 serde_yaml = "0.9"
 toml = "0.8"

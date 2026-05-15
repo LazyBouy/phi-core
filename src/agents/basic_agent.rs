@@ -22,6 +22,25 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+/// Acquire a `Mutex<Vec<T>>` guard tolerating poisoning.
+///
+/// `Mutex` poisoning happens when a thread panics while holding the guard.
+/// The steering and follow-up queues are recoverable data — a panic in a hook
+/// or tool callback should not crash the entire agent session. We log a warning
+/// and recover the inner `Vec` via `PoisonError::into_inner()`.
+fn lock_queue<T>(q: &Mutex<Vec<T>>) -> std::sync::MutexGuard<'_, Vec<T>> {
+    match q.lock() {
+        Ok(g) => g,
+        Err(poison) => {
+            tracing::warn!(
+                "BasicAgent: queue mutex was poisoned; recovering inner Vec. \
+                 A prior hook or tool callback panicked while holding the lock."
+            );
+            poison.into_inner()
+        }
+    }
+}
+
 /*
 ARCHITECTURE: BasicAgent vs agent_loop — stateful wrapper vs stateless functions
 
@@ -106,10 +125,10 @@ pub struct BasicAgent {
     Rc (Reference Counted) is NOT thread-safe. Since tokio runs on a thread pool,
     closures may execute on any thread, so we need Arc (atomic = thread-safe).
 
-    `.lock().unwrap()` — acquire the Mutex lock, panic if the Mutex is "poisoned"
-    (poisoning happens if another thread panicked while holding the lock).
-    In practice, unwrap() on a Mutex is acceptable because Mutex poisoning indicates
-    a bug, and panicking is the right response.
+    Queue access goes through `lock_queue()` (see top of file) which tolerates
+    poisoning — a panic in a hook or tool callback logs a warning and recovers the
+    inner `Vec` rather than crashing the agent session. Poisoning still indicates a
+    bug upstream; we surface it via `tracing::warn!`.
     */
     steering_queue: Arc<Mutex<Vec<AgentMessage>>>,
     follow_up_queue: Arc<Mutex<Vec<AgentMessage>>>,
@@ -121,6 +140,7 @@ pub struct BasicAgent {
     pub execution_limits: Option<ExecutionLimits>,
     pub cache_config: CacheConfig,
     pub tool_execution: ToolExecutionStrategy,
+    pub tool_timeout: Option<std::time::Duration>,
     pub retry_config: crate::provider::retry::RetryConfig,
 
     // Lifecycle callbacks
@@ -209,6 +229,7 @@ impl BasicAgent {
             execution_limits: Some(ExecutionLimits::default()), // enabled by default
             cache_config: CacheConfig::default(),
             tool_execution: ToolExecutionStrategy::default(), // Parallel
+            tool_timeout: None,
             retry_config: crate::provider::retry::RetryConfig::default(), // 3 retries
             before_turn: None,
             after_turn: None,
@@ -314,6 +335,12 @@ impl BasicAgent {
 
     pub fn with_tool_execution(mut self, strategy: ToolExecutionStrategy) -> Self {
         self.tool_execution = strategy;
+        self
+    }
+
+    /// Set the per-tool execution timeout. See [`AgentLoopConfig::tool_timeout`].
+    pub fn with_tool_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.tool_timeout = Some(timeout);
         self
     }
 
@@ -952,7 +979,7 @@ impl BasicAgent {
             get_steering_messages: Some(Box::new(move || {
                 // This closure runs each time the agent loop checks for steering messages.
                 // `move` captured: steering_queue (Arc clone), steering_mode (Copy)
-                let mut queue = steering_queue.lock().unwrap(); // acquire Mutex lock
+                let mut queue = lock_queue(&steering_queue); // poison-tolerant lock
                 match steering_mode {
                     QueueMode::OneAtATime => {
                         if queue.is_empty() {
@@ -968,9 +995,10 @@ impl BasicAgent {
             execution_limits: self.execution_limits.clone(),
             cache_config: self.cache_config.clone(),
             tool_execution: self.tool_execution.clone(),
+            tool_timeout: self.tool_timeout,
             retry_config: self.retry_config.clone(),
             get_follow_up_messages: Some(Box::new(move || {
-                let mut queue = follow_up_queue.lock().unwrap();
+                let mut queue = lock_queue(&follow_up_queue);
                 match follow_up_mode {
                     QueueMode::OneAtATime => {
                         if queue.is_empty() {
@@ -1262,23 +1290,25 @@ impl Agent for BasicAgent {
     This design allows `steer()` to be called from OTHER threads or closures
     that only have &-access to the BasicAgent (e.g., a button click handler).
 
-    `.lock().unwrap()` — unwrap because Mutex poisoning (from a panicking thread)
-    is a programming bug, not a runtime error we should handle gracefully.
+    Lock acquisition uses `lock_queue()` (see top of file) which tolerates
+    `Mutex` poisoning. A panic in a hook or tool callback would otherwise crash
+    every subsequent `steer()` / `follow_up()` call even though the underlying
+    queue is recoverable data.
     */
     fn steer(&self, msg: AgentMessage) {
-        self.steering_queue.lock().unwrap().push(msg);
+        lock_queue(&self.steering_queue).push(msg);
     }
 
     fn follow_up(&self, msg: AgentMessage) {
-        self.follow_up_queue.lock().unwrap().push(msg);
+        lock_queue(&self.follow_up_queue).push(msg);
     }
 
     fn clear_steering_queue(&self) {
-        self.steering_queue.lock().unwrap().clear();
+        lock_queue(&self.steering_queue).clear();
     }
 
     fn clear_follow_up_queue(&self) {
-        self.follow_up_queue.lock().unwrap().clear();
+        lock_queue(&self.follow_up_queue).clear();
     }
 
     fn set_steering_mode(&mut self, mode: QueueMode) {
@@ -1329,6 +1359,10 @@ impl Agent for BasicAgent {
 
     fn tool_execution(&self) -> ToolExecutionStrategy {
         self.tool_execution.clone()
+    }
+
+    fn tool_timeout(&self) -> Option<std::time::Duration> {
+        self.tool_timeout
     }
 
     fn retry_config(&self) -> crate::provider::retry::RetryConfig {
@@ -1411,5 +1445,72 @@ impl Agent for BasicAgent {
 
     fn context_translation(&self) -> Option<Arc<dyn ContextTranslationStrategy>> {
         self.context_translation.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: poison a `Mutex<Vec<u32>>` by panicking inside a guard on a child thread.
+    fn poison_mutex<T: Send + 'static>(m: Arc<Mutex<T>>) {
+        let m = m.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = m.lock().unwrap();
+            panic!("intentional panic to poison the mutex");
+        })
+        .join(); // join — captures and drops the panic
+    }
+
+    #[test]
+    fn lock_queue_recovers_inner_vec_after_poison() {
+        let q: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(vec![1, 2, 3]));
+        poison_mutex(q.clone());
+        assert!(
+            q.is_poisoned(),
+            "test pre-condition: mutex should be poisoned"
+        );
+
+        // lock_queue must not panic; it must surface the original Vec.
+        let guard = lock_queue(&q);
+        assert_eq!(*guard, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn basic_agent_steer_survives_queue_poison() {
+        let agent = BasicAgent::new(ModelConfig::anthropic("mock", "mock-model", "test-key"));
+
+        // Poison the steering queue by panicking inside a guard.
+        let q = agent.steering_queue.clone();
+        let _ = std::thread::spawn(move || {
+            let _g = q.lock().unwrap();
+            panic!("poison the steering queue");
+        })
+        .join();
+        assert!(agent.steering_queue.is_poisoned());
+
+        // The public steer/clear API should still work.
+        agent.steer(AgentMessage::Llm(LlmMessage::new(Message::user("hi"))));
+        assert_eq!(lock_queue(&agent.steering_queue).len(), 1);
+        agent.clear_steering_queue();
+        assert_eq!(lock_queue(&agent.steering_queue).len(), 0);
+    }
+
+    #[test]
+    fn basic_agent_follow_up_survives_queue_poison() {
+        let agent = BasicAgent::new(ModelConfig::anthropic("mock", "mock-model", "test-key"));
+
+        let q = agent.follow_up_queue.clone();
+        let _ = std::thread::spawn(move || {
+            let _g = q.lock().unwrap();
+            panic!("poison the follow-up queue");
+        })
+        .join();
+        assert!(agent.follow_up_queue.is_poisoned());
+
+        agent.follow_up(AgentMessage::Llm(LlmMessage::new(Message::user("more"))));
+        assert_eq!(lock_queue(&agent.follow_up_queue).len(), 1);
+        agent.clear_follow_up_queue();
+        assert_eq!(lock_queue(&agent.follow_up_queue).len(), 0);
     }
 }

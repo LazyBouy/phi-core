@@ -104,6 +104,8 @@ pub enum ToolError {
     InvalidArgs(String),
     #[error("Cancelled")]
     Cancelled,
+    #[error("Tool exceeded timeout of {duration:?}")]
+    Timeout { duration: std::time::Duration },
 }
 
 /// Context passed to tool execution. Bundles all per-invocation state.
@@ -269,4 +271,18 @@ pub trait AgentTool: Send + Sync {
         params: serde_json::Value, // LLM INPUT — JSON args chosen by the LLM; validated inside execute()
         ctx: ToolContext, // SYSTEM ENV — cancel token + streaming callbacks from the agent loop
     ) -> Result<ToolResult, ToolError>;
+
+    /// Optional per-tool execution timeout.
+    ///
+    /// Resolution order at dispatch time:
+    /// 1. This per-tool override (if `Some`)
+    /// 2. `AgentLoopConfig.tool_timeout` (if `Some`)
+    /// 3. `None` — no per-tool timeout (loop-level limits still apply)
+    ///
+    /// On timeout, the agent loop fires the tool's child cancel token (best-effort
+    /// cooperative cancellation) and synthesises a `ToolError::Timeout` result so the
+    /// LLM sees the failure and can self-correct without the agent loop aborting.
+    fn timeout(&self) -> Option<std::time::Duration> {
+        None
+    }
 }

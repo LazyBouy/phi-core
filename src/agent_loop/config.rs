@@ -132,6 +132,15 @@ pub struct AgentLoopConfig {
     /// Tool execution strategy (sequential, parallel, or batched).
     pub tool_execution: ToolExecutionStrategy, // from types.rs
 
+    /// Per-tool execution timeout.
+    ///
+    /// When `Some(d)`, each individual `AgentTool::execute()` call is bounded by `d`.
+    /// On expiry, the tool's child cancel token is signalled (cooperative cleanup) and a
+    /// `ToolError::Timeout` is synthesised as the tool result — the LLM sees the failure
+    /// and the agent loop continues. A per-tool override via `AgentTool::timeout()` takes
+    /// precedence over this field. `None` (the default) means no per-tool timeout.
+    pub tool_timeout: Option<std::time::Duration>,
+
     /// Retry configuration for transient provider errors.
     pub retry_config: crate::provider::retry::RetryConfig,
 

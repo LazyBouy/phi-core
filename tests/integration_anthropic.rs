@@ -32,6 +32,7 @@ fn make_config() -> AgentLoopConfig {
         execution_limits: None,
         cache_config: CacheConfig::default(),
         tool_execution: ToolExecutionStrategy::default(),
+        tool_timeout: None,
         retry_config: phi_core::RetryConfig::default(),
         before_turn: None,
         after_turn: None,
