@@ -1,4 +1,4 @@
-<!-- Last verified: 2026-04-05 by Claude Code -->
+<!-- Last verified: 2026-05-16 by Claude Code -->
 # Configuration Guide
 
 Define your entire agent in a config file — model, tools, compaction, limits — and construct it with two lines of Rust:
@@ -1331,7 +1331,10 @@ agent.cache_config();       // CacheConfig
 agent.tool_execution();     // ToolExecutionStrategy
 agent.retry_config();       // RetryConfig
 agent.session();            // Option<&Session>
-agent.build_config();       // AgentLoopConfig (full loop config)
+agent.build_config();       // Result<AgentLoopConfig, AgentBuildError>
+                            // Default impl returns Err(MissingModelConfig)
+                            // if model_config() returns None. BasicAgent's
+                            // override always returns Ok(...).
 ```
 
 ---

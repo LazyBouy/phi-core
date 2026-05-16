@@ -24,7 +24,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-phi-core = "0.6"
+phi-core = "0.7"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -32,7 +32,7 @@ To enable OpenAPI tool generation:
 
 ```toml
 [dependencies]
-phi-core = { version = "0.6", features = ["openapi"] }
+phi-core = { version = "0.7", features = ["openapi"] }
 ```
 
 **Minimum Supported Rust Version**: 1.75
@@ -734,6 +734,15 @@ ANTHROPIC_API_KEY=sk-ant-... cargo test --test integration_anthropic
 | `callbacks.rs` | Demonstrates `before_turn` / `after_turn` hooks |
 | `persistence.rs` | Save and restore conversation history |
 | `sub_agent.rs` | Task delegation with `SubAgentTool` |
+
+---
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for release notes. Latest: **0.7.0** —
+hardening + ergonomics (per-tool timeouts, structured-output contract,
+credential refresh, pluggable `SessionStore`, MCP transport timeouts,
+poison-tolerant queues). One breaking change to `Agent::build_config()`.
 
 ---
 

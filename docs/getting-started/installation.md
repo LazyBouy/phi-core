@@ -1,16 +1,16 @@
-<!-- Last verified: 2026-04-05 by Claude Code -->
+<!-- Last verified: 2026-05-16 by Claude Code -->
 # Installation
 
 ## Requirements
 
-- Rust 2021 edition (1.56+, recommended 1.75+)
+- Rust 2021 edition (1.75+)
 - Tokio async runtime
 
 ## Add to Cargo.toml
 
 ```toml
 [dependencies]
-phi-core = "0.5"
+phi-core = "0.7"
 ```
 
 ## Dependencies
@@ -40,5 +40,5 @@ Enable in `Cargo.toml`:
 
 ```toml
 [dependencies]
-phi-core = { version = "0.5", features = ["openapi"] }
+phi-core = { version = "0.7", features = ["openapi"] }
 ```

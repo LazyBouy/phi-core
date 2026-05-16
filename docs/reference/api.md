@@ -1,4 +1,4 @@
-<!-- Last verified: 2026-04-05 by Claude Code -->
+<!-- Last verified: 2026-05-16 by Claude Code -->
 # API Reference
 
 ## Top-Level Functions
@@ -245,4 +245,34 @@ pub use provider::retry::RetryConfig;
 // Types (glob re-export)
 pub use types::*;  // Message, Content, AgentMessage, AgentEvent, Usage, LlmMessage,
                     // StopReason, StreamDelta, TurnTrigger, ThinkingLevel, CacheConfig, etc.
+```
+
+### 0.7.0 additions (reachable via module paths)
+
+These symbols were added in 0.7.0 but are not (yet) part of the top-level glob.
+Import them via their module path:
+
+```rust
+// Session: trait-based pluggable store + atomic-write filesystem impl with
+// advisory locks (fs2 exclusive lock; returns SessionError::Locked on contention).
+use phi_core::session::{SessionStore, FileSystemSessionStore};
+
+// Provider: credential refresh hook for long-running agents whose token expires
+// mid-run. On ProviderError::Auth, the loop invalidates the cached credential
+// and retries once before propagating.
+use phi_core::provider::{CredentialProvider, StaticCredentialProvider};
+
+// Provider: structured-output contract. JsonObject = free-form JSON;
+// JsonSchema = strict schema (native where supported, tool-call emulation on
+// Anthropic and Anthropic-on-Bedrock, SchemaMismatch on others).
+use phi_core::provider::ResponseFormat;
+
+// Agent: fallible build_config(). Default impl returns Err(MissingModelConfig)
+// instead of panicking when model_config() is None.
+use phi_core::agents::AgentBuildError;
+
+// MCP: configurable per-request timeout (default 30s) on both stdio + HTTP
+// transports. Use McpClientConfig with connect_stdio_with_config /
+// connect_http_with_config.
+use phi_core::mcp::{McpClientConfig, DEFAULT_REQUEST_TIMEOUT};
 ```

@@ -1,4 +1,4 @@
-<!-- Last verified: 2026-04-05 by Claude Code -->
+<!-- Last verified: 2026-05-16 by Claude Code -->
 # phi-core — System Architecture
 
 ## 1. Component Map
@@ -123,7 +123,7 @@
 **Availability:** Only compiled when the `openapi` feature flag is enabled.
 
 ### SessionStore (`src/session/`)
-**Responsibility:** Persistent session layer. Records every `AgentEvent` into a structured tree of `Session` + `LoopRecord` objects, and provides load/save/list/delete functions for flat JSON-file persistence.
+**Responsibility:** Persistent session layer. Records every `AgentEvent` into a structured tree of `Session` + `LoopRecord` objects, and provides both free-function and trait-based APIs for flat JSON-file persistence.
 **Public interface:**
 - `SessionRecorder::new(config)` — Create a recorder; call `on_event(event)` for every event on the agent's `tx` channel.
 - `SessionRecorder::flush()` — Finalize all open loops (status → `Aborted`) and move them into their sessions.
@@ -131,12 +131,14 @@
 - `SessionRecorder::sessions()` — Iterate all known sessions (completed + in-progress).
 - `SessionRecorder::get_session(id)` — Look up a session by `session_id`.
 - `SessionRecorder::current_loop(id)` — Look up an in-progress `LoopRecord` by `loop_id`.
-- `save_session(session, dir)` — Write `{dir}/{session_id}.json` (creates `dir` if needed).
+- `save_session(session, dir)` — Write `{dir}/{session_id}.json` (creates `dir` if needed). Atomic via tmp-file + rename.
 - `load_session(session_id, dir)` — Read `{dir}/{session_id}.json`.
 - `list_session_ids(dir)` — List all session ids in `dir`, newest first.
 - `load_sessions_for_agent(agent_id, dir)` — Load all sessions matching `agent_id`.
 - `delete_session(session_id, dir)` — Remove `{dir}/{session_id}.json`.
-**File format:** Pretty-printed JSON. Flat directory — one file per session, no index.
+- `SessionStore` trait — async `save` / `load` / `list_ids` / `delete` / `list_for_agent` for callers that want a pluggable store (custom backends, mocks). *(Added 0.7.0)*
+- `FileSystemSessionStore::new(dir)` — In-tree async impl of `SessionStore`. Adds advisory `fs2` exclusive lock on save (returns `SessionError::Locked` if a concurrent writer holds it). *(Added 0.7.0)*
+**File format:** Pretty-printed JSON. Flat directory — one file per session, no index. Writes are atomic (tmp + rename) regardless of API surface used.
 
 ### RetryEngine (`src/provider/retry.rs`)
 **Responsibility:** Computes exponential-backoff delay with ±20% jitter. Classifies which errors are retryable.

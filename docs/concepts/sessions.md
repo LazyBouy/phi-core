@@ -1,4 +1,4 @@
-<!-- Last verified: 2026-04-05 by Claude Code -->
+<!-- Last verified: 2026-05-16 by Claude Code -->
 
 # Sessions
 
@@ -416,7 +416,7 @@ let mut recorder = SessionRecorder::new(config);
 
 | Function | Description |
 |---|---|
-| `save_session(session, dir)` | Write `{dir}/{session_id}.json` |
+| `save_session(session, dir)` | Write `{dir}/{session_id}.json` (atomic via tmp + rename) |
 | `load_session(session_id, dir)` | Read `{dir}/{session_id}.json` |
 | `list_session_ids(dir)` | List all `.json` filenames, newest first |
 | `load_sessions_for_agent(agent_id, dir)` | Load all sessions matching `agent_id` |
@@ -424,6 +424,33 @@ let mut recorder = SessionRecorder::new(config);
 
 File format: pretty-printed JSON (`serde_json::to_writer_pretty`).
 Directory layout: flat — `{dir}/{session_id}.json`, no sub-directories, no index.
+Writes are atomic: the implementation writes to a temp file then renames over the
+target, so readers never observe a partially-written file.
+
+### Pluggable store trait *(0.7.0+)*
+
+For callers that want to swap the persistence backend (e.g. S3, SQLite, an
+in-memory fake for tests) or that need concurrent-writer safety, phi-core
+exposes a `SessionStore` async trait alongside the free functions:
+
+```rust
+use phi_core::session::{SessionStore, FileSystemSessionStore};
+
+let store = FileSystemSessionStore::new("./sessions");
+store.save(&session).await?;          // acquires fs2 exclusive lock
+let loaded = store.load("sess-1").await?;
+let ids    = store.list_ids().await?;
+store.delete("sess-1").await?;
+```
+
+`FileSystemSessionStore::save()` takes an advisory `fs2` exclusive lock on the
+target file before the atomic rename. Concurrent writers to the same
+`session_id` get back `SessionError::Locked { session_id }` instead of silently
+producing a corrupt file. Readers take a shared lock and so coexist with
+themselves.
+
+The free `save_session()` / `load_session()` / etc. functions remain available
+and unchanged — use the trait when you need pluggability or contention safety.
 
 ### When to call `flush()`
 
