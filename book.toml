@@ -15,7 +15,6 @@ preferred-dark-theme = "navy"
 git-repository-url = "https://github.com/LazyBouy/phi-core"
 edit-url-template = "https://github.com/LazyBouy/phi-core/edit/main/{path}"
 site-url = "/phi-core/"
-additional-css = ["docs/theme/custom.css"]
 
 [output.html.search]
 enable = true
