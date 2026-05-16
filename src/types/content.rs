@@ -186,6 +186,78 @@ impl Message {
         }
     }
 
+    /// Parse the assistant's response as structured JSON of type `T`.
+    ///
+    /// Used as the read-side counterpart to `StreamConfig.response_format`:
+    ///
+    /// - For providers with native JSON modes (OpenAI, Google), the text content
+    ///   carries the JSON object — this method `serde_json::from_str`s it directly.
+    /// - For the Anthropic tool-call emulation, the JSON is in the `arguments` of
+    ///   a synthetic `respond_json` tool call — this method prefers that path
+    ///   when present.
+    ///
+    /// Returns `ProviderError::SchemaMismatch` with a descriptive `reason` on any
+    /// failure mode (not an assistant message, no text/tool-call content, invalid
+    /// JSON, deserialisation mismatch).
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// #[derive(serde::Deserialize)]
+    /// struct Answer { score: i32, label: String }
+    ///
+    /// let msg: phi_core::Message = /* obtained from a JsonObject-formatted call */;
+    /// let parsed: Answer = msg.extract_json()?;
+    /// ```
+    pub fn extract_json<T: serde::de::DeserializeOwned>(
+        &self,
+    ) -> Result<T, crate::provider::ProviderError> {
+        use crate::provider::ProviderError;
+        let assistant_content = match self {
+            Self::Assistant { content, .. } => content,
+            _ => {
+                return Err(ProviderError::SchemaMismatch {
+                    reason: "extract_json requires an Assistant message".into(),
+                });
+            }
+        };
+
+        // Prefer the tool-call emulation path: a `respond_json` synthetic tool call
+        // (used by the Anthropic JSON-mode adapter). Its `arguments` is already a
+        // serde_json::Value so we can serde::Deserialize straight into T without a
+        // string round-trip.
+        if let Some(args) = assistant_content.iter().find_map(|c| match c {
+            Content::ToolCall {
+                name, arguments, ..
+            } if name == "respond_json" => Some(arguments.clone()),
+            _ => None,
+        }) {
+            return serde_json::from_value(args).map_err(|e| ProviderError::SchemaMismatch {
+                reason: format!(
+                    "respond_json tool-call arguments did not deserialize: {}",
+                    e
+                ),
+            });
+        }
+
+        // Fallback: concatenate every Text block and parse as JSON. Most providers
+        // return a single text block under JsonObject / JsonSchema mode.
+        let mut buf = String::new();
+        for c in assistant_content {
+            if let Content::Text { text } = c {
+                buf.push_str(text);
+            }
+        }
+        if buf.trim().is_empty() {
+            return Err(ProviderError::SchemaMismatch {
+                reason: "message has no text or respond_json tool-call to parse as JSON".into(),
+            });
+        }
+        serde_json::from_str(&buf).map_err(|e| ProviderError::SchemaMismatch {
+            reason: format!("assistant text is not valid JSON: {}", e),
+        })
+    }
+
     pub fn role(&self) -> &str {
         //& means borrow — "look at this value without taking ownership of it".
         //*************************************************************

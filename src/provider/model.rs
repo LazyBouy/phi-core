@@ -29,6 +29,91 @@ Why not hard-code provider details in each provider file?
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
+
+use super::traits::ProviderError;
+
+// ---------------------------------------------------------------------------
+// CredentialProvider — pluggable, refreshable API-key source
+// ---------------------------------------------------------------------------
+
+/// Pluggable source of the API key for a [`ModelConfig`].
+///
+/// Long-running agents on short-lived credentials (AWS STS, OAuth, Workload-Identity)
+/// would otherwise hit `ProviderError::Auth` mid-run and stop. Wiring a
+/// `CredentialProvider` lets the agent resolve the current key per-call and refresh
+/// on auth failures — the retry loop in `streaming.rs` calls `invalidate()` once on
+/// `Auth` and retries the stream call before propagating.
+///
+/// The trait is intentionally tiny — implementors are free to cache, validate against
+/// an external metadata service, or block on a key-management API as needed.
+///
+/// # Example
+///
+/// ```no_run
+/// use async_trait::async_trait;
+/// use phi_core::provider::{CredentialProvider, ProviderError};
+/// use std::sync::Mutex;
+///
+/// #[derive(Debug)]
+/// struct StsProvider {
+///     cached: Mutex<Option<String>>,
+/// }
+///
+/// #[async_trait]
+/// impl CredentialProvider for StsProvider {
+///     async fn current(&self) -> Result<String, ProviderError> {
+///         if let Some(k) = self.cached.lock().unwrap().clone() {
+///             return Ok(k);
+///         }
+///         // Hit STS, cache, return... (omitted)
+///         Err(ProviderError::Auth("STS unavailable".into()))
+///     }
+///
+///     async fn invalidate(&self) -> Result<(), ProviderError> {
+///         self.cached.lock().unwrap().take();
+///         Ok(())
+///     }
+/// }
+/// ```
+#[async_trait::async_trait]
+pub trait CredentialProvider: std::fmt::Debug + Send + Sync {
+    /// Return the current API key for this credential. Implementations may cache,
+    /// re-fetch from a metadata service, or compute on the fly. Called once per
+    /// `StreamProvider::stream()` invocation.
+    async fn current(&self) -> Result<String, ProviderError>;
+
+    /// Hint that the current cached credential has been rejected by the upstream
+    /// API and a fresh value should be fetched on the next `current()` call.
+    ///
+    /// Default impl is a no-op for providers that always re-fetch.
+    async fn invalidate(&self) -> Result<(), ProviderError> {
+        Ok(())
+    }
+}
+
+/// Reference implementation of [`CredentialProvider`] that always returns a fixed key.
+///
+/// Useful for tests and for wiring a [`ModelConfig`] uniformly when refresh is not
+/// needed — equivalent to leaving `ModelConfig::credentials = None` and relying on
+/// the static `api_key` field, but lets test harnesses count `invalidate()` calls.
+#[derive(Debug, Clone)]
+pub struct StaticCredentialProvider {
+    key: String,
+}
+
+impl StaticCredentialProvider {
+    pub fn new(key: impl Into<String>) -> Self {
+        Self { key: key.into() }
+    }
+}
+
+#[async_trait::async_trait]
+impl CredentialProvider for StaticCredentialProvider {
+    async fn current(&self) -> Result<String, ProviderError> {
+        Ok(self.key.clone())
+    }
+}
 
 /// Which API protocol a model uses.
 /*
@@ -423,6 +508,14 @@ pub struct ModelConfig {
     /// OpenAI-compat quirk flags (only for OpenAiCompletions protocol).
     #[serde(default)]
     pub compat: Option<OpenAiCompat>,
+    /// Optional refreshable credential source. When `Some`, every `stream()` call
+    /// resolves the API key via `credentials.current().await` instead of reading
+    /// `api_key` directly; the retry loop calls `credentials.invalidate().await`
+    /// once on `ProviderError::Auth` and retries the call before propagating.
+    /// When `None` (the default), `api_key` is used verbatim, preserving the legacy
+    /// static-key behaviour.
+    #[serde(skip)]
+    pub credentials: Option<Arc<dyn CredentialProvider>>,
 }
 
 impl ModelConfig {
@@ -445,6 +538,7 @@ impl ModelConfig {
             cost: CostConfig::default(),
             headers: HashMap::new(),
             compat: None, // Anthropic has its own protocol, no compat flags needed
+            credentials: None,
         }
     }
 
@@ -467,6 +561,7 @@ impl ModelConfig {
             cost: CostConfig::default(),
             headers: HashMap::new(),
             compat: Some(OpenAiCompat::openai()), // OpenAI needs compat flags (store, developer role, etc.)
+            credentials: None,
         }
     }
 
@@ -490,6 +585,7 @@ impl ModelConfig {
             cost: CostConfig::default(),
             headers: HashMap::new(),
             compat: Some(OpenAiCompat::default()), // most local servers are generic OpenAI-compat
+            credentials: None,
         }
     }
 
@@ -512,6 +608,7 @@ impl ModelConfig {
             cost: CostConfig::default(),
             headers: HashMap::new(),
             compat: None, // Google has its own protocol, no compat flags needed
+            credentials: None,
         }
     }
 
@@ -535,6 +632,39 @@ impl ModelConfig {
             cost: CostConfig::default(),
             headers: HashMap::new(),
             compat: Some(OpenAiCompat::openrouter()),
+            credentials: None,
+        }
+    }
+
+    /// Attach a refreshable credential source. When set, the API key is resolved
+    /// per-call via `credentials.current().await` instead of being read directly
+    /// from `self.api_key`. The retry loop also calls `credentials.invalidate()`
+    /// once on `ProviderError::Auth` and re-tries the stream call.
+    pub fn with_credentials(mut self, creds: Arc<dyn CredentialProvider>) -> Self {
+        self.credentials = Some(creds);
+        self
+    }
+
+    /// Resolve the API key for an outgoing request.
+    ///
+    /// When `credentials` is set, delegate to its `current()` method (which may
+    /// re-fetch from a metadata service or return a cached value). Otherwise fall
+    /// back to the static `api_key` field. Providers should call this once at the
+    /// top of `stream()` instead of reading `api_key` directly.
+    pub async fn resolve_api_key(&self) -> Result<String, ProviderError> {
+        match &self.credentials {
+            Some(c) => c.current().await,
+            None => Ok(self.api_key.clone()),
+        }
+    }
+
+    /// Signal that the currently cached credential has been rejected. If
+    /// `credentials` is set, delegate to its `invalidate()`; otherwise a no-op.
+    /// Invoked by the streaming retry loop on `ProviderError::Auth`.
+    pub async fn invalidate_credentials(&self) -> Result<(), ProviderError> {
+        match &self.credentials {
+            Some(c) => c.invalidate().await,
+            None => Ok(()),
         }
     }
 }

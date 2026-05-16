@@ -6,7 +6,7 @@
 
 use super::config::*;
 use super::helpers::default_convert_to_llm;
-use crate::provider::{ProviderRegistry, StreamConfig, StreamEvent, StreamProvider};
+use crate::provider::{ProviderError, ProviderRegistry, StreamConfig, StreamEvent, StreamProvider};
 use crate::types::*;
 use tokio::sync::mpsc;
 use tracing::warn;
@@ -123,6 +123,10 @@ pub(super) async fn stream_assistant_response(
 
     let retry = &config.retry_config;
     let mut attempt = 0;
+    // Track whether we have already attempted a credential refresh in response to an
+    // Auth error. Per the MEDIUM-4 spec, we refresh + retry exactly once per
+    // `stream_assistant_response` call before propagating the Auth failure.
+    let mut auth_refreshed = false;
     let (result, mut stream_rx) = loop {
         let stream_config = StreamConfig {
             model_config: config.model_config.clone(),
@@ -133,6 +137,7 @@ pub(super) async fn stream_assistant_response(
             max_tokens: config.max_tokens,
             temperature: config.temperature,
             cache_config: config.cache_config.clone(),
+            response_format: config.response_format.clone(),
         };
 
         // Create a fresh channel per attempt — previous stream_rx is dropped when loop continues.
@@ -157,6 +162,25 @@ pub(super) async fn stream_assistant_response(
                 crate::provider::retry::log_retry(attempt, retry.max_retries, &delay, e);
                 tokio::time::sleep(delay).await;
                 continue; // jump back to top of loop
+            }
+            // Auth error with a CredentialProvider attached: invalidate the cached
+            // credential and retry exactly once. If the second attempt also fails Auth,
+            // we propagate (auth_refreshed gates the recursion).
+            Err(ProviderError::Auth(_))
+                if config.model_config.credentials.is_some()
+                    && !auth_refreshed
+                    && !cancel.is_cancelled() =>
+            {
+                auth_refreshed = true;
+                tracing::warn!(
+                    "Provider returned Auth error; refreshing credentials and retrying once."
+                );
+                // Best-effort: if invalidate itself errors, propagate the original Auth
+                // (the new error from invalidate would be misleading).
+                if let Err(e) = config.model_config.invalidate_credentials().await {
+                    tracing::warn!("CredentialProvider::invalidate failed: {}", e);
+                }
+                continue;
             }
             _ => break (result, stream_rx), // success or non-retryable error — exit loop with tuple
         }

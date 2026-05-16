@@ -20,7 +20,10 @@ pub use context_translation::{ContextTranslationStrategy, DefaultContextTranslat
 pub use google::GoogleProvider;
 pub use google_vertex::GoogleVertexProvider;
 pub use mock::MockProvider;
-pub use model::{ApiProtocol, CostConfig, ModelConfig, OpenAiCompat};
+pub use model::{
+    ApiProtocol, CostConfig, CredentialProvider, ModelConfig, OpenAiCompat,
+    StaticCredentialProvider,
+};
 pub use openai_compat::OpenAiCompatProvider;
 pub use openai_responses::OpenAiResponsesProvider;
 pub use registry::ProviderRegistry;

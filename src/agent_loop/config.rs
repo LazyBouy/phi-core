@@ -1,6 +1,6 @@
 use crate::context::{ContextConfig, ExecutionLimits};
 use crate::provider::context_translation::ContextTranslationStrategy;
-use crate::provider::{ModelConfig, StreamProvider};
+use crate::provider::{ModelConfig, ResponseFormat, StreamProvider};
 use crate::types::*;
 use std::sync::Arc;
 
@@ -209,4 +209,10 @@ pub struct AgentLoopConfig {
 
     /// Shared state for PrunTool to communicate pruning requests to the loop.
     pub prun_pending: Option<Arc<std::sync::Mutex<Vec<crate::tools::prun::PrunRequest>>>>,
+
+    /// Desired LLM output shape. Default `Text` preserves the historical free-form
+    /// behaviour; `JsonObject` / `JsonSchema` request constrained structured output
+    /// from providers that support it. See `provider::ResponseFormat` and the
+    /// capability matrix in `docs/specs/developer/provider.md`.
+    pub response_format: ResponseFormat,
 }

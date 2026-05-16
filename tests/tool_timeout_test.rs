@@ -70,6 +70,7 @@ fn make_config(provider: Arc<dyn phi_core::provider::StreamProvider>) -> AgentLo
         cache_config: CacheConfig::default(),
         tool_execution: ToolExecutionStrategy::default(),
         tool_timeout: None,
+        response_format: phi_core::provider::ResponseFormat::Text,
         retry_config: phi_core::RetryConfig::default(),
         before_turn: None,
         after_turn: None,

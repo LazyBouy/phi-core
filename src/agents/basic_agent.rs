@@ -141,6 +141,7 @@ pub struct BasicAgent {
     pub cache_config: CacheConfig,
     pub tool_execution: ToolExecutionStrategy,
     pub tool_timeout: Option<std::time::Duration>,
+    pub response_format: crate::provider::ResponseFormat,
     pub retry_config: crate::provider::retry::RetryConfig,
 
     // Lifecycle callbacks
@@ -230,6 +231,7 @@ impl BasicAgent {
             cache_config: CacheConfig::default(),
             tool_execution: ToolExecutionStrategy::default(), // Parallel
             tool_timeout: None,
+            response_format: crate::provider::ResponseFormat::Text,
             retry_config: crate::provider::retry::RetryConfig::default(), // 3 retries
             before_turn: None,
             after_turn: None,
@@ -341,6 +343,12 @@ impl BasicAgent {
     /// Set the per-tool execution timeout. See [`AgentLoopConfig::tool_timeout`].
     pub fn with_tool_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.tool_timeout = Some(timeout);
+        self
+    }
+
+    /// Set the desired LLM output shape. See [`crate::provider::ResponseFormat`].
+    pub fn with_response_format(mut self, format: crate::provider::ResponseFormat) -> Self {
+        self.response_format = format;
         self
     }
 
@@ -960,7 +968,7 @@ impl BasicAgent {
 
     // -- Internal --
 
-    fn build_config(&self) -> AgentLoopConfig {
+    fn build_config(&self) -> Result<AgentLoopConfig, super::agent::AgentBuildError> {
         // Clone Arc handles before the move closures capture them
         let steering_queue = self.steering_queue.clone(); // cheap Arc clone
         let steering_mode = self.steering_mode; // Copy — no clone needed
@@ -968,7 +976,11 @@ impl BasicAgent {
         let follow_up_queue = self.follow_up_queue.clone();
         let follow_up_mode = self.follow_up_mode;
 
-        AgentLoopConfig {
+        // BasicAgent's constructor requires a `ModelConfig`, so this branch is
+        // unreachable — wrap in Ok unconditionally. The Result is in the trait
+        // signature for the benefit of custom Agent implementors that may not
+        // have a model_config.
+        Ok(AgentLoopConfig {
             model_config: self.model_config.clone(),
             provider_override: self.provider_override.clone(),
             thinking_level: self.thinking_level,
@@ -996,6 +1008,7 @@ impl BasicAgent {
             cache_config: self.cache_config.clone(),
             tool_execution: self.tool_execution.clone(),
             tool_timeout: self.tool_timeout,
+            response_format: self.response_format.clone(),
             retry_config: self.retry_config.clone(),
             get_follow_up_messages: Some(Box::new(move || {
                 let mut queue = lock_queue(&follow_up_queue);
@@ -1026,7 +1039,7 @@ impl BasicAgent {
             config_id: self.config_id.clone(),
             context_translation: self.context_translation.clone(),
             prun_pending: self.prun_pending.clone(),
-        }
+        })
     }
 
     // ── Session management ────────────────────────────────────────────────────
@@ -1124,7 +1137,10 @@ impl Agent for BasicAgent {
         Python analogy: temporarily `tools = self.tools; self.tools = []` — then restore.
         */
         // Build config first (only borrows self), then derive loop_id (mutates loop_counters).
-        let config = self.build_config();
+        // `.expect` is safe: BasicAgent always supplies a model_config (required by ctor).
+        let config = self
+            .build_config()
+            .expect("BasicAgent always provides a model_config");
         let loop_id = self.next_loop_id(&config);
         self.last_loop_id = Some(loop_id.clone());
 
@@ -1171,7 +1187,10 @@ impl Agent for BasicAgent {
         self.is_streaming = true;
 
         // Build config first (only borrows self), then derive loop_id (mutates loop_counters).
-        let config = self.build_config();
+        // `.expect` is safe: BasicAgent always supplies a model_config (required by ctor).
+        let config = self
+            .build_config()
+            .expect("BasicAgent always provides a model_config");
         let loop_id = self.next_loop_id(&config);
         let parent_loop_id = self.last_loop_id.clone(); // points to the loop this continues from
         self.last_loop_id = Some(loop_id.clone());
@@ -1363,6 +1382,10 @@ impl Agent for BasicAgent {
 
     fn tool_timeout(&self) -> Option<std::time::Duration> {
         self.tool_timeout
+    }
+
+    fn response_format(&self) -> crate::provider::ResponseFormat {
+        self.response_format.clone()
     }
 
     fn retry_config(&self) -> crate::provider::retry::RetryConfig {

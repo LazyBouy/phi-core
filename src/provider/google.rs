@@ -60,12 +60,14 @@ impl StreamProvider for GoogleProvider {
         cancel: tokio_util::sync::CancellationToken, // ABORT — races against SSE stream
     ) -> Result<Message, ProviderError> {
         let model_config = &config.model_config;
+        // Resolve via CredentialProvider when set, else use the static `api_key`.
+        let api_key = model_config.resolve_api_key().await?;
 
         let base_url = &model_config.base_url;
         // Google embeds the API key as a query parameter (not a header like other providers)
         let url = format!(
             "{}/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
-            base_url, config.model_config.id, config.model_config.api_key
+            base_url, config.model_config.id, api_key
         );
 
         let body = build_request_body(&config);
@@ -316,6 +318,19 @@ fn build_request_body(config: &StreamConfig) -> serde_json::Value {
     if let Some(temp) = config.temperature {
         generation_config["temperature"] = serde_json::json!(temp);
     }
+    // Structured-output wiring. Gemini uses `responseMimeType` + `responseSchema`
+    // inside `generationConfig`, NOT a top-level field. JsonSchema is forwarded
+    // verbatim; the API supports Draft 2020-12 with Gemini-specific extensions.
+    match &config.response_format {
+        ResponseFormat::Text => {} // default; omit
+        ResponseFormat::JsonObject => {
+            generation_config["responseMimeType"] = serde_json::json!("application/json");
+        }
+        ResponseFormat::JsonSchema { schema, .. } => {
+            generation_config["responseMimeType"] = serde_json::json!("application/json");
+            generation_config["responseSchema"] = schema.clone();
+        }
+    }
     if generation_config != serde_json::json!({}) {
         body["generationConfig"] = generation_config;
     }
@@ -427,6 +442,7 @@ mod tests {
             max_tokens: Some(1024),
             temperature: Some(0.7),
             cache_config: CacheConfig::default(),
+            response_format: ResponseFormat::Text,
         };
 
         let body = build_request_body(&config);

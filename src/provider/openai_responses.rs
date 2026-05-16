@@ -52,6 +52,8 @@ impl StreamProvider for OpenAiResponsesProvider {
         cancel: tokio_util::sync::CancellationToken, // ABORT — races against SSE stream
     ) -> Result<Message, ProviderError> {
         let model_config = &config.model_config;
+        // Resolve via CredentialProvider when set, else use the static `api_key`.
+        let api_key = model_config.resolve_api_key().await?;
 
         let url = format!("{}/responses", model_config.base_url);
         let body = build_request_body(&config, model_config);
@@ -64,10 +66,7 @@ impl StreamProvider for OpenAiResponsesProvider {
         let mut request = client
             .post(&url)
             .header("content-type", "application/json")
-            .header(
-                "authorization",
-                format!("Bearer {}", config.model_config.api_key),
-            );
+            .header("authorization", format!("Bearer {}", api_key));
 
         for (k, v) in &model_config.headers {
             request = request.header(k, v);
@@ -425,6 +424,30 @@ fn build_request_body(
 
     if let Some(temp) = config.temperature {
         body["temperature"] = serde_json::json!(temp);
+    }
+
+    // Structured-output wiring (Responses API shape). The Responses API uses
+    // `text.format` rather than the top-level `response_format` field that Chat
+    // Completions uses.
+    match &config.response_format {
+        ResponseFormat::Text => {} // default; omit the field
+        ResponseFormat::JsonObject => {
+            body["text"] = serde_json::json!({"format": {"type": "json_object"}});
+        }
+        ResponseFormat::JsonSchema {
+            schema,
+            name,
+            strict,
+        } => {
+            body["text"] = serde_json::json!({
+                "format": {
+                    "type": "json_schema",
+                    "name": name,
+                    "schema": schema,
+                    "strict": *strict,
+                },
+            });
+        }
     }
 
     body

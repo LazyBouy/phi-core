@@ -77,6 +77,8 @@ impl StreamProvider for GoogleVertexProvider {
         cancel: tokio_util::sync::CancellationToken, // ABORT — forwarded to delegate
     ) -> Result<Message, ProviderError> {
         let model_config = &config.model_config;
+        // Resolve via CredentialProvider when set, else use the static `api_key`.
+        let api_key = model_config.resolve_api_key().await?;
 
         // Override the base_url to use Vertex format.
         // The GoogleProvider's stream will use model_config.base_url, but we need
@@ -87,10 +89,9 @@ impl StreamProvider for GoogleVertexProvider {
         let mut vertex_model = model_config.clone();
         // For Vertex, auth is via Bearer token (OAuth2), not API key in query param.
         // We need to add the Authorization header.
-        vertex_model.headers.insert(
-            "authorization".to_string(),
-            format!("Bearer {}", config.model_config.api_key),
-        );
+        vertex_model
+            .headers
+            .insert("authorization".to_string(), format!("Bearer {}", api_key));
 
         // Build request body same as Google (same content format)
         let body = build_vertex_request_body(&config);
@@ -386,6 +387,18 @@ fn build_vertex_request_body(config: &StreamConfig) -> serde_json::Value {
     }
     if let Some(temp) = config.temperature {
         gen_config["temperature"] = serde_json::json!(temp);
+    }
+    // Vertex AI shares Gemini's structured-output shape (responseMimeType +
+    // optional responseSchema inside generationConfig).
+    match &config.response_format {
+        ResponseFormat::Text => {}
+        ResponseFormat::JsonObject => {
+            gen_config["responseMimeType"] = serde_json::json!("application/json");
+        }
+        ResponseFormat::JsonSchema { schema, .. } => {
+            gen_config["responseMimeType"] = serde_json::json!("application/json");
+            gen_config["responseSchema"] = schema.clone();
+        }
     }
     if gen_config != serde_json::json!({}) {
         body["generationConfig"] = gen_config;

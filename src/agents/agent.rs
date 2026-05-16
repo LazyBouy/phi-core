@@ -267,6 +267,15 @@ pub trait Agent: Send {
         None
     }
 
+    /// The agent's desired output shape. Default: `ResponseFormat::Text` (free-form text).
+    ///
+    /// Override on agents that want JSON-mode output by default. See
+    /// `provider::ResponseFormat` and the capability matrix in
+    /// `docs/specs/developer/provider.md` for per-provider coverage.
+    fn response_format(&self) -> crate::provider::ResponseFormat {
+        crate::provider::ResponseFormat::Text
+    }
+
     /// The agent's retry config. Default: `RetryConfig::default()`.
     fn retry_config(&self) -> crate::provider::retry::RetryConfig {
         crate::provider::retry::RetryConfig::default()
@@ -355,19 +364,19 @@ pub trait Agent: Send {
     /// `BasicAgent` overrides this to additionally wire steering queues, hooks, and
     /// other implementation-specific state.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `model_config()` returns `None`. Override `build_config()` or
-    /// implement `model_config()` to avoid this.
-    fn build_config(&self) -> AgentLoopConfig {
+    /// Returns `Err(AgentBuildError::MissingModelConfig)` if `model_config()` returns
+    /// `None`. Implementors of custom `Agent` types must either override
+    /// `model_config()` to return `Some(...)` or override `build_config()` entirely.
+    /// `BasicAgent` always returns `Ok(...)` because its constructor requires a
+    /// `ModelConfig`.
+    fn build_config(&self) -> Result<AgentLoopConfig, AgentBuildError> {
         let model_config = self
             .model_config()
-            .expect(
-                "build_config() requires model_config(); \
-                 override build_config() or implement model_config()",
-            )
+            .ok_or(AgentBuildError::MissingModelConfig)?
             .clone();
-        AgentLoopConfig {
+        Ok(AgentLoopConfig {
             model_config,
             provider_override: None,
             thinking_level: self.thinking_level(),
@@ -382,6 +391,7 @@ pub trait Agent: Send {
             cache_config: self.cache_config(),
             tool_execution: self.tool_execution(),
             tool_timeout: self.tool_timeout(),
+            response_format: self.response_format(),
             retry_config: self.retry_config(),
             before_turn: None,
             after_turn: None,
@@ -399,6 +409,21 @@ pub trait Agent: Send {
             config_id: None,
             context_translation: self.context_translation(),
             prun_pending: None,
-        }
+        })
     }
+}
+
+/// Errors that can occur when assembling an [`AgentLoopConfig`] via
+/// [`Agent::build_config`].
+///
+/// Returned by the default trait impl when an [`Agent`] implementor neglected to
+/// override `model_config()`. `BasicAgent::build_config()` never returns this
+/// because its constructor requires a `ModelConfig`.
+#[derive(Debug, thiserror::Error)]
+pub enum AgentBuildError {
+    #[error(
+        "agent has no model_config; implement Agent::model_config() to return Some(...) \
+         or override Agent::build_config() entirely"
+    )]
+    MissingModelConfig,
 }

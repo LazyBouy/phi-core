@@ -56,6 +56,8 @@ impl StreamProvider for AzureOpenAiProvider {
         cancel: tokio_util::sync::CancellationToken, // ABORT — forwarded to delegate
     ) -> Result<Message, ProviderError> {
         let model_config = &config.model_config;
+        // Resolve via CredentialProvider when set, else use the static `api_key`.
+        let api_key = model_config.resolve_api_key().await?;
 
         /*
         ARCHITECTURE: Azure URL construction
@@ -85,7 +87,7 @@ impl StreamProvider for AzureOpenAiProvider {
         let mut request = client
             .post(&url)
             .header("content-type", "application/json")
-            .header("api-key", &config.model_config.api_key); // Azure uses `api-key` header, NOT `Authorization: Bearer`
+            .header("api-key", &api_key); // Azure uses `api-key` header, NOT `Authorization: Bearer`
 
         for (k, v) in &model_config.headers {
             request = request.header(k, v);
@@ -386,6 +388,29 @@ fn build_azure_request_body(config: &StreamConfig) -> serde_json::Value {
 
     if let Some(temp) = config.temperature {
         body["temperature"] = serde_json::json!(temp);
+    }
+
+    // Structured-output wiring (Azure Responses API shares the OpenAI Responses shape:
+    // `text.format` rather than top-level `response_format`).
+    match &config.response_format {
+        ResponseFormat::Text => {} // default; omit the field
+        ResponseFormat::JsonObject => {
+            body["text"] = serde_json::json!({"format": {"type": "json_object"}});
+        }
+        ResponseFormat::JsonSchema {
+            schema,
+            name,
+            strict,
+        } => {
+            body["text"] = serde_json::json!({
+                "format": {
+                    "type": "json_schema",
+                    "name": name,
+                    "schema": schema,
+                    "strict": *strict,
+                },
+            });
+        }
     }
 
     body

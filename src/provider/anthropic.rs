@@ -85,7 +85,10 @@ impl StreamProvider for AnthropicProvider {
         We detect OAuth by prefix: "sk-ant-oat" in the key. This is fragile but matches
         the real-world key format Anthropic uses for its own OAuth tokens.
         */
-        let is_oauth = config.model_config.api_key.contains("sk-ant-oat");
+        // Resolve via CredentialProvider when set, else fall through to the static `api_key`.
+        // Cached once per stream() call — subsequent OAuth detection + header writes share it.
+        let api_key = config.model_config.resolve_api_key().await?;
+        let is_oauth = api_key.contains("sk-ant-oat");
         let body = build_request_body(&config, is_oauth);
         debug!(
             "Anthropic request: model={}, oauth={}",
@@ -118,10 +121,7 @@ impl StreamProvider for AnthropicProvider {
         if is_oauth {
             // OAuth token — Bearer auth with Claude Code identity headers
             builder = builder
-                .header(
-                    "authorization",
-                    format!("Bearer {}", config.model_config.api_key),
-                )
+                .header("authorization", format!("Bearer {}", api_key))
                 .header(
                     "anthropic-beta",
                     "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14",
@@ -131,7 +131,7 @@ impl StreamProvider for AnthropicProvider {
                 .header("x-app", "cli");
         } else {
             // Standard API key auth
-            builder = builder.header("x-api-key", &config.model_config.api_key);
+            builder = builder.header("x-api-key", &api_key);
         }
 
         let request = builder.json(&body);
@@ -637,6 +637,38 @@ fn build_request_body(
         body["temperature"] = serde_json::json!(temp);
     }
 
+    // Structured-output wiring. Anthropic has no native JSON-mode field; the
+    // canonical emulation is a synthetic `respond_json` tool with the user's
+    // schema (or an open object for JsonObject), plus `tool_choice` to force the
+    // LLM to call it. `Message::extract_json` looks for this exact tool name and
+    // pulls its arguments value as the parsed JSON.
+    match &config.response_format {
+        ResponseFormat::Text => {} // default; omit
+        ResponseFormat::JsonObject | ResponseFormat::JsonSchema { .. } => {
+            let (schema, description) = match &config.response_format {
+                ResponseFormat::JsonSchema { schema, name, .. } => (
+                    schema.clone(),
+                    format!("Return the response as a JSON object matching `{}`.", name),
+                ),
+                _ => (
+                    serde_json::json!({"type": "object", "additionalProperties": true}),
+                    "Return the response as a JSON object.".to_string(),
+                ),
+            };
+            let synthetic_tool = serde_json::json!({
+                "name": "respond_json",
+                "description": description,
+                "input_schema": schema,
+            });
+            let existing = body["tools"].as_array_mut();
+            match existing {
+                Some(arr) => arr.push(synthetic_tool),
+                None => body["tools"] = serde_json::json!([synthetic_tool]),
+            }
+            body["tool_choice"] = serde_json::json!({"type": "tool", "name": "respond_json"});
+        }
+    }
+
     body
 }
 
@@ -826,6 +858,7 @@ mod tests {
             max_tokens: Some(1024),
             temperature: None,
             cache_config: cache,
+            response_format: ResponseFormat::Text,
         }
     }
 
@@ -970,6 +1003,7 @@ mod tests {
                 enabled: false,
                 strategy: CacheStrategy::Disabled,
             },
+            response_format: ResponseFormat::Text,
         };
 
         let body = build_request_body(&config, false);
@@ -1026,6 +1060,7 @@ mod tests {
                 enabled: false,
                 strategy: CacheStrategy::Disabled,
             },
+            response_format: ResponseFormat::Text,
         };
 
         let body = build_request_body(&config, false);

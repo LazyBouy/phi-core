@@ -77,6 +77,8 @@ impl StreamProvider for OpenAiCompatProvider {
         defaulting to conservative "generic OpenAI-compat" if compat wasn't specified.
         */
         let compat = model_config.compat.as_ref().cloned().unwrap_or_default();
+        // Resolve via CredentialProvider when set, else use the static `api_key`.
+        let api_key = model_config.resolve_api_key().await?;
 
         let base_url = &model_config.base_url;
         // Append the endpoint path — base_url is like "https://api.openai.com/v1" (no trailing slash)
@@ -92,10 +94,7 @@ impl StreamProvider for OpenAiCompatProvider {
         let mut request = client
             .post(&url)
             .header("content-type", "application/json")
-            .header(
-                "authorization",
-                format!("Bearer {}", config.model_config.api_key),
-            );
+            .header("authorization", format!("Bearer {}", api_key));
 
         // Add any extra headers from model config
         for (k, v) in &model_config.headers {
@@ -578,6 +577,33 @@ fn build_request_body(
         body["temperature"] = serde_json::json!(temp);
     }
 
+    // Structured-output wiring. OpenAI Chat Completions accepts a top-level
+    // `response_format` field with two shapes:
+    //   { "type": "json_object" }                  — free-form JSON
+    //   { "type": "json_schema", "json_schema": {...} } — strict schema
+    // Most non-OpenAI compat providers either honour the same key or ignore it
+    // gracefully — see the capability matrix in docs.
+    match &config.response_format {
+        ResponseFormat::Text => {} // default; omit the field
+        ResponseFormat::JsonObject => {
+            body["response_format"] = serde_json::json!({"type": "json_object"});
+        }
+        ResponseFormat::JsonSchema {
+            schema,
+            name,
+            strict,
+        } => {
+            body["response_format"] = serde_json::json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": name,
+                    "schema": schema,
+                    "strict": *strict,
+                },
+            });
+        }
+    }
+
     body
 }
 
@@ -749,6 +775,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             cache_config: CacheConfig::default(),
+            response_format: ResponseFormat::Text,
         };
 
         let body = build_request_body(&config, &model_config, &OpenAiCompat::openai());
@@ -778,6 +805,7 @@ mod tests {
             max_tokens: Some(1024),
             temperature: Some(0.5),
             cache_config: CacheConfig::default(),
+            response_format: ResponseFormat::Text,
         };
 
         let body = build_request_body(&config, &model_config, &compat);
@@ -849,6 +877,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             cache_config: CacheConfig::default(),
+            response_format: ResponseFormat::Text,
         };
 
         let body = build_request_body(&config, &model_config, &compat);
@@ -886,6 +915,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             cache_config: CacheConfig::default(),
+            response_format: ResponseFormat::Text,
         };
 
         let body = build_request_body(&config, &model_config, &compat);

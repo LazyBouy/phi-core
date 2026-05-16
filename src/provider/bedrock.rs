@@ -69,6 +69,27 @@ impl StreamProvider for BedrockProvider {
         cancel: tokio_util::sync::CancellationToken, // ABORT — races against ConverseStream
     ) -> Result<Message, ProviderError> {
         let model_config = &config.model_config;
+        // Resolve via CredentialProvider when set, else use the static `api_key`.
+        // Bound to a local so `.splitn(...)` borrows from a local-lifetime String.
+        let api_key = model_config.resolve_api_key().await?;
+
+        // Structured-output gate. Bedrock's Converse API has no universal JSON-mode;
+        // the canonical workaround is the Anthropic tool-call shape, which only works
+        // for Anthropic foundation models on Bedrock. Detect by model-ID prefix; for
+        // other model families (Cohere, AI21, Meta Llama, Mistral on Bedrock, etc.),
+        // surface SchemaMismatch with a clear reason so the caller can adapt.
+        if !matches!(config.response_format, ResponseFormat::Text)
+            && !model_config.id.contains("anthropic")
+        {
+            return Err(ProviderError::SchemaMismatch {
+                reason: format!(
+                    "Bedrock model `{}` does not support structured output via the \
+                     phi-core Converse adapter (only `anthropic.*` foundation models do). \
+                     Either switch to a Bedrock Anthropic model or set response_format to Text.",
+                    model_config.id
+                ),
+            });
+        }
 
         let base_url = &model_config.base_url;
         let url = format!(
@@ -83,15 +104,15 @@ impl StreamProvider for BedrockProvider {
         );
 
         /*
-        RUST QUIRK: `config.model_config.api_key.splitn(3, ':').collect::<Vec<&str>>()`
+        RUST QUIRK: `api_key.splitn(3, ':').collect::<Vec<&str>>()`
 
         `.splitn(n, delimiter)` — split into at most n parts (see module doc above).
         `.collect::<Vec<&str>>()` — turbofish: collect into a Vec<&str> (borrowed slices
-          into config.model_config.api_key's underlying String; valid as long as config is alive).
+          into the resolved `api_key` String; valid as long as the local is alive).
         `parts.len() < 2` — validate we got at least access_key AND secret_key.
         Python analogy: `parts = api_key.split(":", 2)` + `if len(parts) < 2: raise ...`
         */
-        let parts: Vec<&str> = config.model_config.api_key.splitn(3, ':').collect();
+        let parts: Vec<&str> = api_key.splitn(3, ':').collect();
         if parts.len() < 2 {
             return Err(ProviderError::Auth(
                 "Bedrock api_key must be 'access_key:secret_key[:session_token]'".into(),
@@ -111,10 +132,7 @@ impl StreamProvider for BedrockProvider {
         // If no auth headers provided, try basic Bearer auth as fallback
         // (works with some Bedrock proxy configurations)
         if !model_config.headers.contains_key("authorization") {
-            request = request.header(
-                "authorization",
-                format!("Bearer {}", config.model_config.api_key),
-            );
+            request = request.header("authorization", format!("Bearer {}", api_key));
         }
 
         let response = request
@@ -349,6 +367,46 @@ fn build_bedrock_body(config: &StreamConfig) -> serde_json::Value {
         body["toolConfig"] = serde_json::json!({"tools": tools});
     }
 
+    // Structured-output emulation for Anthropic-on-Bedrock. Same shape as the native
+    // Anthropic provider: inject a `respond_json` synthetic tool spec and force the
+    // model to call it via `toolChoice.tool`. Non-Anthropic Bedrock models are gated
+    // by stream() above and never reach this point with a non-Text format.
+    match &config.response_format {
+        ResponseFormat::Text => {}
+        ResponseFormat::JsonObject | ResponseFormat::JsonSchema { .. } => {
+            let (schema, description) = match &config.response_format {
+                ResponseFormat::JsonSchema { schema, name, .. } => (
+                    schema.clone(),
+                    format!("Return the response as a JSON object matching `{}`.", name),
+                ),
+                _ => (
+                    serde_json::json!({"type": "object", "additionalProperties": true}),
+                    "Return the response as a JSON object.".to_string(),
+                ),
+            };
+            let synthetic = serde_json::json!({
+                "toolSpec": {
+                    "name": "respond_json",
+                    "description": description,
+                    "inputSchema": {"json": schema},
+                }
+            });
+            // Append to existing toolConfig.tools or create one.
+            if let Some(tools_arr) = body
+                .get_mut("toolConfig")
+                .and_then(|tc| tc.get_mut("tools"))
+                .and_then(|t| t.as_array_mut())
+            {
+                tools_arr.push(synthetic);
+            } else {
+                body["toolConfig"] = serde_json::json!({"tools": [synthetic]});
+            }
+            // Force tool_choice to the synthetic tool.
+            body["toolConfig"]["toolChoice"] =
+                serde_json::json!({"tool": {"name": "respond_json"}});
+        }
+    }
+
     body
 }
 
@@ -456,6 +514,7 @@ mod tests {
             max_tokens: Some(1024),
             temperature: None,
             cache_config: CacheConfig::default(),
+            response_format: ResponseFormat::Text,
         };
 
         let body = build_bedrock_body(&config);

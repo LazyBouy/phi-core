@@ -114,6 +114,51 @@ pub struct StreamConfig {
     pub temperature: Option<f32>,
     /// Prompt caching configuration. Default: enabled with auto strategy.
     pub cache_config: CacheConfig,
+    /// Desired output shape. `Text` (the default) preserves the historical behaviour;
+    /// `JsonObject` / `JsonSchema` request constrained JSON output from providers that
+    /// support it natively (OpenAI, Google) or via tool-call emulation (Anthropic).
+    /// Bedrock surfaces `ProviderError::SchemaMismatch` when set on a non-Anthropic
+    /// foundation model that lacks structured-output support. See the capability matrix
+    /// in `docs/specs/developer/provider.md` for per-provider coverage.
+    pub response_format: ResponseFormat,
+}
+
+/// Desired output shape for an LLM call.
+///
+/// Default `Text` matches the historical free-form text behaviour. `JsonObject`
+/// constrains output to syntactically valid JSON with no schema enforcement;
+/// `JsonSchema` adds strict-shape enforcement when the provider supports it.
+///
+/// `Message::extract_json::<T>()` is the recommended way to parse the resulting
+/// assistant message back into a typed value — it handles both native JSON-mode
+/// output (text content is JSON) and tool-call emulation (arguments JSON of a
+/// well-known synthetic tool) uniformly.
+#[derive(Debug, Clone, Default)]
+pub enum ResponseFormat {
+    /// Free-form text. Default; providers ignore the field entirely.
+    #[default]
+    Text,
+    /// Constrain output to valid JSON; no schema enforcement.
+    ///
+    /// Maps to:
+    /// - OpenAI Completions / Responses / Azure: `response_format: { type: "json_object" }`
+    /// - Google GenAI / Vertex: `responseMimeType: "application/json"`
+    /// - Anthropic / Bedrock-Anthropic: a synthetic `respond_json` tool with an
+    ///   empty-shape schema; the LLM is forced to call it with its answer
+    /// - Bedrock non-Anthropic: not supported — provider returns `SchemaMismatch`
+    JsonObject,
+    /// Strict JSON Schema enforcement. The schema is forwarded to the provider when
+    /// supported natively; otherwise emulated via tool-call shape (Anthropic).
+    JsonSchema {
+        /// JSON Schema (Draft 2020-12 compatible) describing the expected output.
+        schema: serde_json::Value,
+        /// Human-readable schema name (some providers use this in error messages).
+        name: String,
+        /// Whether the provider should enforce strict shape (no extra fields).
+        /// Some providers' strict mode disables defaults — fall back to non-strict
+        /// if unsupported.
+        strict: bool,
+    },
 }
 
 /// Tool definition sent to the LLM (schema only, no execute fn)
@@ -306,6 +351,11 @@ pub enum ProviderError {
     /// Catch-all for errors that don't fit another category.
     #[error("{0}")]
     Other(String),
+    /// Returned by structured-output paths when the requested `ResponseFormat` is
+    /// unsupported by the provider, or when extracting JSON from a response fails
+    /// (`Message::extract_json::<T>()` returns this on parse / deserialise errors).
+    #[error("Schema mismatch: {reason}")]
+    SchemaMismatch { reason: String },
 }
 
 impl ProviderError {

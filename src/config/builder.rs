@@ -241,6 +241,7 @@ fn build_basic_agent(
         cost: build_cost_config(&config.provider.cost),
         headers: config.provider.headers.clone(),
         compat: build_compat_config(&config.provider.compat),
+        credentials: None,
     };
 
     // Apply provider instance overrides (from agent instance → provider ref)
