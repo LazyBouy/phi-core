@@ -165,6 +165,7 @@ pub struct BasicAgent {
     after_compaction_end: Option<AfterCompactionEndFn>,
     context_translation: Option<Arc<dyn ContextTranslationStrategy>>,
     prun_pending: Option<Arc<Mutex<Vec<crate::tools::prun::PrunRequest>>>>,
+    revert_pending: Option<Arc<Mutex<Vec<crate::tools::revert::RevertRequest>>>>,
 
     // ── Profile, config identity, and workspace ──────────────────────────
     config_id: Option<String>,
@@ -249,6 +250,7 @@ impl BasicAgent {
             after_compaction_end: None,
             context_translation: None,
             prun_pending: None,
+            revert_pending: None,
             config_id: None,
             profile: None,
             workspace: None,
@@ -306,6 +308,14 @@ impl BasicAgent {
     pub fn with_tools(mut self, tools: Vec<Arc<dyn AgentTool>>) -> Self {
         self.tools = tools;
         self
+    }
+
+    /// Read-only view of the currently registered tools. Useful for tests that
+    /// assert the LLM-facing tool registry (e.g. the Composition I opt-in
+    /// guarantee — `revert_to_state` must NOT appear without an explicit
+    /// `with_revert_tool()` call).
+    pub fn tools(&self) -> &[Arc<dyn AgentTool>] {
+        &self.tools
     }
 
     pub fn with_model_config(mut self, config: ModelConfig) -> Self {
@@ -556,6 +566,21 @@ impl BasicAgent {
             crate::tools::PrunVariant::PrunWithMemo,
         )));
         self.prun_pending = Some(pending);
+        self
+    }
+
+    /// Enable the `revert_to_state` tool (Composition I braking layer).
+    ///
+    /// Registers a [`RevertTool`](crate::tools::RevertTool) on the agent and
+    /// wires the shared `revert_pending` queue into the loop config so
+    /// `apply_revert` runs between turns. The opt-in guarantee — there is no
+    /// other registration path — is the load-bearing safety invariant for
+    /// downstream consumers that have not yet adopted Composition I.
+    pub fn with_revert_tool(mut self) -> Self {
+        let pending = Arc::new(Mutex::new(Vec::new()));
+        self.tools
+            .push(Arc::new(crate::tools::RevertTool::new(pending.clone())));
+        self.revert_pending = Some(pending);
         self
     }
 
@@ -968,7 +993,7 @@ impl BasicAgent {
 
     // -- Internal --
 
-    fn build_config(&self) -> Result<AgentLoopConfig, super::agent::AgentBuildError> {
+    pub fn build_config(&self) -> Result<AgentLoopConfig, super::agent::AgentBuildError> {
         // Clone Arc handles before the move closures capture them
         let steering_queue = self.steering_queue.clone(); // cheap Arc clone
         let steering_mode = self.steering_mode; // Copy — no clone needed
@@ -1039,6 +1064,7 @@ impl BasicAgent {
             config_id: self.config_id.clone(),
             context_translation: self.context_translation.clone(),
             prun_pending: self.prun_pending.clone(),
+            revert_pending: self.revert_pending.clone(),
         })
     }
 
@@ -1156,6 +1182,8 @@ impl Agent for BasicAgent {
             session: self.session.take(), // Move session into context for block-based compaction
             user_context: Vec::new(),
             inrun_context: Vec::new(),
+            active_node_id: None,
+            next_node_id: 0,
         };
 
         let _new_messages = agent_loop(messages, &mut context, &config, tx, cancel).await;
@@ -1218,6 +1246,8 @@ impl Agent for BasicAgent {
             session: self.session.take(),
             user_context: Vec::new(),
             inrun_context: Vec::new(),
+            active_node_id: None,
+            next_node_id: 0,
         };
 
         let _new_messages = agent_loop_continue(&mut context, &config, tx, cancel).await;

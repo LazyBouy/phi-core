@@ -45,6 +45,7 @@ fn make_config(provider: Arc<dyn phi_core::provider::StreamProvider>) -> AgentLo
         config_id: None,
         context_translation: None,
         prun_pending: None,
+        revert_pending: None,
     }
 }
 
@@ -73,6 +74,8 @@ async fn test_simple_text_response() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Hi")));
@@ -105,6 +108,8 @@ async fn test_simple_text_response() {
             AgentEvent::CompactionStarted { .. } => "CompactionStarted",
             AgentEvent::CompactionEnded { .. } => "CompactionEnded",
             AgentEvent::PrunApplied { .. } => "PrunApplied",
+            AgentEvent::RevertApplied { .. } => "RevertApplied",
+            _ => "Unknown",
         })
         .collect();
 
@@ -184,6 +189,8 @@ async fn test_tool_call_and_response() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Read test.txt")));
@@ -214,6 +221,8 @@ async fn test_tool_call_and_response() {
             AgentEvent::CompactionStarted { .. } => "CompactionStarted",
             AgentEvent::CompactionEnded { .. } => "CompactionEnded",
             AgentEvent::PrunApplied { .. } => "PrunApplied",
+            AgentEvent::RevertApplied { .. } => "RevertApplied",
+            _ => "Unknown",
         })
         .collect();
 
@@ -247,6 +256,8 @@ async fn test_abort_cancels_loop() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Hi")));
@@ -292,6 +303,8 @@ async fn test_continue_from_tool_result() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -351,6 +364,8 @@ async fn test_tool_error_is_reported() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Use the tool")));
@@ -395,6 +410,8 @@ async fn test_unknown_tool_reports_error() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Use nonexistent tool")));
@@ -500,6 +517,8 @@ async fn test_parallel_tool_execution_faster_than_sequential() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Run all tools")));
@@ -579,6 +598,8 @@ async fn test_sequential_tool_execution_is_slower() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Run tools")));
@@ -654,6 +675,8 @@ async fn test_batched_tool_execution() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Run all tools")));
@@ -753,6 +776,8 @@ async fn test_tool_execution_update_events_emitted() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("go")));
@@ -873,6 +898,7 @@ async fn test_retry_on_rate_limit_succeeds() {
         config_id: None,
         context_translation: None,
         prun_pending: None,
+        revert_pending: None,
     };
 
     let mut context = AgentContext {
@@ -887,6 +913,8 @@ async fn test_retry_on_rate_limit_succeeds() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("hi")));
@@ -960,6 +988,7 @@ async fn test_retry_exhausted_returns_error() {
         config_id: None,
         context_translation: None,
         prun_pending: None,
+        revert_pending: None,
     };
 
     let mut context = AgentContext {
@@ -974,6 +1003,8 @@ async fn test_retry_exhausted_returns_error() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("hi")));
@@ -1053,6 +1084,7 @@ async fn test_no_retry_on_auth_error() {
         config_id: None,
         context_translation: None,
         prun_pending: None,
+        revert_pending: None,
     };
 
     let mut context = AgentContext {
@@ -1067,6 +1099,8 @@ async fn test_no_retry_on_auth_error() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("hi")));
@@ -1130,6 +1164,7 @@ async fn test_retry_none_disables_retries() {
         config_id: None,
         context_translation: None,
         prun_pending: None,
+        revert_pending: None,
     };
 
     let mut context = AgentContext {
@@ -1144,6 +1179,8 @@ async fn test_retry_none_disables_retries() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("hi")));
@@ -1185,6 +1222,8 @@ async fn test_message_update_events_emitted_during_streaming() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("hi")));
@@ -1291,6 +1330,8 @@ async fn test_before_turn_can_abort() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("go")));
@@ -1341,6 +1382,8 @@ async fn test_after_turn_receives_messages() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("go")));
@@ -1406,6 +1449,7 @@ async fn test_on_error_fires_on_provider_error() {
         config_id: None,
         context_translation: None,
         prun_pending: None,
+        revert_pending: None,
     };
 
     let mut context = AgentContext {
@@ -1420,6 +1464,8 @@ async fn test_on_error_fires_on_provider_error() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("hi")));
@@ -1452,6 +1498,8 @@ async fn test_callbacks_are_optional() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Hi")));
@@ -1529,6 +1577,8 @@ async fn test_progress_message_event_emitted() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("go")));
@@ -1612,6 +1662,8 @@ async fn test_tool_ignoring_progress_no_panic() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("go")));
@@ -1702,6 +1754,8 @@ async fn test_parallel_tools_progress_distinguishable() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("go")));
@@ -1751,6 +1805,8 @@ async fn test_on_update_still_works_after_refactor() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("go")));
@@ -1824,6 +1880,8 @@ async fn test_filter_pass_message_goes_through() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Hi")));
@@ -1860,6 +1918,8 @@ async fn test_filter_warn_injects_warning_message() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Hi")));
@@ -1907,6 +1967,8 @@ async fn test_filter_reject_returns_empty() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Bad input")));
@@ -1988,6 +2050,8 @@ async fn test_filter_chain_first_reject_wins() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Bad")));
@@ -2028,6 +2092,8 @@ async fn test_filter_multiple_warns_accumulate() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Hi")));
@@ -2091,6 +2157,8 @@ async fn test_filter_non_text_content_only_text_extracted() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::User {
@@ -2188,6 +2256,8 @@ async fn test_filter_rejects_steering_message() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let (tx, rx) = mpsc::unbounded_channel();
@@ -2256,6 +2326,8 @@ async fn test_filter_warns_steering_message() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -2340,6 +2412,8 @@ async fn test_filter_rejects_follow_up_message() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let (tx, rx) = mpsc::unbounded_channel();
@@ -2420,6 +2494,8 @@ async fn test_filter_warns_follow_up_message() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -2835,6 +2911,7 @@ async fn test_custom_compaction_strategy_is_called() {
         config_id: None,
         context_translation: None,
         prun_pending: None,
+        revert_pending: None,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Hello")));
@@ -2850,6 +2927,8 @@ async fn test_custom_compaction_strategy_is_called() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -2943,6 +3022,7 @@ async fn test_none_compaction_strategy_uses_default() {
         config_id: None,
         context_translation: None,
         prun_pending: None,
+        revert_pending: None,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Hello")));
@@ -2958,6 +3038,8 @@ async fn test_none_compaction_strategy_uses_default() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -2996,6 +3078,8 @@ async fn test_loop_id_explicit_config_id() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -3051,6 +3135,8 @@ async fn test_continuation_kind_in_agent_start() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -3167,6 +3253,8 @@ async fn test_continue_panics_without_agent_id() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -3189,6 +3277,8 @@ fn make_base_context() -> AgentContext {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     }
 }
 
@@ -3482,6 +3572,8 @@ async fn test_before_loop_hook_fires() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     agent_loop(vec![msg], &mut context, &config, tx, cancel).await;
@@ -3520,6 +3612,8 @@ async fn test_after_loop_hook_fires() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     agent_loop(vec![msg], &mut context, &config, tx, cancel).await;
@@ -3569,6 +3663,8 @@ async fn test_tool_execution_hooks_fire() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     agent_loop(vec![msg], &mut context, &config, tx, cancel).await;

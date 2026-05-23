@@ -210,6 +210,13 @@ pub struct AgentLoopConfig {
     /// Shared state for PrunTool to communicate pruning requests to the loop.
     pub prun_pending: Option<Arc<std::sync::Mutex<Vec<crate::tools::prun::PrunRequest>>>>,
 
+    /// Shared state for [`RevertTool`](crate::tools::RevertTool) to communicate
+    /// revert requests to the loop. `Some` iff the agent was constructed via
+    /// [`BasicAgent::with_revert_tool`](crate::agents::BasicAgent::with_revert_tool);
+    /// `apply_revert` (Phase 3) is gated on this being `Some`, so the LLM has
+    /// no path to invoke the tool when the builder did not opt in.
+    pub revert_pending: Option<Arc<std::sync::Mutex<Vec<crate::tools::revert::RevertRequest>>>>,
+
     /// Desired LLM output shape. Default `Text` preserves the historical free-form
     /// behaviour; `JsonObject` / `JsonSchema` request constrained structured output
     /// from providers that support it. See `provider::ResponseFormat` and the

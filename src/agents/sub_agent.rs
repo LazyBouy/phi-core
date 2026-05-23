@@ -242,6 +242,8 @@ impl AgentTool for SubAgentTool {
             session: None,
             user_context: Vec::new(),
             inrun_context: Vec::new(),
+            active_node_id: None,
+            next_node_id: 0,
         };
 
         // Config for the sub-agent loop
@@ -284,6 +286,7 @@ impl AgentTool for SubAgentTool {
             config_id: None,
             context_translation: None,
             prun_pending: None,
+            revert_pending: None,
         };
 
         /*

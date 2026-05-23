@@ -1,4 +1,4 @@
-<!-- Last verified: 2026-05-16 by Claude Code -->
+<!-- Last verified: 2026-05-23 by Claude Code -->
 # Installation
 
 ## Requirements
@@ -10,7 +10,7 @@
 
 ```toml
 [dependencies]
-phi-core = "0.7"
+phi-core = "0.8"
 ```
 
 ## Dependencies

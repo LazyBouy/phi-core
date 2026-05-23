@@ -409,6 +409,7 @@ pub trait Agent: Send {
             config_id: None,
             context_translation: self.context_translation(),
             prun_pending: None,
+            revert_pending: None,
         })
     }
 }

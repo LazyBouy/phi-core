@@ -614,6 +614,8 @@ impl EvaluationStrategy for LlmJudgeEvaluation {
             session: None,
             user_context: Vec::new(),
             inrun_context: Vec::new(),
+            active_node_id: None,
+            next_node_id: 0,
         };
 
         let judge_prompts = vec![AgentMessage::Llm(LlmMessage::new(Message::user(
@@ -697,6 +699,8 @@ mod tests {
                 session: None,
                 user_context: Vec::new(),
                 inrun_context: Vec::new(),
+                active_node_id: None,
+                next_node_id: 0,
             },
             new_messages: vec![msg],
             usage: Usage {

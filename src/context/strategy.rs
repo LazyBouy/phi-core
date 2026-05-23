@@ -229,6 +229,12 @@ impl BlockCompactionStrategy for DefaultBlockCompaction {
                                 timestamp: *timestamp,
                             },
                             turn_id: lm.turn_id.clone(),
+                            // Preserve Composition I identity + tags through
+                            // tool-output truncation. Identity is a property of
+                            // the node, not its body bytes; tags ride along.
+                            node_id: lm.node_id,
+                            parent_id: lm.parent_id,
+                            tags: lm.tags.clone(),
                         });
                     }
                 }

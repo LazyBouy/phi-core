@@ -51,6 +51,7 @@ fn make_config() -> AgentLoopConfig {
         config_id: None,
         context_translation: None,
         prun_pending: None,
+        revert_pending: None,
     }
 }
 
@@ -116,6 +117,8 @@ async fn test_anthropic_simple_text() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("What color is the sky?")));
@@ -176,6 +179,8 @@ async fn test_anthropic_tool_use() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user(
@@ -243,6 +248,8 @@ async fn test_anthropic_multi_turn() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     // Turn 1

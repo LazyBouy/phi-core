@@ -41,6 +41,7 @@ pub mod file;
 pub mod list;
 pub mod prun;
 pub mod registry;
+pub mod revert;
 pub mod search;
 
 pub use bash::BashTool;
@@ -49,6 +50,7 @@ pub use file::{ReadFileTool, WriteFileTool};
 pub use list::ListFilesTool;
 pub use prun::{PrunRecord, PrunRequest, PrunTool, PrunVariant};
 pub use registry::ToolRegistry;
+pub use revert::{RevertRecord, RevertRequest, RevertTool};
 pub use search::SearchTool;
 
 use crate::types::AgentTool;

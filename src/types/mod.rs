@@ -8,6 +8,7 @@
 //! - [`content`] — Content enum, Message enum, StopReason, now_ms()
 //! - [`extension`] — ExtensionMessage (non-LLM messages)
 //! - [`agent_message`] — AgentMessage, LlmMessage, TurnId
+//! - [`node_tag`] — NodeId, NodeTag, TagKind, RevertCategory (Composition I)
 //! - [`usage`] — Usage, CacheConfig, CacheStrategy, ThinkingLevel
 //! - [`tool`] — AgentTool trait, ToolContext, ToolResult, ToolError, ToolExecutionStrategy
 //! - [`event`] — AgentEvent, StreamDelta, ContinuationKind, TurnTrigger
@@ -19,6 +20,7 @@ pub mod content;
 pub mod context;
 pub mod event;
 pub mod extension;
+pub mod node_tag;
 pub mod parallel;
 pub mod tool;
 pub mod usage;
@@ -31,6 +33,7 @@ pub use content::*;
 pub use context::*;
 pub use event::*;
 pub use extension::*;
+pub use node_tag::*;
 pub use parallel::*;
 pub use tool::*;
 pub use usage::*;

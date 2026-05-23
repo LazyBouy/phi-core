@@ -43,6 +43,7 @@ fn make_config(provider: Arc<dyn phi_core::provider::StreamProvider>) -> AgentLo
         config_id: None,
         context_translation: None,
         prun_pending: None,
+        revert_pending: None,
     }
 }
 
@@ -373,6 +374,8 @@ async fn test_sub_agent_parallel() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Run both agents")));
@@ -528,6 +531,8 @@ async fn test_sub_agent_in_parent_loop() {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("What is 6*7?")));

@@ -65,6 +65,7 @@ pub enum TurnTrigger {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
+#[non_exhaustive]
 pub enum AgentEvent {
     /*********************** NOTEs ON AGENT EVENTS *************************
     AgentEvent is the runtime's event vocabulary — it captures all the significant happenings
@@ -290,6 +291,35 @@ pub enum AgentEvent {
         memo: Option<String>,
         /// Timestamps of the pruned messages — enables session reconstruction on reload.
         pruned_timestamps: Vec<u64>,
+        timestamp: DateTime<Utc>,
+    },
+
+    /// Composition I — the agent's `revert_to_state` request was processed
+    /// between turns. Emitted whether the revert was applied (`applied: true`)
+    /// or rejected (`applied: false`, e.g. unsafe target, user-message in span).
+    ///
+    /// The forensic record is the session log itself: abandoned messages stay
+    /// in `messages` and remain serialized; this event is the cross-reference
+    /// that lets a session replay tell which span fell off-trunk and why.
+    RevertApplied {
+        loop_id: String,
+        /// The category the agent supplied at call time.
+        category: crate::types::RevertCategory,
+        /// The new active node — `None` only when `applied=false` and resolution
+        /// failed (e.g. node not found).
+        target: Option<crate::types::NodeId>,
+        /// `node_id`s that fell off-trunk as a result of this revert. Empty when
+        /// `applied=false`.
+        abandoned_node_ids: Vec<crate::types::NodeId>,
+        /// Echo of the agent-supplied summary (verbatim). Carried on the event
+        /// as well as on the `NodeTag` so observers without trunk access still
+        /// see what the agent intended.
+        summary: Option<String>,
+        /// `true` iff the revert actually moved the active pointer + attached a
+        /// tag; `false` if it was rejected (see `reason`).
+        applied: bool,
+        /// Human-readable reason when `applied=false`; `None` on success.
+        reason: Option<String>,
         timestamp: DateTime<Utc>,
     },
 

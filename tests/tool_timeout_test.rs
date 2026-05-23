@@ -88,6 +88,7 @@ fn make_config(provider: Arc<dyn phi_core::provider::StreamProvider>) -> AgentLo
         config_id: None,
         context_translation: None,
         prun_pending: None,
+        revert_pending: None,
     }
 }
 
@@ -104,6 +105,8 @@ fn make_context(tool: Arc<dyn AgentTool>) -> AgentContext {
         session: None,
         user_context: Vec::new(),
         inrun_context: Vec::new(),
+        active_node_id: None,
+        next_node_id: 0,
     }
 }
 

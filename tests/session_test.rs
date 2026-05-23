@@ -48,6 +48,7 @@ fn make_config(provider: Arc<dyn phi_core::provider::StreamProvider>) -> AgentLo
         config_id: None,
         context_translation: None,
         prun_pending: None,
+        revert_pending: None,
     }
 }
 

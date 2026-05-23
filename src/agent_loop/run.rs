@@ -32,6 +32,15 @@ pub(super) async fn run_loop(
     first_turn_prompts: Option<&[AgentMessage]>, // Initial prompts (agent_loop only); None for agent_loop_continue
 ) -> Usage {
     let loop_id = context.loop_id.clone().unwrap_or_default();
+
+    // Composition I — when revert mode is active, seed `next_node_id` from any
+    // pre-existing IDs on `messages` so a continuation does not collide with
+    // node IDs already minted in a prior loop. Idempotent + cheap; gated on
+    // `revert_pending.is_some()` so non-revert consumers see zero behavioural
+    // change (the field is left at its default of 0 and is never read).
+    if config.revert_pending.is_some() {
+        context.seed_next_node_id_from_messages();
+    }
     let mut first_turn = true;
     let mut turn: usize = 0; // single counter: passed to hooks (as usize) and TurnStart events (as u32)
     #[allow(unused_assignments)]
@@ -161,6 +170,8 @@ pub(super) async fn run_loop(
             if !pending.is_empty() {
                 for msg in pending.drain(..) {
                     let msg = msg.with_turn_id(current_turn_id.clone());
+                    // Composition I — stamp node identity when revert mode is active.
+                    let msg = stamp_node_identity(context, config, msg);
                     tx.send(AgentEvent::MessageStart {
                         loop_id: loop_id.clone(),
                         message: msg.clone(),
@@ -327,6 +338,8 @@ pub(super) async fn run_loop(
 
             let agent_msg: AgentMessage =
                 AgentMessage::from(message.clone()).with_turn_id(current_turn_id.clone());
+            // Composition I — stamp node identity when revert mode is active.
+            let agent_msg = stamp_node_identity(context, config, agent_msg);
             context.messages.push(agent_msg.clone());
             new_messages.push(agent_msg.clone());
             // Track in inrun_context stream (model-generated)
@@ -412,6 +425,8 @@ pub(super) async fn run_loop(
                 for result in &tool_results {
                     let am: AgentMessage =
                         AgentMessage::from(result.clone()).with_turn_id(current_turn_id.clone());
+                    // Composition I — stamp node identity when revert mode is active.
+                    let am = stamp_node_identity(context, config, am);
                     context.messages.push(am.clone());
                     new_messages.push(am.clone());
                     // Track in inrun_context stream (tool results are model-generated context)
@@ -426,6 +441,20 @@ pub(super) async fn run_loop(
                         prun_pending.lock().unwrap().drain(..).collect();
                     for request in requests {
                         apply_prun(context, &request, tx, &loop_id);
+                    }
+                }
+
+                // Apply pending revert_to_state requests (Composition I).
+                // Gated on `config.revert_pending.is_some()` — the only path
+                // that sets this is `BasicAgent::with_revert_tool()`. Without
+                // the opt-in, the drain never executes; the LLM never sees the
+                // tool; the active-node pointer stays unset; the linear
+                // `build_working_context` path remains in force.
+                if let Some(ref revert_pending) = config.revert_pending {
+                    let requests: Vec<crate::tools::revert::RevertRequest> =
+                        revert_pending.lock().unwrap().drain(..).collect();
+                    for request in requests {
+                        apply_revert(context, &request, turn, tx, &loop_id);
                     }
                 }
             }
@@ -519,6 +548,47 @@ pub(super) async fn run_loop(
     loop_usage
 }
 
+/// Composition I — stamp a freshly-built [`AgentMessage`] with `node_id` +
+/// `parent_id` when revert mode is active. No-op when `config.revert_pending`
+/// is `None`, preserving the byte-identical non-revert-mode behaviour.
+///
+/// Parent linkage: when `context.active_node_id` is `Some`, use it as the
+/// parent (revert just landed → next stamped node sits below the new active
+/// pointer). Otherwise scan `context.messages` for the most recent stamped
+/// `LlmMessage` and link to that. Falls back to `None` when nothing has been
+/// stamped yet (the first stamped node in the session becomes a root).
+///
+/// After stamping, `context.active_node_id` advances to the new node so the
+/// trunk assembly walk (Phase 4 `build_trunk_context`) finds the most recent
+/// turn at the head of the chain.
+fn stamp_node_identity(
+    context: &mut AgentContext,
+    config: &AgentLoopConfig,
+    msg: AgentMessage,
+) -> AgentMessage {
+    if config.revert_pending.is_none() {
+        return msg;
+    }
+    // Only LLM messages get IDs; extension messages stay untouched.
+    match msg {
+        AgentMessage::Llm(_) => {}
+        AgentMessage::Extension(_) => return msg,
+    }
+    let new_id = context.alloc_node_id();
+    let parent = context.active_node_id.or_else(|| {
+        // No active pointer yet — link to the most recently stamped Llm node
+        // in `messages`. If none exist, this is the first stamped node and
+        // becomes a root.
+        context.messages.iter().rev().find_map(|m| match m {
+            AgentMessage::Llm(lm) => lm.node_id,
+            _ => None,
+        })
+    });
+    let stamped = msg.with_node_identity(new_id, parent);
+    context.active_node_id = Some(new_id);
+    stamped
+}
+
 /// Apply a single prun request to the in-run context, converting Live entries to
 /// PrunedSilent or PrunedMemo from the tail until enough tokens are removed.
 fn apply_prun(
@@ -574,5 +644,442 @@ fn apply_prun(
             timestamp: chrono::Utc::now(),
         })
         .ok();
+    }
+}
+
+/// Composition I — apply one `RevertRequest` between turns.
+///
+/// Mirrors [`apply_prun`] structurally: synchronous, no I/O, emits a single
+/// `RevertApplied` event whether the revert succeeds or is rejected. The
+/// forensic `messages` log is **never** mutated — the abandoned span stays in
+/// `context.messages` and is only off-trunk from this point on (the
+/// parent-chain walk in Phase 4 will skip it).
+///
+/// Effects on success:
+/// 1. `context.active_node_id` becomes `Some(request.target)`.
+/// 2. A `NodeTag` is attached to the target [`LlmMessage`] carrying the
+///    agent-supplied summary (empty `text` if `summary` was `None`).
+/// 3. `RevertApplied { applied: true, .. }` is emitted with the list of
+///    `abandoned_node_ids`.
+///
+/// Rejection rules (each emits `RevertApplied { applied: false, reason, .. }`
+/// with no mutation):
+/// - **Unknown target** — no [`LlmMessage`] in `context.messages` carries
+///   `node_id == request.target`.
+/// - **User message in abandoned span** (D6) — the conservative 0.8.0
+///   behaviour: if any message strictly after the target node is a
+///   `Message::User`, refuse so the agent cannot silently pretend the user
+///   never spoke. Auto-rebase is deferred to a future release.
+fn apply_revert(
+    context: &mut AgentContext,
+    request: &crate::tools::revert::RevertRequest,
+    current_turn: usize,
+    tx: &mpsc::UnboundedSender<AgentEvent>,
+    loop_id: &str,
+) {
+    use crate::types::{InRunEntry, NodeTag};
+
+    // Helper: assemble the rejected-event payload once.
+    let emit_rejected = |reason: &str, tx: &mpsc::UnboundedSender<AgentEvent>| {
+        tx.send(AgentEvent::RevertApplied {
+            loop_id: loop_id.to_string(),
+            category: request.category,
+            target: None,
+            abandoned_node_ids: Vec::new(),
+            summary: request.summary.clone(),
+            applied: false,
+            reason: Some(reason.to_string()),
+            timestamp: chrono::Utc::now(),
+        })
+        .ok();
+    };
+
+    // (1) Resolve the target node. We index by `node_id` over `messages` (the
+    // forensic log), not `inrun_context` — only `LlmMessage`s carry IDs.
+    let target_idx_opt = context.messages.iter().position(|m| match m {
+        AgentMessage::Llm(lm) => lm.node_id == Some(request.target),
+        _ => false,
+    });
+    let Some(target_idx) = target_idx_opt else {
+        emit_rejected(
+            &format!(
+                "revert target {} not found in message history",
+                request.target
+            ),
+            tx,
+        );
+        return;
+    };
+
+    // (2) Conservative 0.8.0 rule: reject if the strictly-after span contains
+    // a `Message::User`. Auto-rebase is out of scope for 0.8.0 (D6).
+    for after in &context.messages[target_idx + 1..] {
+        if let AgentMessage::Llm(lm) = after {
+            if matches!(lm.message, Message::User { .. }) {
+                emit_rejected(
+                    "revert refused: abandoned span contains a user message; \
+                     auto-rebase is not implemented in 0.8.0",
+                    tx,
+                );
+                return;
+            }
+        }
+    }
+
+    // (3) Collect the abandoned `node_id`s — every Llm message strictly after
+    // the target node that carries an id. Used for the event payload and the
+    // tag's `abandoned_node_ids` cross-reference.
+    let abandoned_node_ids: Vec<crate::types::NodeId> = context.messages[target_idx + 1..]
+        .iter()
+        .filter_map(|m| match m {
+            AgentMessage::Llm(lm) => lm.node_id,
+            _ => None,
+        })
+        .collect();
+
+    // (4) Move the active pointer. The parent-chain walk in Phase 4 will use
+    // this to assemble the trunk; until Phase 4 lands, the linear path still
+    // wins because `build_working_context` does not yet branch on it — but
+    // setting the pointer here is the load-bearing state change that Phase 4
+    // depends on, and is observable in tests today.
+    context.active_node_id = Some(request.target);
+
+    // (5) Drop the abandoned `inrun_context` entries so the next turn's
+    // linear-mode prompt (until Phase 4 lands) no longer carries the
+    // abandoned chatter. We compare by message timestamp + node_id when the
+    // entry is Live; PrunedMemo / PrunedSilent entries are timestamp-keyed.
+    //
+    // This is conservative: we keep entries whose `node_id` matches a message
+    // at or before `target_idx`, and drop everything else. Phase 4's
+    // parent-chain walk will subsume this, but the eager drop here keeps the
+    // 0.8.0 step-1 behaviour coherent without requiring Phase 4 to ship in
+    // lockstep.
+    let surviving_ids: std::collections::HashSet<crate::types::NodeId> = context.messages
+        [..=target_idx]
+        .iter()
+        .filter_map(|m| match m {
+            AgentMessage::Llm(lm) => lm.node_id,
+            _ => None,
+        })
+        .collect();
+    context.inrun_context.retain(|entry| match entry {
+        InRunEntry::Live(AgentMessage::Llm(lm)) => match lm.node_id {
+            Some(id) => surviving_ids.contains(&id),
+            // Entries without an id pre-date revert mode — keep them.
+            None => true,
+        },
+        // Non-Llm Live entries and pruned markers are unaffected.
+        _ => true,
+    });
+
+    // (6) Attach the summary tag to the target node. Empty text when the
+    // agent omitted `summary` — Phase 5's render policy can still classify
+    // (kind is well-defined) and a future fallback generator slots into the
+    // empty-text branch.
+    let tag = NodeTag::new(
+        request.category.tag_kind(),
+        request.summary.clone().unwrap_or_default(),
+        current_turn as u32,
+        abandoned_node_ids.clone(),
+    );
+    if let AgentMessage::Llm(lm) = &mut context.messages[target_idx] {
+        lm.add_tag(tag);
+    }
+
+    // (7) Emit success event.
+    tx.send(AgentEvent::RevertApplied {
+        loop_id: loop_id.to_string(),
+        category: request.category,
+        target: Some(request.target),
+        abandoned_node_ids,
+        summary: request.summary.clone(),
+        applied: true,
+        reason: None,
+        timestamp: chrono::Utc::now(),
+    })
+    .ok();
+}
+
+#[cfg(test)]
+mod apply_revert_tests {
+    //! Composition I Phase 3 unit tests for [`apply_revert`].
+    //!
+    //! These exercise the synchronous between-turn application directly,
+    //! without spinning up `MockProvider` — the goal is to lock in the four
+    //! contractual outcomes: (a) successful revert, (b) unknown target
+    //! rejection, (c) user-message-in-span rejection, (d) tag attachment +
+    //! event payload.
+    use super::*;
+    use crate::tools::revert::RevertRequest;
+    use crate::types::{
+        AgentMessage, Content, LlmMessage, Message, NodeId, RevertCategory, StopReason, TagKind,
+        Usage,
+    };
+
+    fn user_msg_node(text: &str, ts: u64, node: NodeId, parent: Option<NodeId>) -> AgentMessage {
+        AgentMessage::Llm(
+            LlmMessage::new(Message::User {
+                content: vec![Content::Text {
+                    text: text.to_string(),
+                }],
+                timestamp: ts,
+            })
+            .with_node_identity(node, parent),
+        )
+    }
+
+    fn assistant_msg_node(
+        text: &str,
+        ts: u64,
+        node: NodeId,
+        parent: Option<NodeId>,
+    ) -> AgentMessage {
+        AgentMessage::Llm(
+            LlmMessage::new(Message::Assistant {
+                content: vec![Content::Text {
+                    text: text.to_string(),
+                }],
+                stop_reason: StopReason::Stop,
+                model: "test".into(),
+                provider: "test".into(),
+                usage: Usage::default(),
+                timestamp: ts,
+                error_message: None,
+            })
+            .with_node_identity(node, parent),
+        )
+    }
+
+    fn drain_events(rx: &mut mpsc::UnboundedReceiver<AgentEvent>) -> Vec<AgentEvent> {
+        let mut out = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            out.push(e);
+        }
+        out
+    }
+
+    #[test]
+    fn apply_revert_success_moves_pointer_attaches_tag_emits_event() {
+        let mut ctx = AgentContext {
+            messages: vec![
+                user_msg_node("write a sort", 1, NodeId(10), None),
+                assistant_msg_node("I'll write bubble sort", 2, NodeId(11), Some(NodeId(10))),
+                assistant_msg_node("timed out", 3, NodeId(12), Some(NodeId(11))),
+            ],
+            next_node_id: 13,
+            ..Default::default()
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
+        let req = RevertRequest {
+            category: RevertCategory::Failure,
+            target: NodeId(10),
+            summary: Some("bubble sort timed out — try a faster algorithm".into()),
+        };
+
+        apply_revert(&mut ctx, &req, 7, &tx, "loop-1");
+
+        // (a) active pointer moved
+        assert_eq!(ctx.active_node_id, Some(NodeId(10)));
+
+        // (b) summary tag attached on the target with the correct kind + turn
+        let target_msg = match &ctx.messages[0] {
+            AgentMessage::Llm(lm) => lm,
+            _ => unreachable!(),
+        };
+        assert_eq!(target_msg.tags.len(), 1);
+        assert_eq!(target_msg.tags[0].kind, TagKind::Lesson);
+        assert_eq!(
+            target_msg.tags[0].text,
+            "bubble sort timed out — try a faster algorithm"
+        );
+        assert_eq!(target_msg.tags[0].created_at_turn, 7);
+        assert_eq!(
+            target_msg.tags[0].abandoned_node_ids,
+            vec![NodeId(11), NodeId(12)]
+        );
+
+        // (c) forensic log is intact — abandoned messages still present
+        assert_eq!(ctx.messages.len(), 3);
+
+        // (d) success event emitted
+        let events = drain_events(&mut rx);
+        let revert_event = events
+            .iter()
+            .find_map(|e| match e {
+                AgentEvent::RevertApplied {
+                    applied,
+                    target,
+                    abandoned_node_ids,
+                    category,
+                    summary,
+                    reason,
+                    ..
+                } if *applied => Some((target, abandoned_node_ids, category, summary, reason)),
+                _ => None,
+            })
+            .expect("a successful RevertApplied event must be emitted");
+        assert_eq!(*revert_event.0, Some(NodeId(10)));
+        assert_eq!(*revert_event.1, vec![NodeId(11), NodeId(12)]);
+        assert_eq!(*revert_event.2, RevertCategory::Failure);
+        assert_eq!(
+            revert_event.3.as_deref(),
+            Some("bubble sort timed out — try a faster algorithm")
+        );
+        assert!(revert_event.4.is_none());
+    }
+
+    #[test]
+    fn apply_revert_unknown_target_is_rejected() {
+        let mut ctx = AgentContext {
+            messages: vec![
+                user_msg_node("hello", 1, NodeId(10), None),
+                assistant_msg_node("hi", 2, NodeId(11), Some(NodeId(10))),
+            ],
+            next_node_id: 12,
+            ..Default::default()
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
+        let req = RevertRequest {
+            category: RevertCategory::Tangent,
+            target: NodeId(99),
+            summary: None,
+        };
+
+        apply_revert(&mut ctx, &req, 0, &tx, "loop-1");
+
+        // Pointer unchanged, no tags attached, no mutation.
+        assert!(ctx.active_node_id.is_none());
+        for m in &ctx.messages {
+            if let AgentMessage::Llm(lm) = m {
+                assert!(lm.tags.is_empty());
+            }
+        }
+
+        let events = drain_events(&mut rx);
+        let rejected = events
+            .iter()
+            .find_map(|e| match e {
+                AgentEvent::RevertApplied {
+                    applied: false,
+                    reason,
+                    target,
+                    abandoned_node_ids,
+                    ..
+                } => Some((reason, target, abandoned_node_ids)),
+                _ => None,
+            })
+            .expect("rejection event must be emitted");
+        assert!(rejected.0.as_deref().unwrap_or("").contains("not found"));
+        assert_eq!(*rejected.1, None);
+        assert!(rejected.2.is_empty());
+    }
+
+    #[test]
+    fn apply_revert_refuses_when_span_contains_user_message() {
+        let mut ctx = AgentContext {
+            messages: vec![
+                user_msg_node("write a sort", 1, NodeId(10), None),
+                assistant_msg_node("trying bubble", 2, NodeId(11), Some(NodeId(10))),
+                user_msg_node("actually use quicksort", 3, NodeId(12), Some(NodeId(11))),
+                assistant_msg_node("ok", 4, NodeId(13), Some(NodeId(12))),
+            ],
+            next_node_id: 14,
+            ..Default::default()
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
+        let req = RevertRequest {
+            category: RevertCategory::Failure,
+            target: NodeId(10),
+            summary: Some("nope".into()),
+        };
+
+        apply_revert(&mut ctx, &req, 0, &tx, "loop-1");
+
+        // No state mutation on rejection.
+        assert!(ctx.active_node_id.is_none());
+        let target_tags = match &ctx.messages[0] {
+            AgentMessage::Llm(lm) => &lm.tags,
+            _ => unreachable!(),
+        };
+        assert!(target_tags.is_empty());
+
+        let events = drain_events(&mut rx);
+        let reason = events
+            .iter()
+            .find_map(|e| match e {
+                AgentEvent::RevertApplied {
+                    applied: false,
+                    reason,
+                    ..
+                } => reason.clone(),
+                _ => None,
+            })
+            .expect("user-message rejection event must be emitted");
+        assert!(reason.contains("user message"));
+    }
+
+    #[test]
+    fn apply_revert_drops_inrun_context_entries_off_trunk() {
+        // Two assistant messages stamped with node IDs; inrun_context mirrors them.
+        // Reverting to n10 must drop the n11 inrun entry but keep older entries
+        // without node_ids (legacy / pre-revert-mode messages).
+        let a10 = assistant_msg_node("on-trunk", 1, NodeId(10), None);
+        let a11 = assistant_msg_node("off-trunk", 2, NodeId(11), Some(NodeId(10)));
+        let mut ctx = AgentContext {
+            messages: vec![
+                user_msg_node("seed", 0, NodeId(9), None),
+                a10.clone(),
+                a11.clone(),
+            ],
+            inrun_context: vec![InRunEntry::Live(a10.clone()), InRunEntry::Live(a11.clone())],
+            next_node_id: 12,
+            ..Default::default()
+        };
+        let (tx, _rx) = mpsc::unbounded_channel::<AgentEvent>();
+        let req = RevertRequest {
+            category: RevertCategory::Completion,
+            target: NodeId(10),
+            summary: None,
+        };
+
+        apply_revert(&mut ctx, &req, 0, &tx, "loop-1");
+
+        assert_eq!(ctx.active_node_id, Some(NodeId(10)));
+        // Only the n10 live entry survives in inrun_context.
+        let live_ids: Vec<Option<NodeId>> = ctx
+            .inrun_context
+            .iter()
+            .filter_map(|e| match e {
+                InRunEntry::Live(AgentMessage::Llm(lm)) => Some(lm.node_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(live_ids, vec![Some(NodeId(10))]);
+    }
+
+    #[test]
+    fn apply_revert_summary_none_attaches_empty_text_tag() {
+        let mut ctx = AgentContext {
+            messages: vec![
+                user_msg_node("seed", 1, NodeId(10), None),
+                assistant_msg_node("trail", 2, NodeId(11), Some(NodeId(10))),
+            ],
+            next_node_id: 12,
+            ..Default::default()
+        };
+        let (tx, _rx) = mpsc::unbounded_channel::<AgentEvent>();
+        let req = RevertRequest {
+            category: RevertCategory::StepSummary,
+            target: NodeId(10),
+            summary: None,
+        };
+
+        apply_revert(&mut ctx, &req, 0, &tx, "loop-1");
+        let tag = match &ctx.messages[0] {
+            AgentMessage::Llm(lm) => &lm.tags[0],
+            _ => unreachable!(),
+        };
+        assert_eq!(tag.kind, TagKind::Checkpoint);
+        assert_eq!(tag.text, "");
     }
 }

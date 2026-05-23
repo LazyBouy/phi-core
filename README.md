@@ -9,6 +9,7 @@ A Rust library for building stateful, multi-turn AI coding agents. Provides a un
 - **Built-in tools** — Bash execution, file read/write/edit, directory listing, and code search
 - **Real-time event streaming** — Token-level streaming via async channels
 - **Context management** — Tiered compaction strategy to handle large conversations without hitting token limits
+- **Composition I (braking layer)** — Opt-in tree-structured conversation state with a model-callable `revert_to_state` tool: the agent abandons failed/finished branches between turns, keeping active context lean while the forensic record stays intact. Sits *above* compaction; delays how often compaction must run. Enable via `BasicAgent::with_revert_tool()`.
 - **MCP integration** — Connect to any Model Context Protocol server via stdio or HTTP
 - **OpenAPI integration** — Auto-generate tools from any OpenAPI 3.0 spec
 - **Sub-agents** — Delegate tasks to isolated child agent instances
@@ -24,7 +25,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-phi-core = "0.7"
+phi-core = "0.8"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -32,7 +33,7 @@ To enable OpenAPI tool generation:
 
 ```toml
 [dependencies]
-phi-core = { version = "0.7", features = ["openapi"] }
+phi-core = { version = "0.8", features = ["openapi"] }
 ```
 
 **Minimum Supported Rust Version**: 1.75
