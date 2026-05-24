@@ -235,6 +235,7 @@ impl BlockCompactionStrategy for DefaultBlockCompaction {
                             node_id: lm.node_id,
                             parent_id: lm.parent_id,
                             tags: lm.tags.clone(),
+                            provenance_hint: lm.provenance_hint.clone(),
                         });
                     }
                 }

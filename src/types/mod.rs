@@ -14,6 +14,7 @@
 //! - [`event`] — AgentEvent, StreamDelta, ContinuationKind, TurnTrigger
 //! - [`context`] — AgentContext
 //! - [`parallel`] — ParallelLoopOutcome, ParallelLoopResult, InputFilter, EvaluationStrategy
+//! - [`provenance`] — BlockProvenance, ProvenanceRole, AnnotatedRequestPayload (0.9.0)
 
 pub mod agent_message;
 pub mod content;
@@ -22,6 +23,7 @@ pub mod event;
 pub mod extension;
 pub mod node_tag;
 pub mod parallel;
+pub mod provenance;
 pub mod tool;
 pub mod usage;
 
@@ -35,5 +37,6 @@ pub use event::*;
 pub use extension::*;
 pub use node_tag::*;
 pub use parallel::*;
+pub use provenance::*;
 pub use tool::*;
 pub use usage::*;

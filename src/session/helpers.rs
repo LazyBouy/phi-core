@@ -18,6 +18,7 @@ pub(super) fn session_id_from_loop_id(loop_id: &str) -> String {
 pub(super) fn loop_id_of(event: &AgentEvent) -> Option<&str> {
     match event {
         AgentEvent::TurnStart { loop_id, .. } => Some(loop_id),
+        AgentEvent::TurnRequest { loop_id, .. } => Some(loop_id),
         AgentEvent::MessageStart { loop_id, .. } => Some(loop_id),
         AgentEvent::MessageEnd { loop_id, .. } => Some(loop_id),
         AgentEvent::ToolExecutionStart { loop_id, .. } => Some(loop_id),

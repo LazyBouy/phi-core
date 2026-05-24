@@ -1,5 +1,6 @@
 use super::agent_message::AgentMessage;
 use super::content::Message;
+use super::provenance::AnnotatedRequestPayload;
 use super::tool::ToolResult;
 use super::usage::Usage;
 use chrono::{DateTime, Utc};
@@ -152,6 +153,32 @@ pub enum AgentEvent {
         /// What caused this turn to begin. Distinguishes user-initiated turns from
         /// system continuations (tool round-trips, follow-ups, sub-agent invocations).
         triggered_by: TurnTrigger,
+    },
+
+    /// Fires exactly once per turn carrying the fully-assembled request payload
+    /// sent to the LLM provider (system prompt, post-`convert_to_llm()` message
+    /// vector, tool definitions, and per-block provenance).
+    ///
+    /// Emission site lives in `stream_assistant_response()` after
+    /// `convert_to_llm` and before the retry loop's first `provider.stream()`
+    /// call. The payload is identical across retries so the event is emitted
+    /// once per turn.
+    ///
+    /// Opt-in persistence on `Turn.request_payload` via
+    /// `SessionRecorderConfig.capture_turn_requests` (default off).
+    ///
+    /// Use cases: per-turn debug capture, golden-output replay, exact-request
+    /// reconstruction for cost analysis. Added in 0.9.0.
+    TurnRequest {
+        /// Identifies which loop this event belongs to — matches `AgentStart.loop_id`.
+        loop_id: String,
+        /// Zero-based index of this turn within the current agent run.
+        turn_index: u32,
+        /// Fully-assembled request payload — exact wire-format snapshot.
+        payload: AnnotatedRequestPayload,
+        /// Wall-clock time when the payload was assembled (immediately before the
+        /// first provider call of this turn).
+        timestamp: chrono::DateTime<chrono::Utc>,
     },
 
     /// Fires at the end of each LLM turn, carrying the assistant message and all tool results.

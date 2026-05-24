@@ -2,6 +2,7 @@ use super::content::Message;
 // Content is used indirectly via Message; not directly imported
 use super::extension::ExtensionMessage;
 use super::node_tag::{NodeId, NodeTag};
+use super::provenance::BlockProvenance;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /*
@@ -102,6 +103,16 @@ pub struct LlmMessage {
     /// Summary annotations attached by `apply_revert`. Empty unless this node
     /// has been the target of a revert that produced a summary.
     pub tags: Vec<NodeTag>,
+    /// Provenance hint stamped by upstream consumers (identity loader, memory
+    /// store, etc.) before the message is fed into the agent loop. phi-core
+    /// reads this stamp during request assembly to populate the parallel
+    /// `provenance` vec in [`crate::AnnotatedRequestPayload`]; falls back to
+    /// deriving a tag from `turn_id` + role when `None`. Added in 0.9.0;
+    /// omitted from serialized output when `None` for back-compat.
+    ///
+    /// Boxed so `LlmMessage` doesn't bloat `AgentMessage`'s enum size with the
+    /// rare-stamped variant data.
+    pub provenance_hint: Option<Box<BlockProvenance>>,
 }
 
 impl Serialize for LlmMessage {
@@ -136,6 +147,12 @@ impl Serialize for LlmMessage {
                     serde_json::to_value(&self.tags).map_err(serde::ser::Error::custom)?,
                 );
             }
+            if let Some(ref ph) = self.provenance_hint {
+                map.insert(
+                    "provenanceHint".to_string(),
+                    serde_json::to_value(ph).map_err(serde::ser::Error::custom)?,
+                );
+            }
         }
         value.serialize(serializer)
     }
@@ -147,7 +164,7 @@ impl<'de> Deserialize<'de> for LlmMessage {
         // if present (all are optional and default to None / empty), then
         // deserialize the rest as Message.
         let mut value: serde_json::Value = Deserialize::deserialize(deserializer)?;
-        let (turn_id, node_id, parent_id, tags) =
+        let (turn_id, node_id, parent_id, tags, provenance_hint) =
             if let serde_json::Value::Object(ref mut map) = value {
                 let turn_id = map
                     .remove("turnId")
@@ -162,9 +179,12 @@ impl<'de> Deserialize<'de> for LlmMessage {
                     .remove("tags")
                     .and_then(|v| serde_json::from_value::<Vec<NodeTag>>(v).ok())
                     .unwrap_or_default();
-                (turn_id, node_id, parent_id, tags)
+                let provenance_hint = map
+                    .remove("provenanceHint")
+                    .and_then(|v| serde_json::from_value(v).ok());
+                (turn_id, node_id, parent_id, tags, provenance_hint)
             } else {
-                (None, None, None, Vec::new())
+                (None, None, None, Vec::new(), None)
             };
         let message = Message::deserialize(value).map_err(serde::de::Error::custom)?;
         Ok(LlmMessage {
@@ -173,6 +193,7 @@ impl<'de> Deserialize<'de> for LlmMessage {
             node_id,
             parent_id,
             tags,
+            provenance_hint,
         })
     }
 }
@@ -187,6 +208,7 @@ impl LlmMessage {
             node_id: None,
             parent_id: None,
             tags: Vec::new(),
+            provenance_hint: None,
         }
     }
 
@@ -198,7 +220,20 @@ impl LlmMessage {
             node_id: None,
             parent_id: None,
             tags: Vec::new(),
+            provenance_hint: None,
         }
+    }
+
+    /// Stamp the block-provenance hint on this message. Consuming builder.
+    ///
+    /// Use this from upstream consumers (identity loaders, memory stores,
+    /// steering interceptors) to label messages with their origin BEFORE
+    /// emitting them into the agent loop. phi-core reads the stamp during
+    /// request assembly to populate the parallel provenance vec in
+    /// [`crate::AnnotatedRequestPayload`]. Added in 0.9.0.
+    pub fn with_provenance_hint(mut self, hint: BlockProvenance) -> Self {
+        self.provenance_hint = Some(Box::new(hint));
+        self
     }
 
     /// Stamp the Composition I node identity (`node_id` + optional `parent_id`)
