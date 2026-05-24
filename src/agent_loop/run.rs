@@ -334,7 +334,8 @@ pub(super) async fn run_loop(
             }
 
             // Stream assistant response
-            let message = stream_assistant_response(context, config, tx, cancel, &loop_id).await;
+            let message =
+                stream_assistant_response(context, config, tx, cancel, &loop_id, turn as u32).await;
 
             let agent_msg: AgentMessage =
                 AgentMessage::from(message.clone()).with_turn_id(current_turn_id.clone());

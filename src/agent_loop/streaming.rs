@@ -8,8 +8,103 @@ use super::config::*;
 use super::helpers::default_convert_to_llm;
 use crate::provider::{ProviderError, ProviderRegistry, StreamConfig, StreamEvent, StreamProvider};
 use crate::types::*;
+use chrono::Utc;
 use tokio::sync::mpsc;
 use tracing::warn;
+
+/// Derive a parallel `Vec<BlockProvenance>` for the LLM-wire messages from the
+/// input `AgentMessage[]` (post-transform, pre-`convert_to_llm`). Reads each
+/// `LlmMessage::provenance_hint` if set; otherwise derives from `turn_id` +
+/// `Message` variant per the 0.9.0 derivation rules.
+///
+/// Length of the returned vec matches the post-default-`convert_to_llm`
+/// message list (i.e. the count of `AgentMessage::Llm` entries — Extension
+/// messages are dropped). When a custom `convert_to_llm` collapses or
+/// reorders messages, the parallel-index guarantee may not hold; consumers
+/// relying on byte-exact alignment should set `convert_to_llm = None`.
+pub(super) fn derive_provenance(messages: &[AgentMessage]) -> Vec<BlockProvenance> {
+    // Group LlmMessages by `turn_id.turn_index` to assign within-turn
+    // `message_index` ordinals deterministically.
+    let mut per_turn_counter: std::collections::HashMap<u32, usize> =
+        std::collections::HashMap::new();
+    let mut out: Vec<BlockProvenance> = Vec::new();
+
+    for am in messages {
+        let AgentMessage::Llm(lm) = am else {
+            // Extension messages are filtered out by default_convert_to_llm; do
+            // not emit a provenance entry for them.
+            continue;
+        };
+
+        // 1) Hint takes precedence when set by upstream consumers.
+        if let Some(ref hint) = lm.provenance_hint {
+            out.push((**hint).clone());
+            continue;
+        }
+
+        // 2) Fall back to deriving from `turn_id` + Message variant.
+        let prov = match (&lm.turn_id, &lm.message) {
+            (Some(tid), Message::User { .. }) => {
+                let mi = per_turn_counter.entry(tid.turn_index).or_insert(0);
+                let val = *mi;
+                *mi += 1;
+                BlockProvenance::LoopTurn {
+                    turn_index: tid.turn_index as usize,
+                    role: ProvenanceRole::UserMessage,
+                    message_index: val,
+                }
+            }
+            (Some(tid), Message::Assistant { content, .. }) => {
+                // Tool-call requests live inside Message::Assistant content.
+                // If any ToolCall content is present, classify as ToolCallRequest;
+                // otherwise AssistantResponse.
+                let has_tool_call = content
+                    .iter()
+                    .any(|c| matches!(c, Content::ToolCall { .. }));
+                let role = if has_tool_call {
+                    ProvenanceRole::ToolCallRequest
+                } else {
+                    ProvenanceRole::AssistantResponse
+                };
+                let mi = per_turn_counter.entry(tid.turn_index).or_insert(0);
+                let val = *mi;
+                *mi += 1;
+                BlockProvenance::LoopTurn {
+                    turn_index: tid.turn_index as usize,
+                    role,
+                    message_index: val,
+                }
+            }
+            (Some(tid), Message::ToolResult { .. }) => {
+                let mi = per_turn_counter.entry(tid.turn_index).or_insert(0);
+                let val = *mi;
+                *mi += 1;
+                BlockProvenance::LoopTurn {
+                    turn_index: tid.turn_index as usize,
+                    role: ProvenanceRole::ToolCallResult,
+                    message_index: val,
+                }
+            }
+            // No turn_id → derive from message kind. Initial user msg before any
+            // turn opens is Steering; later context-injection user msg is FollowUp;
+            // anything else is Unknown.
+            (None, Message::User { .. }) => {
+                // We can't disambiguate Steering vs FollowUp post-hoc without
+                // more context. Treat the FIRST seen pre-turn user as Steering
+                // (matches the agent_loop entry pattern); subsequent pre-turn
+                // users are FollowUp.
+                if out.iter().any(|p| matches!(p, BlockProvenance::Steering)) {
+                    BlockProvenance::FollowUp
+                } else {
+                    BlockProvenance::Steering
+                }
+            }
+            (None, _) => BlockProvenance::Unknown,
+        };
+        out.push(prov);
+    }
+    out
+}
 
 /*
 stream_assistant_response — the core LLM call.
@@ -40,6 +135,7 @@ pub(super) async fn stream_assistant_response(
     tx: &mpsc::UnboundedSender<AgentEvent>, // OBSERVER — re-emits StreamEvents as AgentEvents for the caller
     cancel: &tokio_util::sync::CancellationToken, // ABORT — forwarded to provider.stream(); cloned as provider_cancel
     loop_id: &str,
+    turn_index: u32, // 0.9.0 — used to populate AgentEvent::TurnRequest
 ) -> Message {
     // complete LLM response (all content blocks assembled); synthetic error Message on failure
     // Build working context: if prun streams are populated, merge them; otherwise use messages as-is.
@@ -72,6 +168,40 @@ pub(super) async fn stream_assistant_response(
             parameters: t.parameters_schema(),
         })
         .collect();
+
+    // ── 0.9.0: assemble + emit AnnotatedRequestPayload as AgentEvent::TurnRequest ──
+    //
+    // Fires exactly once per turn (before the retry loop). Derives per-message
+    // provenance tags from `AgentMessage::Llm.provenance_hint` (stamped by
+    // upstream consumers) or falls back to `turn_id` + variant.
+    //
+    // Provenance vec is parallel-indexed to `llm_messages` and prepended with
+    // a `SystemPrompt` entry to match the system_prompt + messages layout in
+    // `AnnotatedRequestPayload`. The system prompt sits OUTSIDE
+    // `payload.messages` (provider wire-format mirror), so the provenance vec
+    // length equals `messages.len()` — no SystemPrompt entry inside the vec.
+    {
+        let provenance = derive_provenance(&messages);
+        let payload = AnnotatedRequestPayload {
+            system_prompt: context.system_prompt.clone(),
+            messages: llm_messages.clone(),
+            provenance,
+            tools: tool_defs.clone(),
+            model_id: config.model_config.id.clone(),
+            thinking_level: config.thinking_level,
+            max_tokens: config.max_tokens,
+            temperature: config.temperature,
+            response_format: config.response_format.clone(),
+        };
+        // Best-effort emit; ignore receiver-dropped errors.
+        tx.send(AgentEvent::TurnRequest {
+            loop_id: loop_id.to_string(),
+            turn_index,
+            payload,
+            timestamp: Utc::now(),
+        })
+        .ok();
+    }
 
     /*
     RETRY LOOP — loop { ... break value } returning a value
