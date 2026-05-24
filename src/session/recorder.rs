@@ -33,6 +33,18 @@ pub struct SessionRecorderConfig {
     /// for debugging or playback use cases.
     pub include_streaming_events: bool,
 
+    /// Capture [`AnnotatedRequestPayload`] from [`AgentEvent::TurnRequest`]
+    /// onto each materialized [`Turn::request_payload`].
+    ///
+    /// Default: `false`. Each per-turn payload can be hundreds of KB (full
+    /// system prompt + message vec); enable only when reconstructing the
+    /// exact request the model received is required (debugging, golden-output
+    /// replay, cost analysis). The `TurnRequest` event is emitted regardless
+    /// of this flag — disabling it only suppresses persistence.
+    ///
+    /// Added in phi-core 0.9.0.
+    pub capture_turn_requests: bool,
+
     /// Session-level callback: fires when a new session is first created (G2).
     pub before_task: Option<BeforeTaskFn>,
 
@@ -44,6 +56,7 @@ impl std::fmt::Debug for SessionRecorderConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SessionRecorderConfig")
             .field("include_streaming_events", &self.include_streaming_events)
+            .field("capture_turn_requests", &self.capture_turn_requests)
             .field("before_task", &self.before_task.as_ref().map(|_| "..."))
             .field("after_task", &self.after_task.as_ref().map(|_| "..."))
             .finish()
@@ -67,6 +80,9 @@ struct PartialTurn {
     triggered_by: TurnTrigger,
     started_at: chrono::DateTime<chrono::Utc>,
     input_messages: Vec<AgentMessage>,
+    /// 0.9.0 — accumulated from [`AgentEvent::TurnRequest`] when
+    /// [`SessionRecorderConfig::capture_turn_requests`] is `true`.
+    request_payload: Option<AnnotatedRequestPayload>,
 }
 
 // ---------------------------------------------------------------------------
@@ -324,8 +340,21 @@ impl SessionRecorder {
                         triggered_by: triggered_by.clone(),
                         started_at: *timestamp,
                         input_messages: Vec::new(),
+                        request_payload: None,
                     },
                 );
+                self.append_event(loop_id, event.clone());
+            }
+
+            // ── TurnRequest — opt-in capture of the assembled LLM payload ─
+            AgentEvent::TurnRequest {
+                loop_id, payload, ..
+            } => {
+                if self.config.capture_turn_requests {
+                    if let Some(partial) = self.partial_turns.get_mut(loop_id.as_str()) {
+                        partial.request_payload = Some(payload.clone());
+                    }
+                }
                 self.append_event(loop_id, event.clone());
             }
 
@@ -366,6 +395,7 @@ impl SessionRecorder {
                             .collect(),
                         started_at: partial.started_at,
                         ended_at: *timestamp,
+                        request_payload: partial.request_payload,
                     };
                     if let Some(open) = self.open_loops.get_mut(loop_id.as_str()) {
                         open.record.turns.push(turn);

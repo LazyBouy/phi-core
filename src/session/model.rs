@@ -277,6 +277,17 @@ pub struct Turn {
 
     /// Wall-clock time when this turn completed (from `TurnEnd.timestamp`).
     pub ended_at: DateTime<Utc>,
+
+    /// Fully-assembled LLM request payload captured from
+    /// [`crate::AgentEvent::TurnRequest`] when
+    /// [`crate::session::SessionRecorderConfig::capture_turn_requests`] is
+    /// enabled. `None` when capture is off (default) or for sessions persisted
+    /// before phi-core 0.9.0.
+    ///
+    /// Added in phi-core 0.9.0. Serialization is skipped when `None` for
+    /// back-compat (existing session JSON loads cleanly into 0.9.0 readers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_payload: Option<AnnotatedRequestPayload>,
 }
 
 impl Turn {

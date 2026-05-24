@@ -312,6 +312,7 @@ async fn test_session_recorder_streaming_events() {
     // With streaming events.
     let mut recorder_with_stream = SessionRecorder::new(SessionRecorderConfig {
         include_streaming_events: true,
+        capture_turn_requests: false,
         before_task: None,
         after_task: None,
     });
@@ -1515,6 +1516,7 @@ fn test_turn_serde_roundtrip() {
         tool_results: vec![],
         started_at: chrono::Utc::now(),
         ended_at: chrono::Utc::now(),
+        request_payload: None,
     };
 
     let json = serde_json::to_string(&turn).expect("serialize");
@@ -1784,6 +1786,7 @@ fn test_before_task_fires_on_new_session() {
 
     let config = SessionRecorderConfig {
         include_streaming_events: false,
+        capture_turn_requests: false,
         before_task: Some(Arc::new(move |_session: &Session| {
             fired_clone.store(true, Ordering::SeqCst);
             true
@@ -1824,6 +1827,7 @@ fn test_after_task_fires_on_flush() {
 
     let config = SessionRecorderConfig {
         include_streaming_events: false,
+        capture_turn_requests: false,
         before_task: None,
         after_task: Some(Arc::new(move |_session: &Session| {
             fired_clone.store(true, Ordering::SeqCst);
@@ -1878,6 +1882,7 @@ fn test_task_callbacks_not_fired_on_continuation() {
 
     let config = SessionRecorderConfig {
         include_streaming_events: false,
+        capture_turn_requests: false,
         before_task: Some(Arc::new(move |_session: &Session| {
             counter_clone.fetch_add(1, Ordering::SeqCst);
             true
@@ -1945,6 +1950,7 @@ fn test_before_task_can_abort() {
 
     let config = SessionRecorderConfig {
         include_streaming_events: false,
+        capture_turn_requests: false,
         before_task: Some(Arc::new(move |_session: &Session| {
             hook_fired_clone.store(true, Ordering::SeqCst);
             false // return false — attempt to "abort"
