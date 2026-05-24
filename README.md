@@ -33,7 +33,7 @@ To enable OpenAPI tool generation:
 
 ```toml
 [dependencies]
-phi-core = { version = "0.8", features = ["openapi"] }
+phi-core = { version = "0.9", features = ["openapi"] }
 ```
 
 **Minimum Supported Rust Version**: 1.75
