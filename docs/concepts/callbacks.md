@@ -1,7 +1,17 @@
-<!-- Last verified: 2026-04-05 by Claude Code -->
+<!-- Last verified: 2026-05-24 by Claude Code (phi-core 0.9.0 — 9 of 11 lifecycle Fns are now async; tool-update hooks intentionally stay sync) -->
 # Lifecycle Callbacks
 
 phi-core provides four tiers of lifecycle callbacks that let you observe and control the agent loop without modifying its internals. Loop-level, turn-level, and tool-level callbacks are set on `AgentLoopConfig` (or via `Agent` builder methods). Session-level callbacks (`before_task` / `after_task`) are set on `SessionRecorderConfig`.
+
+> **0.9.0 — async hook bodies.** All loop-level, turn-level, and the
+> non-update tool-level hooks below (plus the two compaction hooks) are
+> now `async`. The `on_*` builders on `BasicAgent` accept closures whose
+> bodies return `Pin<Box<dyn Future<Output = T> + Send>>` — wrap sync
+> bodies in `Box::pin(async move { ... })`, or `.await` LLM and other
+> async work directly. The two **tool-update hooks**
+> (`before_tool_execution_update` / `after_tool_execution_update`) stay
+> sync — see the note next to their sections for the rationale.
+> CHANGELOG `[0.9.0]` § Migration carries the full mechanical recipe.
 
 ## Tiers Overview
 
@@ -119,9 +129,21 @@ let agent = BasicAgent::new(ModelConfig::anthropic("claude-sonnet-4-20250514", "
     });
 ```
 
-### `before_tool_execution_update`
+### `before_tool_execution_update` *(sync — see note below)*
 
 Called before each `ToolExecutionUpdate` event (streaming progress from a running tool). Return `false` to suppress the event — the tool keeps running and the final `ToolResult` is unaffected; only the intermediate streaming update is dropped.
+
+> **Pre-existing-behaviour preservation note (phi-core 0.9.0).** The two
+> tool-update hooks (`before_tool_execution_update` /
+> `after_tool_execution_update`) remain sync after the 0.9.0 async-trait
+> migration. Async-ifying them would cascade into the `ToolUpdateFn`
+> callback type and every `AgentTool::execute` body that invokes
+> `ctx.on_update(...)` — materially wider than the 0.9.0 scope. The veto
+> decision in `before_tool_execution_update` must be synchronous so the
+> surrounding emit gate works without an `.await` suspension at every
+> streamed tool-update. Async work at update-time should be dispatched
+> via `tokio::spawn(...)` inside the sync closure body. Tracked in the
+> CHANGELOG `[Unreleased]` "Forward markers" for a future release.
 
 ```rust
 let agent = BasicAgent::new(ModelConfig::anthropic("claude-sonnet-4-20250514", "Claude Sonnet 4", &api_key))

@@ -1,4 +1,4 @@
-<!-- Last verified: 2026-04-05 by Claude Code -->
+<!-- Last verified: 2026-05-24 by Claude Code (phi-core 0.9.0 — BlockCompactionStrategy is now #[async_trait]; compact_session_loops is async fn) -->
 # Context Compaction
 
 Compaction manages context window pressure by creating non-destructive overlays on session history. Nothing is deleted or replaced — original messages remain authoritative in `LoopRecord.messages`.
@@ -100,29 +100,41 @@ Compaction strategies are fields on `CompactionConfig`, not on `AgentLoopConfig`
 - **`in_memory_strategy`** — custom in-memory compaction strategy (used when session is `None`)
 - **`block_strategy`** — block-based compaction strategy (used when session is `Some`; falls back to `DefaultBlockCompaction`)
 
-Implement `BlockCompactionStrategy` to customise any section:
+Implement `BlockCompactionStrategy` to customise any section.
+
+As of phi-core 0.9.0, `BlockCompactionStrategy` is `#[async_trait]`-marked
+and all four methods are `async fn` — implementations can issue LLM calls
+inside `keep_compacted` / `keep_recent` without `block_in_place` workarounds:
 
 ```rust
+use async_trait::async_trait;
 use phi_core::{BlockCompactionStrategy, CompactionConfig, CompactedSection, TurnRange, TurnMap, DefaultBlockCompaction};
 use phi_core::session::LoopRecord;
 
 struct MyStrategy;
 
+#[async_trait]
 impl BlockCompactionStrategy for MyStrategy {
-    fn keep_first(&self, record: &LoopRecord, turn_map: &TurnMap, config: &CompactionConfig) -> Option<TurnRange> {
-        DefaultBlockCompaction.keep_first(record, turn_map, config) // delegate
+    async fn keep_first(&self, record: &LoopRecord, turn_map: &TurnMap, config: &CompactionConfig) -> Option<TurnRange> {
+        DefaultBlockCompaction.keep_first(record, turn_map, config).await // delegate
     }
 
-    fn keep_recent(&self, record: &LoopRecord, turn_map: &TurnMap, config: &CompactionConfig) -> Option<CompactedSection> {
-        DefaultBlockCompaction.keep_recent(record, turn_map, config) // delegate
+    async fn keep_recent(&self, record: &LoopRecord, turn_map: &TurnMap, config: &CompactionConfig) -> Option<CompactedSection> {
+        DefaultBlockCompaction.keep_recent(record, turn_map, config).await // delegate
     }
 
-    fn keep_compacted(&self, record: &LoopRecord, turn_map: &TurnMap, config: &CompactionConfig, is_most_recent: bool) -> Option<CompactedSection> {
-        // Custom LLM-based summarisation
-        my_llm_summarize(record, turn_map, config, is_most_recent)
+    async fn keep_compacted(&self, record: &LoopRecord, turn_map: &TurnMap, config: &CompactionConfig, is_most_recent: bool) -> Option<CompactedSection> {
+        // Custom LLM-based summarisation — issue LLM calls directly without bridging.
+        my_llm_summarize(record, turn_map, config, is_most_recent).await
     }
 }
 ```
+
+Sync impls that don't `.await` anything migrate by adding
+`#[async_trait::async_trait]` + the `async` keyword on each method signature;
+the bodies remain unchanged. See the per-turn debug-capture surface in
+[`debugging.md`](debugging.md) for the canonical pattern to inspect what
+each compacted turn looked like to the model.
 
 Set the custom strategy on `CompactionConfig`:
 

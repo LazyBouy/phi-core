@@ -1,4 +1,4 @@
-<!-- Last verified: 2026-04-05 by Claude Code -->
+<!-- Last verified: 2026-05-24 by Claude Code (phi-core 0.9.0 — 9 of 11 lifecycle Fns + InputFilter are now async; tool-update hooks intentionally stay sync) -->
 
 # The Agent Loop
 
@@ -140,6 +140,33 @@ pub struct AgentLoopConfig {
 | `first_turn_trigger` | The `TurnTrigger` for the first `TurnStart` event; defaults to `TurnTrigger::User`, set to `SubAgent` by sub-agent callers |
 | `context_translation` | Optional `ContextTranslationStrategy` for cross-provider compatibility — translates content types (e.g., `Content::Thinking`) when targeting a different provider (G8) |
 | `prun_pending` | Shared state for `PrunTool` to communicate pruning requests to the loop; set automatically by `with_prun_tool()` |
+
+> **0.9.0 — async lifecycle hooks.** `BeforeLoopFn`, `AfterLoopFn`,
+> `BeforeTurnFn`, `AfterTurnFn`, `OnErrorFn`, `BeforeToolExecutionFn`,
+> `AfterToolExecutionFn`, `BeforeCompactionStartFn`, and
+> `AfterCompactionEndFn` are now async — their function bodies return
+> `Pin<Box<dyn Future<Output = T> + Send>>` (alias: `HookFuture<'_, T>`).
+> Sync closure bodies migrate by wrapping in
+> `Box::pin(async move { ... })`. Closures can now `.await` LLM calls and
+> other async work directly without a `tokio::task::block_in_place`
+> bridge.
+>
+> **Pre-existing-behaviour preservation note (phi-core 0.9.0):
+> tool-update hooks stay sync.**
+> `BeforeToolExecutionUpdateFn` and `AfterToolExecutionUpdateFn` remain
+> `Arc<dyn Fn(&str, &str, &str) -> bool + Send + Sync>` /
+> `Arc<dyn Fn(&str, &str, &str) + Send + Sync>` respectively. Async-ifying
+> them would cascade into the `ToolUpdateFn` callback type and every
+> `AgentTool::execute` body that invokes `ctx.on_update(...)` — a
+> materially wider migration than the 0.9.0 scope. The veto decision in
+> `BeforeToolExecutionUpdateFn` is synchronous so the surrounding emit
+> gate works without an `.await` at every streamed tool-update;
+> consumers that need async work at update-time should dispatch via
+> `tokio::spawn(...)` inside the sync closure body. Tracked under the
+> CHANGELOG `[Unreleased]` "Forward markers" section for a future
+> release. `InputFilter::filter()` is also now `async fn` via
+> `#[async_trait]` — see [Tools](tools.md) and the per-turn debug-capture
+> surface at [`debugging.md`](debugging.md).
 
 ## Steering & Follow-Ups
 

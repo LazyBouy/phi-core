@@ -25,7 +25,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-phi-core = "0.8"
+phi-core = "0.9"
 tokio = { version = "1", features = ["full"] }
 ```
 

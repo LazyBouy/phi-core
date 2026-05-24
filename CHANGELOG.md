@@ -6,6 +6,217 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [Unreleased]
+
+### Forward markers
+
+- **Async parity for tool-update hooks** — `BeforeToolExecutionUpdateFn` and
+  `AfterToolExecutionUpdateFn` remain sync in 0.9.0 (see the §0.9.0 "Breaking"
+  notes below for rationale). Making them async would cascade into the
+  `ToolUpdateFn` callback type and every `AgentTool::execute` body that calls
+  `ctx.on_update(...)` — a wider migration deferred to a future release.
+
+---
+
+## [0.9.0] — 2026-05-24
+
+**Breaking-change release.** Ships two bundled surfaces:
+
+1. **Per-turn debug capture.** A new `AgentEvent::TurnRequest` variant
+   carries the fully-assembled LLM request — system prompt, post-
+   `convert_to_llm()` `Vec<Message>` array, tool definitions, and
+   parallel-indexed per-block provenance — exactly once per turn. Opt-in
+   persistence onto `Turn::request_payload` via the new
+   `SessionRecorderConfig::capture_turn_requests` flag (default `false`).
+   Closes the gap where the wire-format payload sent to the model was
+   never recoverable post-hoc.
+
+2. **Async-trait migration.** `BlockCompactionStrategy` and 9 of the 11
+   `AgentLoopConfig` lifecycle Fns + the `InputFilter` trait become async.
+   Custom impls and hook closures can now `.await` LLM calls and other
+   async work inside compaction bodies and lifecycle hooks without
+   `block_in_place` workarounds. Tool-update hooks
+   (`BeforeToolExecutionUpdateFn` / `AfterToolExecutionUpdateFn`) remain
+   sync — see the migration notes for the rationale.
+
+Concept source: [`docs/concepts/debugging.md`](docs/concepts/debugging.md)
+(new — covers existing debugging surfaces plus the 0.9.0 capture). Plan
+archive: i-phi
+`docs/v0/proposal/plan/build/phi-core-0.9.0/plan.md`.
+
+### Breaking
+
+- **`AgentEvent::TurnRequest` variant added.** `AgentEvent` is already
+  `#[non_exhaustive]` since 0.8.0, so wildcard `_ => …` arms keep
+  compiling unchanged. Exhaustive matchers without a wildcard must add a
+  `TurnRequest { .. } => …` arm.
+- **`LlmMessage` gains `provenance_hint: Option<Box<BlockProvenance>>`.**
+  `LlmMessage::new(...)`, `LlmMessage::with_turn(...)`,
+  `LlmMessage::with_provenance_hint(...)`, and `LlmMessage::with_node_identity(...)`
+  fill the field automatically. Direct struct-literal construction breaks —
+  add `provenance_hint: None`. Serialization is `#[serde(default)]` /
+  omitted-when-`None`, so old session JSON loads cleanly.
+- **`BlockCompactionStrategy` is now `#[async_trait]`.** All four methods
+  (`keep_first`, `keep_recent`, `keep_compacted`, `compact`) are `async fn`.
+  Sync impls migrate mechanically: prepend `#[async_trait::async_trait]`
+  to the impl block and `async` to each method signature. Bodies need no
+  changes if they don't `.await` anything. `compact_session_loops` (and the
+  `BasicAgent::compact_context*` wrappers) is now `async fn` as well.
+- **9 of 11 `AgentLoopConfig` lifecycle Fns become async.**
+  `BeforeLoopFn`, `AfterLoopFn`, `BeforeTurnFn`, `AfterTurnFn`, `OnErrorFn`,
+  `BeforeToolExecutionFn`, `AfterToolExecutionFn`, `BeforeCompactionStartFn`,
+  `AfterCompactionEndFn` switch from `Fn(...) -> T` to
+  `Fn(...) -> HookFuture<'_, T>` (alias for `Pin<Box<dyn Future<Output = T> + Send>>`).
+  Sync hook bodies migrate by wrapping in `Box::pin(async move { ... })`.
+  `BeforeToolExecutionUpdateFn` and `AfterToolExecutionUpdateFn` **stay sync**
+  — see migration notes.
+- **`InputFilter::filter()` is now `async fn`** (via `#[async_trait]`).
+  CPU-bound filters should wrap their work in `tokio::task::spawn_blocking`
+  to avoid stalling the runtime.
+- **`AgentLoopConfig` gains no new fields** — async-fication is contained
+  in the existing hook fields' type aliases.
+
+### Added
+
+- **`AgentEvent::TurnRequest`** variant with fields
+  `{ loop_id, turn_index, payload: AnnotatedRequestPayload, timestamp }`.
+  Emitted exactly once per turn (before the retry loop's first
+  `provider.stream()` call) regardless of recorder configuration.
+- **`BlockProvenance`** enum (`#[non_exhaustive]`) with variants
+  `SystemPrompt`, `IdentityBlock { name, order }`,
+  `MemoryTier { tier, record_id }`,
+  `LoopTurn { turn_index, role, message_index }`, `Steering`, `FollowUp`,
+  `Unknown`.
+- **`ProvenanceRole`** enum: `UserMessage`, `AssistantResponse`,
+  `ToolCallRequest`, `ToolCallResult`.
+- **`AnnotatedRequestPayload`** struct mirroring the provider wire format
+  (`system_prompt` + `messages` + `tools` + model identity / thinking_level
+  / max_tokens / temperature / response_format) with a parallel-indexed
+  `provenance` vec.
+- **`SessionRecorderConfig::capture_turn_requests: bool`** (default
+  `false`) — opt-in flag that mirrors `include_streaming_events`.
+- **`Turn::request_payload: Option<AnnotatedRequestPayload>`** —
+  `#[serde(default, skip_serializing_if = "Option::is_none")]` so existing
+  session JSON loads unchanged.
+- **`LlmMessage::with_provenance_hint(BlockProvenance)`** consuming
+  builder — used by upstream consumers (identity loaders, memory stores)
+  to stamp non-loop-history provenance before emitting messages.
+- **`HookFuture<'a, T>`** type alias for `Pin<Box<dyn Future<Output = T> + Send + 'a>>`
+  in `phi_core::agent_loop` — short hand for async hook return types.
+- **`phi-core/docs/concepts/debugging.md`** — new concept doc covering all
+  debug surfaces (`AgentEvent` stream / `SessionRecorder` JSON / `tracing`
+  integration) plus the new per-turn capture flow.
+
+### Migration
+
+**Custom `BlockCompactionStrategy` implementations** — add
+`#[async_trait::async_trait]` to the impl block and `async` to each method.
+If your bodies don't `.await` anything, no further changes are needed:
+
+```rust
+use async_trait::async_trait;
+use phi_core::context::{BlockCompactionStrategy, CompactedSection, TurnMap, TurnRange};
+use phi_core::session::LoopRecord;
+
+struct MyStrategy;
+
+#[async_trait]
+impl BlockCompactionStrategy for MyStrategy {
+    async fn keep_first(
+        &self,
+        record: &LoopRecord,
+        turn_map: &TurnMap,
+        config: &phi_core::context::CompactionConfig,
+    ) -> Option<TurnRange> {
+        // Sync body — unchanged. Or await an LLM call here.
+        None
+    }
+    // ... keep_recent / keep_compacted similarly
+}
+```
+
+**Lifecycle hook closures** — wrap the sync body in
+`Box::pin(async move { ... })`:
+
+```rust
+use std::sync::Arc;
+use phi_core::agent_loop::BeforeTurnFn;
+
+let hook: BeforeTurnFn = Arc::new(|messages, turn_index| {
+    Box::pin(async move {
+        println!("turn {} starting with {} messages", turn_index, messages.len());
+        true // false to abort the turn
+    })
+});
+```
+
+Closures that previously did `tokio::task::block_on(async { llm_call().await })`
+can drop the bridge and just `.await` directly inside the `async move` block.
+
+**`LlmMessage` struct-literal construction** — add `provenance_hint: None`:
+
+```rust
+let lm = phi_core::LlmMessage {
+    message: phi_core::Message::user("hi"),
+    turn_id: None,
+    node_id: None,
+    parent_id: None,
+    tags: vec![],
+    provenance_hint: None, // <-- 0.9.0 addition
+};
+```
+
+Or prefer the constructor: `LlmMessage::new(Message::user("hi"))`.
+
+**`InputFilter::filter()` is now `async fn`** — prepend
+`#[async_trait::async_trait]` to the impl block + `async` to the method.
+For CPU-bound filters:
+
+```rust
+async fn filter(&self, input: &str) -> FilterDecision {
+    let owned = input.to_string();
+    tokio::task::spawn_blocking(move || expensive_sync_scan(&owned))
+        .await
+        .unwrap_or(FilterDecision::Allow)
+}
+```
+
+**Exhaustive `match AgentEvent` arms** — `#[non_exhaustive]` shielded the
+type since 0.8.0, so wildcard arms compile unchanged. Otherwise add:
+
+```rust
+AgentEvent::TurnRequest { loop_id, turn_index, payload, timestamp } => {
+    // per-turn debug payload available here
+}
+```
+
+**Pre-existing-behaviour preservation note —
+`BeforeToolExecutionUpdateFn` + `AfterToolExecutionUpdateFn` stay sync.**
+Making them async would cascade into the `ToolUpdateFn` callback type and
+every `AgentTool::execute` body that invokes `ctx.on_update(...)` —
+materially wider than the 0.9.0 cycle's scope. The veto decision in
+`BeforeToolExecutionUpdateFn` must be synchronous so the surrounding
+emit-gate works without an `.await` suspension point at every streamed
+tool-update; consumers that want async work at update-time should
+dispatch via `tokio::spawn(...)` inside the sync closure body. Tracked
+under the `[Unreleased]` "Forward markers" section for a future release.
+
+### Internal
+
+- New `phi-core/src/types/provenance.rs` (`BlockProvenance` + `ProvenanceRole`
+  + `AnnotatedRequestPayload` with `serde` round-trip including a
+  `response_format` proxy because `ResponseFormat` does not derive serde
+  natively).
+- `stream_assistant_response()` derives a parallel `Vec<BlockProvenance>` for
+  the wire-format `messages` vec, reading `LlmMessage::provenance_hint`
+  when set and falling back to `turn_id` + role-derivation otherwise.
+- `compact_session_loops` is `async fn`; in-loop call sites in
+  `agent_loop/run.rs` adopt `.await`.
+- Test count: 461 → 470 (+9 across new integration tests
+  `tests/turn_request_capture_test.rs` + `tests/async_compaction_strategy_test.rs`).
+
+---
+
 ## [0.8.0] — 2026-05-23
 
 **Breaking-change release.** Ships **Composition I** — an opt-in tree-structured
