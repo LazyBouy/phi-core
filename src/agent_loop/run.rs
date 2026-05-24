@@ -146,6 +146,10 @@ pub(super) async fn run_loop(
             if first_turn {
                 first_turn = false;
             }
+            // Capture the active turn-index BEFORE incrementing so downstream
+            // emitters (`stream_assistant_response` → `AgentEvent::TurnRequest`)
+            // can cite the same `turn_index` as the just-emitted `TurnStart`.
+            let this_turn_index = turn as u32;
             turn += 1;
 
             // On the first turn of agent_loop(), emit events for the initial prompt messages
@@ -336,7 +340,8 @@ pub(super) async fn run_loop(
 
             // Stream assistant response
             let message =
-                stream_assistant_response(context, config, tx, cancel, &loop_id, turn as u32).await;
+                stream_assistant_response(context, config, tx, cancel, &loop_id, this_turn_index)
+                    .await;
 
             let agent_msg: AgentMessage =
                 AgentMessage::from(message.clone()).with_turn_id(current_turn_id.clone());
