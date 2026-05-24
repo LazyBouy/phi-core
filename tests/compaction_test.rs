@@ -136,12 +136,12 @@ fn test_turn_map_legacy_messages_without_turn_id() {
 // CompactionBlock creation tests
 // ---------------------------------------------------------------------------
 
-#[test]
-fn test_compaction_block_creation_most_recent() {
+#[tokio::test]
+async fn test_compaction_block_creation_most_recent() {
     let record = make_loop_record("test.model.1", 10, None);
     let config = CompactionConfig::default(); // keep_first=2, keep_recent=10, max_summary=2000
 
-    let block = DefaultBlockCompaction.compact(&record, &config, true);
+    let block = DefaultBlockCompaction.compact(&record, &config, true).await;
 
     // With 10 turns and keep_first=2, keep_recent=10, there's no middle
     // (2 + 10 > 10), so keep_compacted should be None
@@ -149,8 +149,8 @@ fn test_compaction_block_creation_most_recent() {
     assert!(block.keep_compacted.is_none()); // No room for middle
 }
 
-#[test]
-fn test_compaction_block_creation_with_middle() {
+#[tokio::test]
+async fn test_compaction_block_creation_with_middle() {
     let record = make_loop_record("test.model.1", 20, None);
     let config = CompactionConfig {
         keep_first_turns: 2,
@@ -159,7 +159,7 @@ fn test_compaction_block_creation_with_middle() {
         ..CompactionConfig::default()
     };
 
-    let block = DefaultBlockCompaction.compact(&record, &config, true);
+    let block = DefaultBlockCompaction.compact(&record, &config, true).await;
 
     assert!(block.keep_first.is_some());
     let kf = block.keep_first.unwrap();
@@ -177,12 +177,14 @@ fn test_compaction_block_creation_with_middle() {
     assert_eq!(kr.range.end_turn, 19); // turns 15-19
 }
 
-#[test]
-fn test_compaction_block_creation_earlier_loop() {
+#[tokio::test]
+async fn test_compaction_block_creation_earlier_loop() {
     let record = make_loop_record("test.model.1", 10, None);
     let config = CompactionConfig::default();
 
-    let block = DefaultBlockCompaction.compact(&record, &config, false);
+    let block = DefaultBlockCompaction
+        .compact(&record, &config, false)
+        .await;
 
     // Earlier loops: only keep_compacted, no keep_first or keep_recent
     assert!(block.keep_first.is_none());
@@ -206,8 +208,8 @@ fn test_build_context_falls_back_to_raw() {
     assert_eq!(context.len(), 6);
 }
 
-#[test]
-fn test_build_context_from_session_with_blocks() {
+#[tokio::test]
+async fn test_build_context_from_session_with_blocks() {
     let mut record = make_loop_record("test.model.1", 20, None);
     let config = CompactionConfig {
         keep_first_turns: 2,
@@ -217,7 +219,7 @@ fn test_build_context_from_session_with_blocks() {
     };
 
     // Create a compaction block
-    record.compaction_block = Some(DefaultBlockCompaction.compact(&record, &config, true));
+    record.compaction_block = Some(DefaultBlockCompaction.compact(&record, &config, true).await);
 
     let session = make_session(vec![record]);
     let context = build_context_from_session(&session, "test.model.1", &config, 100_000, None);
@@ -232,8 +234,8 @@ fn test_build_context_from_session_with_blocks() {
 // compact_session_loops tests
 // ---------------------------------------------------------------------------
 
-#[test]
-fn test_compact_session_loops_writes_earlier() {
+#[tokio::test]
+async fn test_compact_session_loops_writes_earlier() {
     let loop1 = make_loop_record("test.model.1", 5, None);
     let loop2 = make_loop_record("test.model.2", 5, Some("test.model.1"));
     let loop3 = make_loop_record("test.model.3", 10, Some("test.model.2"));
@@ -254,7 +256,8 @@ fn test_compact_session_loops_writes_earlier() {
         &config,
         100_000,
         None,
-    );
+    )
+    .await;
 
     // Current loop should have a block
     assert!(session
@@ -355,8 +358,8 @@ fn test_turn_id_backward_compat_deserialization() {
 // CompactionScope::TokenBudget tests
 // ---------------------------------------------------------------------------
 
-#[test]
-fn test_compaction_scope_token_budget_partial() {
+#[tokio::test]
+async fn test_compaction_scope_token_budget_partial() {
     // Create 3 loops: loop1 has ~50 tokens, loop2 has ~50, loop3 (current) has ~50
     // With max_context_tokens = 80, only loop2 should be in scope (loop1 exceeds budget)
     let loop1 = make_loop_record("test.model.1", 5, None); // ~5 turns × 2 msgs
@@ -383,7 +386,8 @@ fn test_compaction_scope_token_budget_partial() {
         &config,
         small_budget,
         None,
-    );
+    )
+    .await;
 
     // Current loop (3) always gets a block
     assert!(session
@@ -405,8 +409,8 @@ fn test_compaction_scope_token_budget_partial() {
         .is_none());
 }
 
-#[test]
-fn test_compaction_scope_token_budget_all_fit() {
+#[tokio::test]
+async fn test_compaction_scope_token_budget_all_fit() {
     let loop1 = make_loop_record("test.model.1", 2, None);
     let loop2 = make_loop_record("test.model.2", 2, Some("test.model.1"));
     let mut session = make_session(vec![loop1, loop2]);
@@ -424,7 +428,8 @@ fn test_compaction_scope_token_budget_all_fit() {
         &config,
         1_000_000,
         None,
-    );
+    )
+    .await;
 
     assert!(session
         .get_loop("test.model.2")
@@ -438,8 +443,8 @@ fn test_compaction_scope_token_budget_all_fit() {
         .is_some());
 }
 
-#[test]
-fn test_build_context_token_budget_scope() {
+#[tokio::test]
+async fn test_build_context_token_budget_scope() {
     let mut loop1 = make_loop_record("test.model.1", 5, None);
     let mut loop2 = make_loop_record("test.model.2", 5, Some("test.model.1"));
     let mut loop3 = make_loop_record("test.model.3", 5, Some("test.model.2"));
@@ -453,9 +458,9 @@ fn test_build_context_token_budget_scope() {
     };
 
     // Create blocks on all loops
-    loop1.compaction_block = Some(DefaultBlockCompaction.compact(&loop1, &config, false));
-    loop2.compaction_block = Some(DefaultBlockCompaction.compact(&loop2, &config, false));
-    loop3.compaction_block = Some(DefaultBlockCompaction.compact(&loop3, &config, true));
+    loop1.compaction_block = Some(DefaultBlockCompaction.compact(&loop1, &config, false).await);
+    loop2.compaction_block = Some(DefaultBlockCompaction.compact(&loop2, &config, false).await);
+    loop3.compaction_block = Some(DefaultBlockCompaction.compact(&loop3, &config, true).await);
 
     let session = make_session(vec![loop1, loop2, loop3]);
 

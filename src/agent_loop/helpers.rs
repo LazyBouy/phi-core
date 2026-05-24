@@ -59,7 +59,7 @@ pub(crate) fn derive_config_segment(config: &AgentLoopConfig) -> String {
 /// Text extraction: only `Content::Text` blocks inside `Message::User` messages are fed to
 /// filters. Non-user messages (assistant, tool results, extension) are passed through
 /// unchanged.
-pub(super) fn apply_input_filters(
+pub(super) async fn apply_input_filters(
     mut messages: Vec<AgentMessage>,
     filters: &[std::sync::Arc<dyn InputFilter>],
     tx: &mpsc::UnboundedSender<AgentEvent>,
@@ -100,7 +100,7 @@ pub(super) fn apply_input_filters(
 
     let mut warnings: Vec<String> = Vec::new();
     for filter in filters {
-        match filter.filter(&user_text) {
+        match filter.filter(&user_text).await {
             FilterResult::Pass => {}
             FilterResult::Warn(w) => warnings.push(w),
             FilterResult::Reject(reason) => {

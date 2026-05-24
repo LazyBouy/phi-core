@@ -2,6 +2,8 @@ use crate::context::{ContextConfig, ExecutionLimits};
 use crate::provider::context_translation::ContextTranslationStrategy;
 use crate::provider::{ModelConfig, ResponseFormat, StreamProvider};
 use crate::types::*;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 // ── Context transformation callbacks ────────────────────────────────────────
@@ -15,18 +17,45 @@ pub type TransformContextFn = Arc<dyn Fn(Vec<AgentMessage>) -> Vec<AgentMessage>
 /// Returns pending messages (steering interrupts or follow-up work) when polled.
 pub type GetMessagesFn = Box<dyn Fn() -> Vec<AgentMessage> + Send + Sync>;
 
+// ── 0.9.0 async lifecycle hooks ─────────────────────────────────────────────
+//
+// All lifecycle Fn types below are async-trait-style boxed futures. To
+// construct one from a sync closure body:
+//
+// ```rust,ignore
+// let hook: BeforeTurnFn = Arc::new(|messages, turn| {
+//     Box::pin(async move {
+//         // sync logic ...
+//         true
+//     })
+// });
+// ```
+//
+// For async closure bodies, simply `.await` inside the `async move` block.
+
+/// Boxed-future return type used by all 0.9.0 async lifecycle hooks. `T` is the
+/// hook's logical return value (often `bool` for veto-returning hooks or `()`
+/// for fire-and-forget hooks).
+pub type HookFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
 // ── Loop hooks ───────────────────────────────────────────────────────────────
 /// Called once before the entire agent loop begins (before `AgentStart` is emitted).
 ///
 /// Arguments: `(messages, loop_index)` — `messages` is the full context at the time of the call;
 /// `loop_index` is always `0` (reserved for future multi-loop scenarios).
 /// Return `false` to abort: `AgentEnd` is emitted immediately with an empty message list.
-pub type BeforeLoopFn = Arc<dyn Fn(&[AgentMessage], usize) -> bool + Send + Sync>;
+///
+/// 0.9.0: async hook. Wrap sync bodies in `Box::pin(async move { ... })`.
+pub type BeforeLoopFn =
+    Arc<dyn for<'a> Fn(&'a [AgentMessage], usize) -> HookFuture<'a, bool> + Send + Sync>;
 /// Called once after the entire agent loop ends (after `AgentEnd` is emitted).
 ///
 /// Arguments: `(new_messages, accumulated_usage)` — `new_messages` are the messages produced
 /// by this loop call; `accumulated_usage` sums input/output tokens across all turns.
-pub type AfterLoopFn = Arc<dyn Fn(&[AgentMessage], &Usage) + Send + Sync>;
+///
+/// 0.9.0: async hook.
+pub type AfterLoopFn =
+    Arc<dyn for<'a> Fn(&'a [AgentMessage], &'a Usage) -> HookFuture<'a, ()> + Send + Sync>;
 
 // ── Turn hooks ───────────────────────────────────────────────────────────────
 /// Called before each LLM turn (before `TurnStart` is emitted).
@@ -35,12 +64,18 @@ pub type AfterLoopFn = Arc<dyn Fn(&[AgentMessage], &Usage) + Send + Sync>;
 /// queued for *this* turn are not yet visible); `turn_index` is 0-based.
 /// Return `false` to abort the turn: no `TurnStart`/`TurnEnd` events are emitted,
 /// but `AgentEnd` still fires normally.
-pub type BeforeTurnFn = Arc<dyn Fn(&[AgentMessage], usize) -> bool + Send + Sync>;
+///
+/// 0.9.0: async hook.
+pub type BeforeTurnFn =
+    Arc<dyn for<'a> Fn(&'a [AgentMessage], usize) -> HookFuture<'a, bool> + Send + Sync>;
 /// Called after each LLM turn (after `TurnEnd` is emitted).
 ///
 /// Arguments: `(messages, turn_usage)` — `turn_usage` covers only this turn's tokens.
 /// Fires on both the normal path and the error/abort path.
-pub type AfterTurnFn = Arc<dyn Fn(&[AgentMessage], &Usage) + Send + Sync>;
+///
+/// 0.9.0: async hook.
+pub type AfterTurnFn =
+    Arc<dyn for<'a> Fn(&'a [AgentMessage], &'a Usage) -> HookFuture<'a, ()> + Send + Sync>;
 
 // ── Tool execution hooks ─────────────────────────────────────────────────────
 /// Called before each tool call (before `ToolExecutionStart` is emitted).
@@ -48,37 +83,63 @@ pub type AfterTurnFn = Arc<dyn Fn(&[AgentMessage], &Usage) + Send + Sync>;
 /// Arguments: `(tool_name, tool_call_id, args)`.
 /// Return `false` to skip the call: an error `ToolResult` is synthesised so the LLM still
 /// receives a response, but `ToolExecutionStart`/`End` are **not** emitted.
-pub type BeforeToolExecutionFn = Arc<dyn Fn(&str, &str, &serde_json::Value) -> bool + Send + Sync>;
+///
+/// 0.9.0: async hook.
+pub type BeforeToolExecutionFn = Arc<
+    dyn for<'a> Fn(&'a str, &'a str, &'a serde_json::Value) -> HookFuture<'a, bool> + Send + Sync,
+>;
 /// Called after each tool call (after `ToolExecutionEnd` is emitted).
 ///
 /// Arguments: `(tool_name, tool_call_id, is_error)`.
-pub type AfterToolExecutionFn = Arc<dyn Fn(&str, &str, bool) + Send + Sync>;
+///
+/// 0.9.0: async hook.
+pub type AfterToolExecutionFn =
+    Arc<dyn for<'a> Fn(&'a str, &'a str, bool) -> HookFuture<'a, ()> + Send + Sync>;
 /// Called before each incremental tool update (before `ToolExecutionUpdate` is emitted).
 ///
 /// Fires every time a tool calls `ctx.on_update(partial)` — potentially many times per call
 /// (e.g. each line of bash output). Arguments: `(tool_name, tool_call_id, text_content)`.
 /// Return `false` to suppress the streaming event; the tool keeps running and its final
 /// `ToolResult` (what the LLM sees) is **unaffected**.
+///
+/// **Sync** (not async). Tool-update hooks fire from inside the sync
+/// `ToolUpdateFn` callback that tools invoke during their async execute
+/// body — making this hook async would require also async-ifying
+/// `ToolUpdateFn` and every tool that invokes `ctx.on_update(...)`. The
+/// veto decision must be synchronous so the surrounding emit gate works
+/// without blocking. For async work in update-time, dispatch via
+/// `tokio::spawn` inside the closure body.
 pub type BeforeToolExecutionUpdateFn = Arc<dyn Fn(&str, &str, &str) -> bool + Send + Sync>;
 /// Called after each incremental tool update (after `ToolExecutionUpdate` is emitted).
 ///
 /// Only fires when the update was *not* suppressed by `BeforeToolExecutionUpdateFn`.
 /// Arguments: `(tool_name, tool_call_id, text_content)`.
+///
+/// **Sync** (not async). See [`BeforeToolExecutionUpdateFn`] for the
+/// rationale.
 pub type AfterToolExecutionUpdateFn = Arc<dyn Fn(&str, &str, &str) + Send + Sync>;
 
 /// Called when the LLM returns `StopReason::Error`. Argument: the error message string.
-pub type OnErrorFn = Arc<dyn Fn(&str) + Send + Sync>;
+///
+/// 0.9.0: async hook.
+pub type OnErrorFn = Arc<dyn for<'a> Fn(&'a str) -> HookFuture<'a, ()> + Send + Sync>;
 
 // ── Compaction hooks (G1) ───────────────────────────────────────────────────
 /// Called before compaction starts.
 ///
 /// Arguments: `(estimated_tokens, message_count)`.
 /// Return `false` to skip compaction for this cycle.
-pub type BeforeCompactionStartFn = Arc<dyn Fn(usize, usize) -> bool + Send + Sync>;
+///
+/// 0.9.0: async hook.
+pub type BeforeCompactionStartFn =
+    Arc<dyn Fn(usize, usize) -> HookFuture<'static, bool> + Send + Sync>;
 /// Called after compaction completes.
 ///
 /// Arguments: `(messages_before, messages_after, tokens_before, tokens_after)`.
-pub type AfterCompactionEndFn = Arc<dyn Fn(usize, usize, usize, usize) + Send + Sync>;
+///
+/// 0.9.0: async hook.
+pub type AfterCompactionEndFn =
+    Arc<dyn Fn(usize, usize, usize, usize) -> HookFuture<'static, ()> + Send + Sync>;
 
 /// All static settings for a single [`agent_loop`] / [`agent_loop_continue`] call.
 ///

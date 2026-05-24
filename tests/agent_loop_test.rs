@@ -1315,7 +1315,8 @@ async fn test_before_turn_can_abort() {
     let mut config = make_config(Arc::new(provider));
     config.before_turn = Some(std::sync::Arc::new(move |_msgs, _turn| {
         let count = turn_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        count < 2 // Allow turns 0 and 1, abort on turn 2
+        let allow = count < 2; // Allow turns 0 and 1, abort on turn 2
+        Box::pin(async move { allow })
     }));
 
     let mut context = AgentContext {
@@ -1368,6 +1369,7 @@ async fn test_after_turn_receives_messages() {
     let mut config = make_config(Arc::new(provider));
     config.after_turn = Some(std::sync::Arc::new(move |msgs, _usage| {
         counts_clone.lock().unwrap().push(msgs.len());
+        Box::pin(async move {})
     }));
 
     let mut context = AgentContext {
@@ -1435,6 +1437,7 @@ async fn test_on_error_fires_on_provider_error() {
         after_turn: None,
         on_error: Some(std::sync::Arc::new(move |err| {
             error_msgs_clone.lock().unwrap().push(err.to_string());
+            Box::pin(async move {})
         })),
         before_loop: None,
         after_loop: None,
@@ -1838,8 +1841,9 @@ async fn test_on_update_still_works_after_refactor() {
 // ---------------------------------------------------------------------------
 
 struct PassFilter;
+#[async_trait::async_trait]
 impl InputFilter for PassFilter {
-    fn filter(&self, _text: &str) -> FilterResult {
+    async fn filter(&self, _text: &str) -> FilterResult {
         FilterResult::Pass
     }
 }
@@ -1847,8 +1851,9 @@ impl InputFilter for PassFilter {
 struct WarnFilter {
     warning: String,
 }
+#[async_trait::async_trait]
 impl InputFilter for WarnFilter {
-    fn filter(&self, _text: &str) -> FilterResult {
+    async fn filter(&self, _text: &str) -> FilterResult {
         FilterResult::Warn(self.warning.clone())
     }
 }
@@ -1856,8 +1861,9 @@ impl InputFilter for WarnFilter {
 struct RejectFilter {
     reason: String,
 }
+#[async_trait::async_trait]
 impl InputFilter for RejectFilter {
-    fn filter(&self, _text: &str) -> FilterResult {
+    async fn filter(&self, _text: &str) -> FilterResult {
         FilterResult::Reject(self.reason.clone())
     }
 }
@@ -2007,8 +2013,9 @@ async fn test_filter_chain_first_reject_wins() {
     struct CountingRejectFilter {
         counter: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     }
+    #[async_trait::async_trait]
     impl InputFilter for CountingRejectFilter {
-        fn filter(&self, _text: &str) -> FilterResult {
+        async fn filter(&self, _text: &str) -> FilterResult {
             self.counter
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             FilterResult::Reject("first rejects".into())
@@ -2018,8 +2025,9 @@ async fn test_filter_chain_first_reject_wins() {
     struct NeverCalledFilter {
         counter: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     }
+    #[async_trait::async_trait]
     impl InputFilter for NeverCalledFilter {
-        fn filter(&self, _text: &str) -> FilterResult {
+        async fn filter(&self, _text: &str) -> FilterResult {
             self.counter
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             FilterResult::Pass
@@ -2133,8 +2141,9 @@ async fn test_filter_non_text_content_only_text_extracted() {
     struct CapturingFilter {
         captured: std::sync::Arc<std::sync::Mutex<String>>,
     }
+    #[async_trait::async_trait]
     impl InputFilter for CapturingFilter {
-        fn filter(&self, text: &str) -> FilterResult {
+        async fn filter(&self, text: &str) -> FilterResult {
             *self.captured.lock().unwrap() = text.to_string();
             FilterResult::Pass
         }
@@ -2195,8 +2204,9 @@ async fn test_filter_non_text_content_only_text_extracted() {
 struct ContentRejectFilter {
     keyword: String,
 }
+#[async_trait::async_trait]
 impl InputFilter for ContentRejectFilter {
-    fn filter(&self, text: &str) -> FilterResult {
+    async fn filter(&self, text: &str) -> FilterResult {
         if text.contains(&self.keyword) {
             FilterResult::Reject(format!("blocked: {}", self.keyword))
         } else {
@@ -2209,8 +2219,9 @@ struct ContentWarnFilter {
     keyword: String,
     warning: String,
 }
+#[async_trait::async_trait]
 impl InputFilter for ContentWarnFilter {
-    fn filter(&self, text: &str) -> FilterResult {
+    async fn filter(&self, text: &str) -> FilterResult {
         if text.contains(&self.keyword) {
             FilterResult::Warn(self.warning.clone())
         } else {
@@ -3553,7 +3564,7 @@ async fn test_before_loop_hook_fires() {
     let mut config = make_config(provider);
     config.before_loop = Some(Arc::new(move |_msgs, _n| {
         fired_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-        true // allow loop to proceed
+        Box::pin(async move { true }) // allow loop to proceed
     }));
 
     let (tx, rx) = mpsc::unbounded_channel();
@@ -3594,6 +3605,7 @@ async fn test_after_loop_hook_fires() {
     let mut config = make_config(provider);
     config.after_loop = Some(Arc::new(move |_msgs, _usage| {
         fired_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async move {})
     }));
 
     let (tx, rx) = mpsc::unbounded_channel();
@@ -3640,10 +3652,11 @@ async fn test_tool_execution_hooks_fire() {
     let mut config = make_config(provider);
     config.before_tool_execution = Some(Arc::new(move |_name, _id, _args| {
         before_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-        true
+        Box::pin(async move { true })
     }));
     config.after_tool_execution = Some(Arc::new(move |_name, _id, _err| {
         after_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async move {})
     }));
 
     let tool = phi_core::tools::BashTool::default();

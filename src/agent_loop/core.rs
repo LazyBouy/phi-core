@@ -39,7 +39,7 @@ pub async fn agent_loop(
 
     // before_loop hook — fires before AgentStart; false aborts the entire loop
     if let Some(ref before_loop) = config.before_loop {
-        if !before_loop(&context.messages, 0) {
+        if !before_loop(&context.messages, 0).await {
             tx.send(AgentEvent::AgentEnd {
                 loop_id: loop_id.clone(),
                 messages: vec![],
@@ -71,7 +71,7 @@ pub async fn agent_loop(
     // Reject → emit InputRejected + AgentEnd and return immediately (no LLM call made).
     // Warn  → warning text appended to the last user message so the LLM sees it.
     // Pass  → prompts returned unchanged.
-    let prompts = match apply_input_filters(prompts, &config.input_filters, &tx, &loop_id) {
+    let prompts = match apply_input_filters(prompts, &config.input_filters, &tx, &loop_id).await {
         Ok(filtered) => filtered,
         Err(reason) => {
             // AgentEnd with rejection: pre-run rejection is the one case where
@@ -121,7 +121,7 @@ pub async fn agent_loop(
     .ok();
     // after_loop hook — fires after AgentEnd
     if let Some(ref after_loop) = config.after_loop {
-        after_loop(&new_messages, &loop_usage);
+        after_loop(&new_messages, &loop_usage).await;
     }
     new_messages
 }
@@ -211,7 +211,7 @@ pub async fn agent_loop_continue(
 
     // before_loop hook — fires before AgentStart; false aborts the entire loop
     if let Some(ref before_loop) = config.before_loop {
-        if !before_loop(&context.messages, 0) {
+        if !before_loop(&context.messages, 0).await {
             tx.send(AgentEvent::AgentEnd {
                 loop_id: loop_id.clone(),
                 messages: vec![],
@@ -251,7 +251,7 @@ pub async fn agent_loop_continue(
     .ok();
     // after_loop hook — fires after AgentEnd
     if let Some(ref after_loop) = config.after_loop {
-        after_loop(&new_messages, &loop_usage);
+        after_loop(&new_messages, &loop_usage).await;
     }
     new_messages
 }

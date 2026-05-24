@@ -2,6 +2,7 @@ use super::compaction::*;
 use super::config::*;
 use super::token::*;
 use crate::types::*;
+use async_trait::async_trait;
 use chrono::Utc;
 #[allow(unused_imports)]
 use std::sync::Arc;
@@ -90,10 +91,17 @@ use crate::session::LoopRecord;
 ///
 /// The default `compact()` method assembles them. Override individual methods
 /// to customise specific sections (e.g. LLM-based summarisation for `keep_compacted`).
+///
+/// As of phi-core 0.9.0, all four methods are `async fn` (via `#[async_trait]`)
+/// so implementations can issue LLM calls inside `keep_compacted`/`keep_recent`
+/// without `block_in_place` workarounds. Sync implementations migrate by
+/// prepending `#[async_trait]` to the impl + `async` to each method —
+/// existing bodies need no changes if they don't `.await` anything.
+#[async_trait]
 pub trait BlockCompactionStrategy: Send + Sync {
     /// Determine the keep_first section: turns kept verbatim from the start.
     /// Only called for the most recent loop.
-    fn keep_first(
+    async fn keep_first(
         &self,
         record: &LoopRecord,
         turn_map: &TurnMap,
@@ -102,7 +110,7 @@ pub trait BlockCompactionStrategy: Send + Sync {
 
     /// Create the keep_recent section: recent turns with truncated tool outputs.
     /// Only called for the most recent loop.
-    fn keep_recent(
+    async fn keep_recent(
         &self,
         record: &LoopRecord,
         turn_map: &TurnMap,
@@ -117,7 +125,7 @@ pub trait BlockCompactionStrategy: Send + Sync {
     /// `config.max_summary_tokens` — e.g. shorter per-turn summaries or an
     /// LLM-generated holistic digest. The token budget is for the total output,
     /// not a per-turn limit.
-    fn keep_compacted(
+    async fn keep_compacted(
         &self,
         record: &LoopRecord,
         turn_map: &TurnMap,
@@ -127,25 +135,30 @@ pub trait BlockCompactionStrategy: Send + Sync {
 
     /// Assemble a `CompactionBlock` from the three sections.
     /// Default implementation calls the three methods above.
-    fn compact(
+    async fn compact(
         &self,
         record: &LoopRecord,
         config: &CompactionConfig,
         is_most_recent: bool,
     ) -> CompactionBlock {
         let turn_map = TurnMap::from_messages(&record.messages);
+        let keep_first = if is_most_recent {
+            self.keep_first(record, &turn_map, config).await
+        } else {
+            None
+        };
+        let keep_recent = if is_most_recent {
+            self.keep_recent(record, &turn_map, config).await
+        } else {
+            None
+        };
+        let keep_compacted = self
+            .keep_compacted(record, &turn_map, config, is_most_recent)
+            .await;
         CompactionBlock {
-            keep_first: if is_most_recent {
-                self.keep_first(record, &turn_map, config)
-            } else {
-                None
-            },
-            keep_recent: if is_most_recent {
-                self.keep_recent(record, &turn_map, config)
-            } else {
-                None
-            },
-            keep_compacted: self.keep_compacted(record, &turn_map, config, is_most_recent),
+            keep_first,
+            keep_recent,
+            keep_compacted,
             created_at: Utc::now(),
         }
     }
@@ -159,8 +172,9 @@ pub trait BlockCompactionStrategy: Send + Sync {
 /// - `keep_recent`: truncates tool outputs in the recent section to `tool_output_max_lines`
 pub struct DefaultBlockCompaction;
 
+#[async_trait]
 impl BlockCompactionStrategy for DefaultBlockCompaction {
-    fn keep_first(
+    async fn keep_first(
         &self,
         _record: &LoopRecord,
         turn_map: &TurnMap,
@@ -179,7 +193,7 @@ impl BlockCompactionStrategy for DefaultBlockCompaction {
         })
     }
 
-    fn keep_recent(
+    async fn keep_recent(
         &self,
         record: &LoopRecord,
         turn_map: &TurnMap,
@@ -257,7 +271,7 @@ impl BlockCompactionStrategy for DefaultBlockCompaction {
     /// Summaries use `Message::User` role to maintain valid LLM message alternation
     /// (user→assistant→user→...). A summary replaces a full turn sequence
     /// (user + assistant + tool results) with a single user-role "[Summary]" message.
-    fn keep_compacted(
+    async fn keep_compacted(
         &self,
         record: &LoopRecord,
         turn_map: &TurnMap,

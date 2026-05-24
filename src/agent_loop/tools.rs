@@ -250,7 +250,7 @@ pub(super) async fn execute_single_tool(
 
     // before_tool_execution hook — false skips this tool call entirely
     if let Some(ref hook) = config.before_tool_execution {
-        if !hook(name, id, args) {
+        if !hook(name, id, args).await {
             let skipped_result = ToolResult {
                 content: vec![Content::Text {
                     text: "Tool execution skipped by before_tool_execution hook.".to_string(),
@@ -338,6 +338,7 @@ pub(super) async fn execute_single_tool(
                 .join("\n");
 
             // before_tool_execution_update — false suppresses the event (tool keeps running)
+            // (kept sync in 0.9.0; see config.rs `BeforeToolExecutionUpdateFn` docstring)
             let emit = before_update
                 .as_ref()
                 .map_or(true, |h| h(&name, &id, &content_str));
@@ -462,7 +463,7 @@ pub(super) async fn execute_single_tool(
     .ok();
     // after_tool_execution hook — fires after ToolExecutionEnd
     if let Some(ref hook) = config.after_tool_execution {
-        hook(name, id, is_error);
+        hook(name, id, is_error).await;
     }
 
     let tool_result_msg = Message::ToolResult {

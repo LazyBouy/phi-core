@@ -830,6 +830,8 @@ fn wire_script_callbacks(
     callbacks: &super::schema::CallbacksSection,
     workspace: Option<PathBuf>,
 ) {
+    // All lifecycle hooks below wrap the sync ScriptCallback::execute_sync body in
+    // `Box::pin(async move { ... })` to match 0.9.0's async hook type aliases.
     if let Some(ref path) = callbacks.before_loop {
         if is_script_path(path) {
             let script = ScriptCallback::new(path, workspace.clone());
@@ -839,11 +841,12 @@ fn wire_script_callbacks(
                     "message_count": msgs.len(),
                     "loop_index": n,
                 });
-                script
+                let allow = script
                     .execute_sync(&input)
                     .ok()
                     .and_then(|v| v.get("allow").and_then(|a| a.as_bool()))
-                    .unwrap_or(true)
+                    .unwrap_or(true);
+                Box::pin(async move { allow })
             })));
         }
     }
@@ -854,6 +857,7 @@ fn wire_script_callbacks(
             agent.set_after_loop(Some(Arc::new(move |_msgs, _usage| {
                 let input = serde_json::json!({"hook": "after_loop"});
                 let _ = script.execute_sync(&input);
+                Box::pin(async move {})
             })));
         }
     }
@@ -867,11 +871,12 @@ fn wire_script_callbacks(
                     "message_count": msgs.len(),
                     "turn_index": turn,
                 });
-                script
+                let allow = script
                     .execute_sync(&input)
                     .ok()
                     .and_then(|v| v.get("allow").and_then(|a| a.as_bool()))
-                    .unwrap_or(true)
+                    .unwrap_or(true);
+                Box::pin(async move { allow })
             })));
         }
     }
@@ -882,6 +887,7 @@ fn wire_script_callbacks(
             agent.set_after_turn(Some(Arc::new(move |_msgs, _usage| {
                 let input = serde_json::json!({"hook": "after_turn"});
                 let _ = script.execute_sync(&input);
+                Box::pin(async move {})
             })));
         }
     }
@@ -895,11 +901,12 @@ fn wire_script_callbacks(
                     "tool_name": name,
                     "tool_call_id": id,
                 });
-                script
+                let allow = script
                     .execute_sync(&input)
                     .ok()
                     .and_then(|v| v.get("allow").and_then(|a| a.as_bool()))
-                    .unwrap_or(true)
+                    .unwrap_or(true);
+                Box::pin(async move { allow })
             })));
         }
     }
@@ -915,6 +922,7 @@ fn wire_script_callbacks(
                     "is_error": is_error,
                 });
                 let _ = script.execute_sync(&input);
+                Box::pin(async move {})
             })));
         }
     }
@@ -928,11 +936,12 @@ fn wire_script_callbacks(
                     "estimated_tokens": tokens,
                     "message_count": count,
                 });
-                script
+                let allow = script
                     .execute_sync(&input)
                     .ok()
                     .and_then(|v| v.get("allow").and_then(|a| a.as_bool()))
-                    .unwrap_or(true)
+                    .unwrap_or(true);
+                Box::pin(async move { allow })
             })));
         }
     }
@@ -950,6 +959,7 @@ fn wire_script_callbacks(
                         "tokens_after": tok_after,
                     });
                     let _ = script.execute_sync(&input);
+                    Box::pin(async move {})
                 },
             )));
         }

@@ -409,11 +409,20 @@ impl BasicAgent {
     `Arc::new(f)` — wrap in Arc so it can be cloned cheaply into each AgentLoopConfig.
     The Arc's type becomes Arc<dyn Fn(...)> (the BeforeTurnFn type alias).
     */
+    /// Set the before-turn hook. Return `false` to abort the turn.
+    ///
+    /// 0.9.0: takes a sync closure for ergonomic back-compat. For async
+    /// bodies, set the field directly via `agent.before_turn = Some(...)`
+    /// using the `BeforeTurnFn` type alias (`Arc<dyn for<'a> Fn(...) ->
+    /// HookFuture<'a, bool> + Send + Sync>`).
     pub fn on_before_turn(
         mut self,
         f: impl Fn(&[AgentMessage], usize) -> bool + Send + Sync + 'static,
     ) -> Self {
-        self.before_turn = Some(Arc::new(f));
+        self.before_turn = Some(Arc::new(move |msgs, turn| {
+            let r = f(msgs, turn);
+            Box::pin(async move { r })
+        }));
         self
     }
 
@@ -421,12 +430,18 @@ impl BasicAgent {
         mut self,
         f: impl Fn(&[AgentMessage], &Usage) + Send + Sync + 'static,
     ) -> Self {
-        self.after_turn = Some(Arc::new(f));
+        self.after_turn = Some(Arc::new(move |msgs, usage| {
+            f(msgs, usage);
+            Box::pin(async move {})
+        }));
         self
     }
 
     pub fn on_error(mut self, f: impl Fn(&str) + Send + Sync + 'static) -> Self {
-        self.on_error = Some(Arc::new(f));
+        self.on_error = Some(Arc::new(move |err| {
+            f(err);
+            Box::pin(async move {})
+        }));
         self
     }
 
@@ -500,11 +515,17 @@ impl BasicAgent {
     }
 
     /// Set the before-loop hook. Return `false` to abort the loop.
+    ///
+    /// 0.9.0: sync-closure setter for back-compat. Async bodies should set
+    /// the field directly via `BeforeLoopFn`.
     pub fn on_before_loop(
         mut self,
         f: impl Fn(&[AgentMessage], usize) -> bool + Send + Sync + 'static,
     ) -> Self {
-        self.before_loop = Some(Arc::new(f));
+        self.before_loop = Some(Arc::new(move |msgs, idx| {
+            let r = f(msgs, idx);
+            Box::pin(async move { r })
+        }));
         self
     }
 
@@ -513,7 +534,10 @@ impl BasicAgent {
         mut self,
         f: impl Fn(&[AgentMessage], &Usage) + Send + Sync + 'static,
     ) -> Self {
-        self.after_loop = Some(Arc::new(f));
+        self.after_loop = Some(Arc::new(move |msgs, usage| {
+            f(msgs, usage);
+            Box::pin(async move {})
+        }));
         self
     }
 
@@ -522,7 +546,10 @@ impl BasicAgent {
         mut self,
         f: impl Fn(&str, &str, &serde_json::Value) -> bool + Send + Sync + 'static,
     ) -> Self {
-        self.before_tool_execution = Some(Arc::new(f));
+        self.before_tool_execution = Some(Arc::new(move |name, id, args| {
+            let r = f(name, id, args);
+            Box::pin(async move { r })
+        }));
         self
     }
 
@@ -531,11 +558,17 @@ impl BasicAgent {
         mut self,
         f: impl Fn(&str, &str, bool) + Send + Sync + 'static,
     ) -> Self {
-        self.after_tool_execution = Some(Arc::new(f));
+        self.after_tool_execution = Some(Arc::new(move |name, id, is_error| {
+            f(name, id, is_error);
+            Box::pin(async move {})
+        }));
         self
     }
 
     /// Set the before-tool-execution-update hook. Return `false` to suppress the event.
+    ///
+    /// Sync hook (no async migration in 0.9.0 — fires from inside the sync
+    /// `ToolUpdateFn` callback).
     pub fn on_before_tool_execution_update(
         mut self,
         f: impl Fn(&str, &str, &str) -> bool + Send + Sync + 'static,
@@ -545,6 +578,9 @@ impl BasicAgent {
     }
 
     /// Set the after-tool-execution-update hook.
+    ///
+    /// Sync hook (no async migration in 0.9.0 — fires from inside the sync
+    /// `ToolUpdateFn` callback).
     pub fn on_after_tool_execution_update(
         mut self,
         f: impl Fn(&str, &str, &str) + Send + Sync + 'static,
@@ -619,7 +655,10 @@ impl BasicAgent {
         mut self,
         f: impl Fn(usize, usize) -> bool + Send + Sync + 'static,
     ) -> Self {
-        self.before_compaction_start = Some(Arc::new(f));
+        self.before_compaction_start = Some(Arc::new(move |est, mc| {
+            let r = f(est, mc);
+            Box::pin(async move { r })
+        }));
         self
     }
 
@@ -628,7 +667,10 @@ impl BasicAgent {
         mut self,
         f: impl Fn(usize, usize, usize, usize) + Send + Sync + 'static,
     ) -> Self {
-        self.after_compaction_end = Some(Arc::new(f));
+        self.after_compaction_end = Some(Arc::new(move |mb, ma, tb, ta| {
+            f(mb, ma, tb, ta);
+            Box::pin(async move {})
+        }));
         self
     }
 
@@ -846,7 +888,9 @@ impl BasicAgent {
     /// Requires `self.session` to be `Some` and `self.context_config` to be `Some`.
     /// Panics if either is missing.
     /// No-op if `self.session` or `self.context_config` is `None`.
-    pub fn compact_context_with_sender(
+    ///
+    /// 0.9.0: now `async fn` to drive the async `BlockCompactionStrategy`.
+    pub async fn compact_context_with_sender(
         &mut self,
         tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
     ) {
@@ -900,7 +944,8 @@ impl BasicAgent {
             comp,
             max_tokens,
             None,
-        );
+        )
+        .await;
         self.messages = crate::context::build_context_from_session(
             session,
             current_lid,
@@ -946,7 +991,9 @@ impl BasicAgent {
     ///
     /// Requires `self.session` to be `Some` and `self.context_config` to be `Some`.
     /// Returns 0 if `self.session` or `self.context_config` is `None`.
-    pub fn compact_context(&mut self) -> usize {
+    ///
+    /// 0.9.0: now `async fn` to drive the async `BlockCompactionStrategy`.
+    pub async fn compact_context(&mut self) -> usize {
         let (Some(session), Some(ctx_config)) =
             (self.session.as_mut(), self.context_config.as_ref())
         else {
@@ -970,7 +1017,8 @@ impl BasicAgent {
             comp,
             max_tokens,
             None,
-        );
+        )
+        .await;
         self.messages = crate::context::build_context_from_session(
             session,
             current_lid,

@@ -54,7 +54,13 @@ fn resolve_scope(
 ///
 /// When `counter` is `None`, uses `HeuristicTokenCounter` (chars/4) as the default.
 /// The caller is responsible for persisting the session to disk afterward.
-pub fn compact_session_loops(
+///
+/// **0.9.0 breaking change**: this function is now `async fn` so it can drive
+/// the async `BlockCompactionStrategy::compact` method. Callers must `.await`
+/// the call; synchronous callers can use `tokio::runtime::Handle::current()
+/// .block_on(...)` if no awaiter is available (uncommon — session compaction
+/// is typically invoked from within an agent loop, which is already async).
+pub async fn compact_session_loops(
     session: &mut Session,
     current_loop_id: &str,
     strategy: &dyn BlockCompactionStrategy,
@@ -66,8 +72,19 @@ pub fn compact_session_loops(
     let chain = session.loop_chain_to(current_loop_id);
 
     // 1. Compact current loop (most recent — all three sections)
-    if let Some(current) = session.get_loop_mut(current_loop_id) {
-        current.compaction_block = Some(strategy.compact(current, config, true));
+    //
+    // We compute the block first (so the &mut borrow is released before the
+    // .await suspension point) to keep the borrow checker happy across the
+    // async boundary.
+    let current_block = if let Some(current) = session.get_loop(current_loop_id) {
+        Some(strategy.compact(current, config, true).await)
+    } else {
+        None
+    };
+    if let Some(block) = current_block {
+        if let Some(current) = session.get_loop_mut(current_loop_id) {
+            current.compaction_block = Some(block);
+        }
     }
 
     // 2. Resolve scope, then compact earlier loops on the chain (only keep_compacted)
@@ -80,10 +97,25 @@ pub fn compact_session_loops(
     )
     .min(chain.len().saturating_sub(1));
     let earlier_start = chain.len().saturating_sub(1 + earlier_count);
-    for loop_id in &chain[earlier_start..chain.len().saturating_sub(1)] {
-        if let Some(record) = session.get_loop_mut(loop_id) {
-            if record.compaction_block.is_none() {
-                record.compaction_block = Some(strategy.compact(record, config, false));
+    let earlier_ids: Vec<String> = chain[earlier_start..chain.len().saturating_sub(1)].to_vec();
+    for loop_id in earlier_ids {
+        // Compute block first (immutable borrow) so the .await can run, then
+        // re-borrow mutably to assign.
+        let needs_block = session
+            .get_loop(&loop_id)
+            .map(|r| r.compaction_block.is_none())
+            .unwrap_or(false);
+        if !needs_block {
+            continue;
+        }
+        let block_opt = if let Some(record) = session.get_loop(&loop_id) {
+            Some(strategy.compact(record, config, false).await)
+        } else {
+            None
+        };
+        if let Some(block) = block_opt {
+            if let Some(record) = session.get_loop_mut(&loop_id) {
+                record.compaction_block = Some(block);
             }
         }
     }

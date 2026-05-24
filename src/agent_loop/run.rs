@@ -58,7 +58,7 @@ pub(super) async fn run_loop(
         .as_ref()
         .map(|f| f())
         .unwrap_or_default();
-    let mut pending = match apply_input_filters(raw, &config.input_filters, tx, &loop_id) {
+    let mut pending = match apply_input_filters(raw, &config.input_filters, tx, &loop_id).await {
         Ok(filtered) => filtered,
         Err(_) => return loop_usage,
     };
@@ -121,7 +121,7 @@ pub(super) async fn run_loop(
 
             // before_turn hook — fires BEFORE TurnStart; false aborts this turn
             if let Some(ref before_turn) = config.before_turn {
-                if !before_turn(&context.messages, turn) {
+                if !before_turn(&context.messages, turn).await {
                     return loop_usage;
                 }
             }
@@ -202,10 +202,10 @@ pub(super) async fn run_loop(
                     let msgs_before = context.messages.len();
 
                     // G1: before_compaction_start hook — skip compaction if returns false
-                    let compaction_allowed = config
-                        .before_compaction_start
-                        .as_ref()
-                        .map_or(true, |hook| hook(estimated, msgs_before));
+                    let compaction_allowed = match config.before_compaction_start.as_ref() {
+                        Some(hook) => hook(estimated, msgs_before).await,
+                        None => true,
+                    };
 
                     if compaction_allowed {
                         tx.send(AgentEvent::CompactionStarted {
@@ -261,7 +261,8 @@ pub(super) async fn run_loop(
                                 comp,
                                 max_tokens,
                                 ctx_config.token_counter.as_ref(),
-                            );
+                            )
+                            .await;
                             context.messages = build_context_from_session(
                                 session,
                                 lid,
@@ -298,7 +299,7 @@ pub(super) async fn run_loop(
 
                             // G1: after_compaction_end hook
                             if let Some(ref hook) = config.after_compaction_end {
-                                hook(msgs_before, messages_after, estimated, tokens_after);
+                                hook(msgs_before, messages_after, estimated, tokens_after).await;
                             }
                         } else {
                             // In-memory fallback (no Session — sub-agents, tests, etc.)
@@ -326,7 +327,7 @@ pub(super) async fn run_loop(
 
                             // G1: after_compaction_end hook
                             if let Some(ref hook) = config.after_compaction_end {
-                                hook(msgs_before, messages_after, estimated, tokens_after);
+                                hook(msgs_before, messages_after, estimated, tokens_after).await;
                             }
                         }
                     } // if compaction_allowed
@@ -360,7 +361,7 @@ pub(super) async fn run_loop(
                     if *stop_reason == StopReason::Error {
                         if let Some(ref on_error) = config.on_error {
                             let err_str = error_message.as_deref().unwrap_or("Unknown error");
-                            on_error(err_str);
+                            on_error(err_str).await;
                         }
                     }
                     // Accumulate usage into loop total
@@ -382,7 +383,7 @@ pub(super) async fn run_loop(
                     })
                     .ok();
                     if let Some(ref after_turn) = config.after_turn {
-                        after_turn(&context.messages, usage);
+                        after_turn(&context.messages, usage).await;
                     }
                     return loop_usage;
                 }
@@ -495,13 +496,13 @@ pub(super) async fn run_loop(
 
             // after_turn hook fires AFTER TurnEnd
             if let Some(ref after_turn) = config.after_turn {
-                after_turn(&context.messages, &turn_usage);
+                after_turn(&context.messages, &turn_usage).await;
             }
 
             // Check steering after turn — filter before assigning to pending
             if let Some(steering) = steering_after_tools.take() {
                 if !steering.is_empty() {
-                    match apply_input_filters(steering, &config.input_filters, tx, &loop_id) {
+                    match apply_input_filters(steering, &config.input_filters, tx, &loop_id).await {
                         Ok(filtered) => {
                             pending = filtered;
                             continue;
@@ -516,7 +517,7 @@ pub(super) async fn run_loop(
                 .as_ref()
                 .map(|f| f())
                 .unwrap_or_default();
-            pending = match apply_input_filters(raw, &config.input_filters, tx, &loop_id) {
+            pending = match apply_input_filters(raw, &config.input_filters, tx, &loop_id).await {
                 Ok(filtered) => filtered,
                 Err(_) => return loop_usage,
             };
@@ -535,7 +536,7 @@ pub(super) async fn run_loop(
             .unwrap_or_default();
 
         if !follow_ups.is_empty() {
-            match apply_input_filters(follow_ups, &config.input_filters, tx, &loop_id) {
+            match apply_input_filters(follow_ups, &config.input_filters, tx, &loop_id).await {
                 Ok(filtered) => {
                     pending = filtered;
                     continue;

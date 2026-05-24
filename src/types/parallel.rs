@@ -66,37 +66,27 @@ pub enum FilterResult {
     Reject(String),
 }
 
-/// Synchronous filter applied to user input before the LLM call.
+/// Async filter applied to user input before the LLM call.
 ///
 /// Implement this for injection detection, content moderation, PII redaction, etc.
-/// Filters run in the hot path and must be fast — use `before_turn` callbacks
-/// for async moderation (external API calls).
-/*
-RUST QUIRK: Trait as interface (no `async` here — intentional)
-
-InputFilter is deliberately *synchronous*. Why? Filters run in the hot path
-before every LLM call. Async would require `.await`, which adds complexity
-and forces callers into async context. For CPU-bound work (regex, keyword scan)
-synchronous is faster.
-
-For async filtering (external API call to a moderation service), use the
-`before_turn` callback hook instead — it's async and can return false to abort.
-
-The `Send + Sync` supertrait bounds mean:
-  Send  → the filter can be moved to another thread
-  Sync  → the filter can be shared by reference across threads
-
-These are required because filters are stored in `Vec<Arc<dyn InputFilter>>`
-inside AgentLoopConfig. The agent loop may run on any tokio thread, so the
-filters must be thread-safe.
-
-Python analogy: an abstract base class with one required method:
-  class InputFilter(ABC):
-      @abstractmethod
-      def filter(self, text: str) -> FilterResult: ...
-*/
+///
+/// As of phi-core 0.9.0, `InputFilter::filter()` is `async fn` (via
+/// `#[async_trait]`) so implementations can perform LLM-backed moderation /
+/// remote-API moderation directly inline. CPU-bound filters (regex,
+/// keyword-scan) that have no `.await` should still use `async fn` and either
+/// run their work inline or wrap it in `tokio::task::spawn_blocking(...)`
+/// when the workload is heavy enough to warrant a worker thread.
+///
+/// The `Send + Sync` supertrait bounds are required because filters are
+/// stored in `Vec<Arc<dyn InputFilter>>` inside `AgentLoopConfig` and the
+/// agent loop runs on any tokio thread.
+#[async_trait::async_trait]
 pub trait InputFilter: Send + Sync {
-    fn filter(&self, text: &str) -> FilterResult;
+    /// Apply the filter to `text` and return a [`FilterResult`].
+    ///
+    /// For CPU-bound work consider wrapping the body in
+    /// `tokio::task::spawn_blocking(...)` to avoid stalling the runtime.
+    async fn filter(&self, text: &str) -> FilterResult;
 }
 
 // ---------------------------------------------------------------------------
