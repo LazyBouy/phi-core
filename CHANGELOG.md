@@ -8,13 +8,166 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Forward markers
+_No unreleased changes._
 
-- **Async parity for tool-update hooks** — `BeforeToolExecutionUpdateFn` and
-  `AfterToolExecutionUpdateFn` remain sync in 0.9.0 (see the §0.9.0 "Breaking"
-  notes below for rationale). Making them async would cascade into the
-  `ToolUpdateFn` callback type and every `AgentTool::execute` body that calls
-  `ctx.on_update(...)` — a wider migration deferred to a future release.
+---
+
+## [0.10.0] — 2026-05-25
+
+**Minor release.** Closes 5 OPEN downstream consumer drifts surfaced by i-phi:
+4 with code changes shipped here and 1 (i-phi `D-CH16b-FOLLOWUP-01`) whose
+technical scaffolding was already shipped at 0.9.0 (the LLM-body deferral
+remains at the consumer's discretion). All four surface additions are
+mechanically additive at the call site; only the async-update-Fn migration is
+a Breaking change.
+
+Plan archive: i-phi
+`docs/v0/proposal/plan/intermediate-stabilization-36caa39f.md` (Chunk A).
+
+### Breaking
+
+- **`BeforeToolExecutionUpdateFn` + `AfterToolExecutionUpdateFn` are now
+  async** (closes the 0.9.0 "Forward markers" deferral). Type aliases flip
+  from sync `Arc<dyn Fn(&str, &str, &str) -> bool>` and
+  `Arc<dyn Fn(&str, &str, &str)>` to the boxed-future shape used by the 9
+  lifecycle Fns async-migrated at 0.9.0:
+
+  ```rust
+  pub type BeforeToolExecutionUpdateFn =
+      Arc<dyn for<'a> Fn(&'a str, &'a str, &'a str) -> HookFuture<'a, bool> + Send + Sync>;
+  pub type AfterToolExecutionUpdateFn =
+      Arc<dyn for<'a> Fn(&'a str, &'a str, &'a str) -> HookFuture<'a, ()> + Send + Sync>;
+  ```
+
+  The `BasicAgent::on_before_tool_execution_update` and
+  `on_after_tool_execution_update` builder methods are unchanged at the
+  surface — they continue to accept sync `Fn(...)` closures and wrap the
+  body in `Box::pin(async move { ... })` automatically. Direct field-level
+  consumers of the type aliases migrate by wrapping the closure body the
+  same way:
+
+  ```rust
+  let hook: BeforeToolExecutionUpdateFn = Arc::new(|name, id, text| {
+      Box::pin(async move {
+          // sync logic — same as before
+          true
+      })
+  });
+  ```
+
+  The agent loop bridges from the sync `ToolUpdateFn` callback (which tools
+  invoke during their async `execute` body via `ctx.on_update(...)`) by
+  polling the hook future to completion with `futures::executor::block_on`.
+  Sync closure bodies (wrapped in `async move { ... }`) complete without
+  suspending. Hooks that need to perform truly async work at update-time
+  should dispatch via `tokio::spawn(...)` inside the closure body rather
+  than suspending inline.
+
+  Closes i-phi consumer drift `D-CH08-FOLLOWUP-03`.
+
+- **`AgentLoopConfig` gains two new public fields:**
+  `revert_render_policy: RevertRenderPolicy` and
+  `current_tool: Option<Arc<Mutex<Option<CurrentToolExecution>>>>`.
+  Struct-literal construction breaks — add
+  `revert_render_policy: RevertRenderPolicy::default(), current_tool: None`.
+  Builder-pattern construction via `BasicAgent` is unaffected.
+
+### Added
+
+- **`BasicAgent::with_revert_render_policy(RevertRenderPolicy) -> Self`** —
+  builder method (sibling to `with_revert_tool`) that configures the
+  kind-aware decay window applied to Composition I trunk context. The
+  agent loop's `stream_assistant_response` now dispatches to
+  `AgentContext::build_trunk_context_with_policy(&policy, turn_index)`
+  whenever `active_node_id.is_some()`; outside revert mode the field has no
+  effect and the linear `build_working_context` path is byte-identical to
+  pre-0.10 behaviour. Closes i-phi consumer drift `D-CH17-FOLLOWUP-03`.
+
+- **`BasicAgent::current_tool_timeout(&self) -> Option<Duration>`** — new
+  introspection method that returns the effective timeout of the tool
+  currently executing inside the agent's loop, or `None` when no tool is in
+  flight. Backed by a new shared slot
+  (`crate::context::CurrentToolExecution`) the agent loop writes around
+  every `AgentTool::execute()` invocation. Intended use: a host pausing a
+  session that is mid-tool-call needs the upper bound on how long the pause
+  may block. Documented single-tool model — under `Parallel` / `Batched`
+  execution the slot reflects the most-recently-started tool. Closes i-phi
+  consumer drift `D-CH09-FOLLOWUP-04`.
+
+- **`phi_core::agent_loop::script_callback::detect_interpreter`** is now
+  `pub` (1-LOC visibility flip). External consumers can adopt the same
+  script-extension dispatch table phi-core uses internally for
+  `ScriptCallback` rather than re-deriving it. Closes i-phi consumer drift
+  `D-CH08-FOLLOWUP-PHICORE-01`.
+
+- **`CurrentToolExecution`** struct re-exported from `crate::context`.
+  Carries `name: String` + `timeout: Option<Duration>`. Populated by
+  `execute_single_tool` immediately before invocation and cleared on
+  return (success / error / timeout).
+
+### Migration
+
+**Direct `AgentLoopConfig { ... }` struct-literal construction** — add
+the two new fields:
+
+```rust
+let config = AgentLoopConfig {
+    // ... existing fields ...
+    revert_render_policy: phi_core::RevertRenderPolicy::default(),
+    current_tool: None,
+};
+```
+
+**Direct construction of `BeforeToolExecutionUpdateFn` /
+`AfterToolExecutionUpdateFn`** — wrap the body in
+`Box::pin(async move { ... })`:
+
+```rust
+let before: BeforeToolExecutionUpdateFn = Arc::new(|name, id, text| {
+    Box::pin(async move {
+        // your veto / observation logic ...
+        true
+    })
+});
+let after: AfterToolExecutionUpdateFn = Arc::new(|name, id, text| {
+    Box::pin(async move {
+        // your after-emit logic ...
+    })
+});
+```
+
+The `BasicAgent` setters (`on_before_tool_execution_update`,
+`on_after_tool_execution_update`) accept sync closures and wrap them
+automatically — no migration needed for builder-based consumers.
+
+**Code that reads `RevertRenderPolicy` from sub-agents** — the default
+trait `Agent::build_config()` impl supplies `RevertRenderPolicy::default()`,
+matching pre-0.10 behaviour (which had no policy field; the default-window
+was implicit at the consumer level when calling
+`build_trunk_context_with_policy` directly).
+
+### Internal
+
+- New `phi-core/src/context/execution.rs::CurrentToolExecution` struct +
+  module re-export at `crate::context::CurrentToolExecution`.
+- `agent_loop/tools.rs::execute_single_tool` now publishes /
+  clears the `config.current_tool` shared slot around `tool.execute()`.
+- `agent_loop/streaming.rs::stream_assistant_response` dispatches to
+  `build_trunk_context_with_policy` when `active_node_id.is_some()`.
+- `agent_loop/tools.rs` bridges async tool-update hooks from the sync
+  `ToolUpdateFn` callback via `futures::executor::block_on`.
+- Test count: 470 → 475 (+5 across new integration tests in
+  `tests/release_0_10_test.rs`: `with_revert_render_policy_propagates_to_loop_config`,
+  `revert_render_policy_strips_old_lesson_tags_from_llm_prompt`,
+  `current_tool_timeout_visible_during_tool_execution`,
+  `async_update_hooks_fire_through_sync_bridge`,
+  `detect_interpreter_is_publicly_reachable_and_correct`). Inline unit
+  tests in `agents/basic_agent.rs::tests` also cover the new setters
+  (`with_revert_render_policy_sets_config_field`,
+  `revert_render_policy_defaults_to_phi_core_defaults`,
+  `current_tool_timeout_is_none_when_no_tool_in_flight`,
+  `current_tool_timeout_reflects_shared_slot`,
+  `current_tool_slot_is_shared_between_agent_and_config`).
 
 ---
 
