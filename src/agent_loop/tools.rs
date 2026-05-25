@@ -337,11 +337,18 @@ pub(super) async fn execute_single_tool(
                 .collect::<Vec<_>>()
                 .join("\n");
 
-            // before_tool_execution_update — false suppresses the event (tool keeps running)
-            // (kept sync in 0.9.0; see config.rs `BeforeToolExecutionUpdateFn` docstring)
-            let emit = before_update
-                .as_ref()
-                .map_or(true, |h| h(&name, &id, &content_str));
+            // before_tool_execution_update — false suppresses the event (tool keeps running).
+            //
+            // 0.10.0: hook is async (`HookFuture<'_, bool>`). We bridge from this
+            // sync `ToolUpdateFn` callback by polling the future to completion via
+            // `futures::executor::block_on`. Sync hook bodies (the common case —
+            // user closures wrap a sync body in `Box::pin(async move { ... })`)
+            // complete immediately without suspending; truly async bodies should
+            // dispatch via `tokio::spawn(...)` inside the closure rather than
+            // suspending inline at every streamed tool update.
+            let emit = before_update.as_ref().map_or(true, |h| {
+                futures::executor::block_on(h(&name, &id, &content_str))
+            });
 
             if emit {
                 tx.send(AgentEvent::ToolExecutionUpdate {
@@ -351,9 +358,11 @@ pub(super) async fn execute_single_tool(
                     partial_result: partial,
                 })
                 .ok();
-                // after_tool_execution_update — fires after ToolExecutionUpdate
+                // after_tool_execution_update — fires after ToolExecutionUpdate.
+                // 0.10.0: async hook; bridged via `futures::executor::block_on`
+                // for the same rationale as `before_update` above.
                 if let Some(ref hook) = after_update {
-                    hook(&name, &id, &content_str);
+                    futures::executor::block_on(hook(&name, &id, &content_str));
                 }
             }
         }))
@@ -413,6 +422,24 @@ pub(super) async fn execute_single_tool(
             // cleanup on a timeout fire.
             let tool_cancel = ctx.cancel.clone();
 
+            // 0.10.0: publish the current-tool slot so external consumers
+            // (e.g. i-phi's pause-time estimator via
+            // `BasicAgent::current_tool_timeout`) can read the in-flight
+            // tool's effective timeout. Set just before invocation, cleared
+            // unconditionally on return (success / error / timeout).
+            //
+            // Single-tool model: under parallel / batched execution this slot
+            // is racy — see `crate::context::CurrentToolExecution` for the
+            // documented characterization.
+            if let Some(ref slot) = config.current_tool {
+                if let Ok(mut guard) = slot.lock() {
+                    *guard = Some(crate::context::CurrentToolExecution {
+                        name: name.to_string(),
+                        timeout: effective_timeout,
+                    });
+                }
+            }
+
             let exec_result = match effective_timeout {
                 None => tool.execute(args.clone(), ctx).await,
                 Some(d) => match tokio::time::timeout(d, tool.execute(args.clone(), ctx)).await {
@@ -425,6 +452,13 @@ pub(super) async fn execute_single_tool(
                     }
                 },
             };
+
+            // Clear the current-tool slot unconditionally on return.
+            if let Some(ref slot) = config.current_tool {
+                if let Ok(mut guard) = slot.lock() {
+                    *guard = None;
+                }
+            }
 
             match exec_result {
                 Ok(r) => (r, false),

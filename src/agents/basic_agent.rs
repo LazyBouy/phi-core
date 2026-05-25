@@ -167,6 +167,16 @@ pub struct BasicAgent {
     prun_pending: Option<Arc<Mutex<Vec<crate::tools::prun::PrunRequest>>>>,
     revert_pending: Option<Arc<Mutex<Vec<crate::tools::revert::RevertRequest>>>>,
 
+    /// Render policy for Composition I trunk-context assembly. Inert unless
+    /// `with_revert_tool()` opted into revert mode AND a revert has set the
+    /// active-node pointer; see [`AgentLoopConfig::revert_render_policy`].
+    revert_render_policy: RevertRenderPolicy,
+
+    /// Shared slot recording the currently-executing tool. Installed
+    /// unconditionally at `BasicAgent::new()` and wired into every loop call
+    /// via `build_config()`. Read via [`Self::current_tool_timeout`].
+    current_tool: Arc<Mutex<Option<crate::context::CurrentToolExecution>>>,
+
     // ── Profile, config identity, and workspace ──────────────────────────
     config_id: Option<String>,
     profile: Option<AgentProfile>,
@@ -251,6 +261,8 @@ impl BasicAgent {
             context_translation: None,
             prun_pending: None,
             revert_pending: None,
+            revert_render_policy: RevertRenderPolicy::default(),
+            current_tool: Arc::new(Mutex::new(None)),
             config_id: None,
             profile: None,
             workspace: None,
@@ -316,6 +328,30 @@ impl BasicAgent {
     /// `with_revert_tool()` call).
     pub fn tools(&self) -> &[Arc<dyn AgentTool>] {
         &self.tools
+    }
+
+    /// Return the effective timeout of the tool currently executing inside
+    /// this agent's loop, if any.
+    ///
+    /// Returns `Some(d)` while `AgentTool::execute()` is in flight and the
+    /// resolved effective timeout (per-tool override → config-level →
+    /// `None`) is `Some(d)`. Returns `None` when no tool is in flight OR when
+    /// the in-flight tool has no effective timeout configured.
+    ///
+    /// Intended use: when a host pauses a session that is currently inside a
+    /// tool call, this method gives the upper bound on how long the pause
+    /// could be blocked waiting for the tool to return.
+    ///
+    /// **Single-tool model.** Under `ToolExecutionStrategy::Parallel` or
+    /// `Batched`, concurrent tools race on the underlying shared slot. The
+    /// returned value reflects the most-recently-started tool's timeout; for
+    /// per-call granularity, subscribe to `AgentEvent::ToolExecutionStart` /
+    /// `ToolExecutionEnd` directly. See
+    /// [`CurrentToolExecution`](crate::context::CurrentToolExecution) for the
+    /// race-window characterization.
+    pub fn current_tool_timeout(&self) -> Option<std::time::Duration> {
+        let guard = self.current_tool.lock().ok()?;
+        guard.as_ref().and_then(|t| t.timeout)
     }
 
     pub fn with_model_config(mut self, config: ModelConfig) -> Self {
@@ -567,25 +603,34 @@ impl BasicAgent {
 
     /// Set the before-tool-execution-update hook. Return `false` to suppress the event.
     ///
-    /// Sync hook (no async migration in 0.9.0 — fires from inside the sync
-    /// `ToolUpdateFn` callback).
+    /// 0.10.0: async hook setter (matches the 9 other lifecycle Fns
+    /// async-migrated at 0.9.0). The supplied sync closure is wrapped in
+    /// `Box::pin(async move { ... })` automatically. For async hook bodies,
+    /// set the field directly via the `BeforeToolExecutionUpdateFn` type alias.
     pub fn on_before_tool_execution_update(
         mut self,
         f: impl Fn(&str, &str, &str) -> bool + Send + Sync + 'static,
     ) -> Self {
-        self.before_tool_execution_update = Some(Arc::new(f));
+        self.before_tool_execution_update = Some(Arc::new(move |name, id, text| {
+            let r = f(name, id, text);
+            Box::pin(async move { r })
+        }));
         self
     }
 
     /// Set the after-tool-execution-update hook.
     ///
-    /// Sync hook (no async migration in 0.9.0 — fires from inside the sync
-    /// `ToolUpdateFn` callback).
+    /// 0.10.0: async hook setter (matches the 9 other lifecycle Fns
+    /// async-migrated at 0.9.0). The supplied sync closure is wrapped in
+    /// `Box::pin(async move { ... })` automatically.
     pub fn on_after_tool_execution_update(
         mut self,
         f: impl Fn(&str, &str, &str) + Send + Sync + 'static,
     ) -> Self {
-        self.after_tool_execution_update = Some(Arc::new(f));
+        self.after_tool_execution_update = Some(Arc::new(move |name, id, text| {
+            f(name, id, text);
+            Box::pin(async move {})
+        }));
         self
     }
 
@@ -617,6 +662,26 @@ impl BasicAgent {
         self.tools
             .push(Arc::new(crate::tools::RevertTool::new(pending.clone())));
         self.revert_pending = Some(pending);
+        self
+    }
+
+    /// Override the kind-aware render policy used when revert mode is active.
+    ///
+    /// The policy controls how `Lesson` / `Finding` tags decay out of the
+    /// LLM-facing prompt (per `lesson_window_turns` + `lesson_window_count`).
+    /// `Outcome` / `Checkpoint` tags always stay pinned while on-trunk.
+    ///
+    /// This setter is inert unless [`with_revert_tool`](Self::with_revert_tool)
+    /// was also called AND a `revert_to_state` invocation has set the active
+    /// trunk pointer — outside revert mode the agent loop's context build
+    /// takes the linear `build_working_context` path which does not consult
+    /// the policy.
+    ///
+    /// Defaults to `RevertRenderPolicy::default()` (5-turn window, 3-tag count
+    /// cap). Downstream operators (e.g. i-phi's braking config) should call
+    /// this when they want a non-default decay window.
+    pub fn with_revert_render_policy(mut self, policy: RevertRenderPolicy) -> Self {
+        self.revert_render_policy = policy;
         self
     }
 
@@ -1113,6 +1178,8 @@ impl BasicAgent {
             context_translation: self.context_translation.clone(),
             prun_pending: self.prun_pending.clone(),
             revert_pending: self.revert_pending.clone(),
+            current_tool: Some(self.current_tool.clone()),
+            revert_render_policy: self.revert_render_policy,
         })
     }
 
@@ -1613,5 +1680,116 @@ mod tests {
         assert_eq!(lock_queue(&agent.follow_up_queue).len(), 1);
         agent.clear_follow_up_queue();
         assert_eq!(lock_queue(&agent.follow_up_queue).len(), 0);
+    }
+
+    // ── 0.10.0 — Composition I render policy setter ──────────────────────
+
+    #[test]
+    fn with_revert_render_policy_sets_config_field() {
+        let custom = RevertRenderPolicy {
+            lesson_window_turns: 1,
+            lesson_window_count: 2,
+        };
+        let agent = BasicAgent::new(ModelConfig::anthropic("mock", "mock-model", "test-key"))
+            .with_revert_render_policy(custom);
+
+        // The setter stores the policy on the agent.
+        assert_eq!(agent.revert_render_policy.lesson_window_turns, 1);
+        assert_eq!(agent.revert_render_policy.lesson_window_count, 2);
+
+        // `build_config()` propagates it into AgentLoopConfig.
+        let config = agent.build_config().expect("BasicAgent has a model_config");
+        assert_eq!(config.revert_render_policy.lesson_window_turns, 1);
+        assert_eq!(config.revert_render_policy.lesson_window_count, 2);
+    }
+
+    #[test]
+    fn revert_render_policy_defaults_to_phi_core_defaults() {
+        let agent = BasicAgent::new(ModelConfig::anthropic("mock", "mock-model", "test-key"));
+        let default = RevertRenderPolicy::default();
+        assert_eq!(
+            agent.revert_render_policy.lesson_window_turns,
+            default.lesson_window_turns
+        );
+        assert_eq!(
+            agent.revert_render_policy.lesson_window_count,
+            default.lesson_window_count
+        );
+    }
+
+    // ── 0.10.0 — current_tool_timeout introspection ──────────────────────
+
+    #[test]
+    fn current_tool_timeout_is_none_when_no_tool_in_flight() {
+        let agent = BasicAgent::new(ModelConfig::anthropic("mock", "mock-model", "test-key"));
+        assert!(agent.current_tool_timeout().is_none());
+    }
+
+    #[test]
+    fn current_tool_timeout_reflects_shared_slot() {
+        // Direct test of the read path: write to the shared slot and confirm
+        // `current_tool_timeout()` surfaces it. The set/clear lifecycle from
+        // inside `execute_single_tool` is exercised by integration tests.
+        let agent = BasicAgent::new(ModelConfig::anthropic("mock", "mock-model", "test-key"));
+
+        // Idle: returns None.
+        assert!(agent.current_tool_timeout().is_none());
+
+        // Simulate the loop publishing an in-flight tool with a 5s timeout.
+        {
+            let mut guard = agent.current_tool.lock().unwrap();
+            *guard = Some(crate::context::CurrentToolExecution {
+                name: "bash".to_string(),
+                timeout: Some(std::time::Duration::from_secs(5)),
+            });
+        }
+        assert_eq!(
+            agent.current_tool_timeout(),
+            Some(std::time::Duration::from_secs(5))
+        );
+
+        // Simulate the loop publishing an in-flight tool with no timeout.
+        {
+            let mut guard = agent.current_tool.lock().unwrap();
+            *guard = Some(crate::context::CurrentToolExecution {
+                name: "bash".to_string(),
+                timeout: None,
+            });
+        }
+        assert!(agent.current_tool_timeout().is_none());
+
+        // Simulate the loop clearing on return.
+        {
+            let mut guard = agent.current_tool.lock().unwrap();
+            *guard = None;
+        }
+        assert!(agent.current_tool_timeout().is_none());
+    }
+
+    #[test]
+    fn current_tool_slot_is_shared_between_agent_and_config() {
+        // Verifies the Arc clone — writes through `build_config()`'s clone are
+        // visible via the agent's own getter.
+        let agent = BasicAgent::new(ModelConfig::anthropic("mock", "mock-model", "test-key"));
+        let config = agent.build_config().expect("BasicAgent has a model_config");
+        let slot = config
+            .current_tool
+            .as_ref()
+            .expect("BasicAgent installs the slot");
+
+        // Write through the config-side Arc.
+        {
+            let mut guard = slot.lock().unwrap();
+            *guard = Some(crate::context::CurrentToolExecution {
+                name: "fs.read_file".to_string(),
+                timeout: Some(std::time::Duration::from_millis(250)),
+            });
+        }
+
+        // Read through the agent-side getter.
+        assert_eq!(
+            agent.current_tool_timeout(),
+            Some(std::time::Duration::from_millis(250))
+        );
     }
 }

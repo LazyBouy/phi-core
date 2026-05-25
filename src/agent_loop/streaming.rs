@@ -139,7 +139,17 @@ pub(super) async fn stream_assistant_response(
 ) -> Message {
     // complete LLM response (all content blocks assembled); synthetic error Message on failure
     // Build working context: if prun streams are populated, merge them; otherwise use messages as-is.
-    let base_messages = context.build_working_context();
+    //
+    // 0.10.0: when revert mode is active (`active_node_id.is_some()`), apply
+    // the configured `RevertRenderPolicy` to decay `Lesson` / `Finding` tags
+    // out of the prompt past the policy window. Outside revert mode the
+    // policy field has no effect — `build_working_context` takes its linear
+    // path which is byte-identical to pre-0.10 behaviour.
+    let base_messages = if context.active_node_id.is_some() {
+        context.build_trunk_context_with_policy(&config.revert_render_policy, turn_index)
+    } else {
+        context.build_working_context()
+    };
 
     // Apply context transform (optional hook to prune/reshape messages before LLM sees them)
     let messages = if let Some(transform) = &config.transform_context {

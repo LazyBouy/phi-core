@@ -57,6 +57,8 @@ fn make_config(provider: Arc<dyn StreamProvider>) -> AgentLoopConfig {
         context_translation: None,
         prun_pending: None,
         revert_pending: None,
+        current_tool: None,
+        revert_render_policy: phi_core::RevertRenderPolicy::default(),
     }
 }
 

@@ -102,22 +102,23 @@ pub type AfterToolExecutionFn =
 /// Return `false` to suppress the streaming event; the tool keeps running and its final
 /// `ToolResult` (what the LLM sees) is **unaffected**.
 ///
-/// **Sync** (not async). Tool-update hooks fire from inside the sync
-/// `ToolUpdateFn` callback that tools invoke during their async execute
-/// body — making this hook async would require also async-ifying
-/// `ToolUpdateFn` and every tool that invokes `ctx.on_update(...)`. The
-/// veto decision must be synchronous so the surrounding emit gate works
-/// without blocking. For async work in update-time, dispatch via
-/// `tokio::spawn` inside the closure body.
-pub type BeforeToolExecutionUpdateFn = Arc<dyn Fn(&str, &str, &str) -> bool + Send + Sync>;
+/// 0.10.0: async hook (matches the 9 other lifecycle Fns async-migrated at
+/// 0.9.0). Wrap sync bodies in `Box::pin(async move { ... })`. The closure
+/// fires from inside the synchronous `ToolUpdateFn` callback that tools
+/// invoke during their async execute body; the agent loop bridges to the
+/// async hook via a `futures::executor::block_on` shim at the call site —
+/// see `agent_loop/tools.rs`.
+pub type BeforeToolExecutionUpdateFn =
+    Arc<dyn for<'a> Fn(&'a str, &'a str, &'a str) -> HookFuture<'a, bool> + Send + Sync>;
 /// Called after each incremental tool update (after `ToolExecutionUpdate` is emitted).
 ///
 /// Only fires when the update was *not* suppressed by `BeforeToolExecutionUpdateFn`.
 /// Arguments: `(tool_name, tool_call_id, text_content)`.
 ///
-/// **Sync** (not async). See [`BeforeToolExecutionUpdateFn`] for the
-/// rationale.
-pub type AfterToolExecutionUpdateFn = Arc<dyn Fn(&str, &str, &str) + Send + Sync>;
+/// 0.10.0: async hook. See [`BeforeToolExecutionUpdateFn`] for the
+/// bridging-from-sync-ToolUpdateFn rationale.
+pub type AfterToolExecutionUpdateFn =
+    Arc<dyn for<'a> Fn(&'a str, &'a str, &'a str) -> HookFuture<'a, ()> + Send + Sync>;
 
 /// Called when the LLM returns `StopReason::Error`. Argument: the error message string.
 ///
@@ -277,6 +278,43 @@ pub struct AgentLoopConfig {
     /// `apply_revert` (Phase 3) is gated on this being `Some`, so the LLM has
     /// no path to invoke the tool when the builder did not opt in.
     pub revert_pending: Option<Arc<std::sync::Mutex<Vec<crate::tools::revert::RevertRequest>>>>,
+
+    /// Shared slot recording the currently-executing tool.
+    ///
+    /// `Some(Arc<Mutex<Option<CurrentToolExecution>>>)` when the agent loop is
+    /// constructed via [`BasicAgent`](crate::agents::BasicAgent) (always
+    /// installed by `build_config`); `None` for direct callers of
+    /// `agent_loop()` who do not need pause-time introspection.
+    ///
+    /// The agent loop's `execute_single_tool` writes
+    /// `Some(CurrentToolExecution { name, timeout })` immediately before
+    /// invoking `AgentTool::execute()` and resets to `None` on return. External
+    /// consumers read the slot via the shared `Arc<Mutex<...>>` — see
+    /// [`BasicAgent::current_tool_timeout`](crate::agents::BasicAgent::current_tool_timeout).
+    ///
+    /// Single-tool model: under parallel / batched execution the slot reflects
+    /// the most-recently-started tool. See
+    /// [`CurrentToolExecution`](crate::context::CurrentToolExecution) for the
+    /// race-window characterization.
+    pub current_tool: Option<Arc<std::sync::Mutex<Option<crate::context::CurrentToolExecution>>>>,
+
+    /// Kind-aware render policy for Composition I trunk-context assembly.
+    ///
+    /// Consumed by the agent loop's context-build site
+    /// (`stream_assistant_response`) only when revert mode is active
+    /// (`active_node_id` is `Some`) — i.e. when the agent was constructed via
+    /// [`BasicAgent::with_revert_tool`](crate::agents::BasicAgent::with_revert_tool)
+    /// and `apply_revert` has set the active trunk pointer at least once.
+    /// Outside revert mode this field has no effect; the linear
+    /// [`build_working_context`](crate::types::AgentContext::build_working_context)
+    /// path is byte-identical to pre-0.10 behaviour.
+    ///
+    /// Defaults to `RevertRenderPolicy::default()` (5-turn window,
+    /// 3-tag-per-kind count cap). Override via
+    /// [`BasicAgent::with_revert_render_policy`](crate::agents::BasicAgent::with_revert_render_policy)
+    /// when downstream operators (e.g. i-phi's braking config) need a
+    /// different decay window.
+    pub revert_render_policy: RevertRenderPolicy,
 
     /// Desired LLM output shape. Default `Text` preserves the historical free-form
     /// behaviour; `JsonObject` / `JsonSchema` request constrained structured output

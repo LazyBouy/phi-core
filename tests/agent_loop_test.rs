@@ -46,6 +46,8 @@ fn make_config(provider: Arc<dyn phi_core::provider::StreamProvider>) -> AgentLo
         context_translation: None,
         prun_pending: None,
         revert_pending: None,
+        current_tool: None,
+        revert_render_policy: phi_core::RevertRenderPolicy::default(),
     }
 }
 
@@ -899,6 +901,8 @@ async fn test_retry_on_rate_limit_succeeds() {
         context_translation: None,
         prun_pending: None,
         revert_pending: None,
+        current_tool: None,
+        revert_render_policy: phi_core::RevertRenderPolicy::default(),
     };
 
     let mut context = AgentContext {
@@ -989,6 +993,8 @@ async fn test_retry_exhausted_returns_error() {
         context_translation: None,
         prun_pending: None,
         revert_pending: None,
+        current_tool: None,
+        revert_render_policy: phi_core::RevertRenderPolicy::default(),
     };
 
     let mut context = AgentContext {
@@ -1085,6 +1091,8 @@ async fn test_no_retry_on_auth_error() {
         context_translation: None,
         prun_pending: None,
         revert_pending: None,
+        current_tool: None,
+        revert_render_policy: phi_core::RevertRenderPolicy::default(),
     };
 
     let mut context = AgentContext {
@@ -1165,6 +1173,8 @@ async fn test_retry_none_disables_retries() {
         context_translation: None,
         prun_pending: None,
         revert_pending: None,
+        current_tool: None,
+        revert_render_policy: phi_core::RevertRenderPolicy::default(),
     };
 
     let mut context = AgentContext {
@@ -1453,6 +1463,8 @@ async fn test_on_error_fires_on_provider_error() {
         context_translation: None,
         prun_pending: None,
         revert_pending: None,
+        current_tool: None,
+        revert_render_policy: phi_core::RevertRenderPolicy::default(),
     };
 
     let mut context = AgentContext {
@@ -2923,6 +2935,8 @@ async fn test_custom_compaction_strategy_is_called() {
         context_translation: None,
         prun_pending: None,
         revert_pending: None,
+        current_tool: None,
+        revert_render_policy: phi_core::RevertRenderPolicy::default(),
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Hello")));
@@ -3034,6 +3048,8 @@ async fn test_none_compaction_strategy_uses_default() {
         context_translation: None,
         prun_pending: None,
         revert_pending: None,
+        current_tool: None,
+        revert_render_policy: phi_core::RevertRenderPolicy::default(),
     };
 
     let prompt = AgentMessage::Llm(LlmMessage::new(Message::user("Hello")));

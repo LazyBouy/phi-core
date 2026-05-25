@@ -70,6 +70,37 @@ pub struct ExecutionTracker {
     pub started_at: std::time::Instant,
 }
 
+// ---------------------------------------------------------------------------
+// Current tool execution state — 0.10.0
+// ---------------------------------------------------------------------------
+
+/// Snapshot of the tool currently executing inside the agent loop.
+///
+/// Populated by `execute_single_tool` immediately before
+/// `AgentTool::execute()` is invoked and cleared on return (success, error,
+/// or timeout). External consumers read it via the shared `Arc<Mutex<...>>`
+/// installed on [`AgentLoopConfig::current_tool`](crate::agent_loop::AgentLoopConfig::current_tool)
+/// — typically through the
+/// [`BasicAgent::current_tool_timeout`](crate::agents::BasicAgent::current_tool_timeout)
+/// delegate. Use case: emit a "pause-time estimate" upper bound when a host
+/// pauses an in-flight session.
+///
+/// **Single-tool model.** The slot records the most-recently-started tool.
+/// Under `ToolExecutionStrategy::Parallel` or `Batched`, concurrent tools
+/// race on this slot: the last writer wins and the cleared state may briefly
+/// reflect a sibling tool's completion. This is intentional for the v0
+/// pause-time-estimate use case (a single conservative upper bound suffices);
+/// callers needing per-call granularity should subscribe to
+/// `AgentEvent::ToolExecutionStart` / `ToolExecutionEnd` directly.
+#[derive(Debug, Clone)]
+pub struct CurrentToolExecution {
+    /// Tool name (the same string the LLM emitted as `Content::ToolCall.name`).
+    pub name: String,
+    /// Effective timeout for the in-flight call (per-tool override → config-level → None).
+    /// Mirrors the resolution order in `execute_single_tool`.
+    pub timeout: Option<std::time::Duration>,
+}
+
 impl ExecutionTracker {
     pub fn new(limits: ExecutionLimits) -> Self {
         Self {

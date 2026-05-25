@@ -410,6 +410,8 @@ pub trait Agent: Send {
             context_translation: self.context_translation(),
             prun_pending: None,
             revert_pending: None,
+            current_tool: None,
+            revert_render_policy: RevertRenderPolicy::default(),
         })
     }
 }

@@ -287,6 +287,8 @@ impl AgentTool for SubAgentTool {
             context_translation: None,
             prun_pending: None,
             revert_pending: None,
+            current_tool: None,
+            revert_render_policy: crate::types::RevertRenderPolicy::default(),
         };
 
         /*
