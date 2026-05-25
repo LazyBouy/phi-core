@@ -97,8 +97,19 @@ impl ScriptCallback {
     }
 }
 
-/// Detect the interpreter for a script based on extension.
-fn detect_interpreter(path: &Path) -> Vec<String> {
+/// Detect the interpreter for a script based on file extension.
+///
+/// Returns the argv prefix to spawn the appropriate interpreter for a script
+/// at `path`:
+///
+/// - `.py` → `["python3"]`
+/// - `.sh` → `["sh"]`
+/// - any other extension (or none) → `["sh"]` (default to shell)
+///
+/// Public so downstream consumers (e.g. i-phi's hook dispatcher) can adopt the
+/// same script-extension dispatch table phi-core uses internally for
+/// [`ScriptCallback`], rather than re-deriving it.
+pub fn detect_interpreter(path: &Path) -> Vec<String> {
     match path.extension().and_then(|e| e.to_str()) {
         Some("py") => vec!["python3".into()],
         Some("sh") => vec!["sh".into()],
