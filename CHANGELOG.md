@@ -12,6 +12,55 @@ _No unreleased changes._
 
 ---
 
+## [0.11.0] — 2026-06-02
+
+**Minor release (additive / opt-in).** Adds an opt-in raw-wire capture surface
+and completes reasoning-text mapping across every `ThinkingFormat` arm. Both
+changes are backward-compatible: the new `StreamConfig` field defaults to
+`None`, so existing callers (including baby-phi) are unaffected and need no
+source edits. Plan archive: i-phi
+`docs/v0/proposal/plan/build/ch-cc-09a-htc-observability-phi-core-half-7ed50e5e/plan.md`.
+
+### Added
+
+- **Opt-in `provider_wire_sink` raw-wire capture surface.** A new
+  `StreamConfig.provider_wire_sink: Option<Arc<dyn ProviderWireSink>>` field
+  (default `None`) lets a caller observe the literal provider wire traffic for
+  a stream. The `ProviderWireSink` trait receives `RawWire` events:
+  `RawWire::Request` (the outbound request body), `RawWire::ResponseFrame`
+  (one per arriving SSE frame, in stream order), and `RawWire::ResponseDone`
+  (at finalize). Wired across **all 7 providers + `MockProvider`**
+  (`openai_compat`, `openai_responses`, `anthropic`, `azure_openai`, `google`,
+  `google_vertex`, `bedrock`, `mock`). Capture is **per-SSE-frame**, so the
+  observer sees exactly what streamed (including partial/interleaved reasoning
+  frames). **Per-auth-shape redaction at the sink boundary** ensures no
+  credential reaches a captured value: Bearer tokens, `x-api-key`, URL query
+  keys (scrubbed via `scrub_url_query`), and SigV4 credentials are stripped
+  before any `RawWire` is emitted. `StreamConfig`'s `Debug` derive is replaced
+  with a manual impl (the sink is `Arc<dyn ...>` and not `Debug`); the field
+  prints as a placeholder.
+
+### Fixed
+
+- **Reasoning text reaches the `Content::Thinking` block across every
+  `ThinkingFormat` arm.** Previously the `ThinkingFormat::OpenRouter` arm
+  filtered `delta.reasoning_details` on `type == "thinking"` and never read the
+  plain `delta.reasoning` string, so models that emit `type == "reasoning.text"`
+  (e.g. gpt-oss-via-OpenRouter) had their reasoning **text** silently dropped
+  even though reasoning *tokens* were counted. The OpenRouter arm now prefers
+  the `delta.reasoning` string and otherwise assembles from any text-bearing
+  `reasoning_details` entry (no longer restricted to `type == "thinking"`),
+  with de-dup so the same text mirrored on both fields is not double-appended.
+  Additionally, the **google (Gemini 2.5)** provider now deserializes the
+  per-part `thought` flag (`GooglePart.thought`) and routes `thought: true`
+  parts to `Content::Thinking` + `StreamEvent::ThinkingDelta` instead of the
+  visible text block. The `Xai` (`delta.reasoning`), `OpenAi`/default
+  (`delta.reasoning_content`), anthropic native thinking, and
+  openai_responses reasoning-item arms already mapped reasoning text correctly
+  and are unchanged.
+
+---
+
 ## [0.10.0] — 2026-05-25
 
 **Minor release.** Closes 5 OPEN downstream consumer drifts surfaced by i-phi:

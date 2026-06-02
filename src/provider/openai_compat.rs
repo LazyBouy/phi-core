@@ -90,6 +90,20 @@ impl StreamProvider for OpenAiCompatProvider {
             config.model_config.id, url
         );
 
+        // Opt-in raw-wire capture. The credential rides the `authorization: Bearer`
+        // header (added below), so the serialized `body` is already token-free.
+        let wire_sink = config.provider_wire_sink.clone();
+        let wire_provider_id = model_config.provider.clone();
+        let wire_model_id = config.model_config.id.clone();
+        let mut wire_frame_index: usize = 0;
+        if let Some(sink) = wire_sink.as_ref() {
+            sink.on_wire(&RawWire::Request {
+                provider_id: wire_provider_id.clone(),
+                model_id: wire_model_id.clone(),
+                body: serde_json::to_string(&body).unwrap_or_default(),
+            });
+        }
+
         let client = reqwest::Client::new();
         let mut request = client
             .post(&url)
@@ -136,6 +150,17 @@ impl StreamProvider for OpenAiCompatProvider {
                         None => break,
                         Some(Ok(reqwest_eventsource::Event::Open)) => {}
                         Some(Ok(reqwest_eventsource::Event::Message(msg))) => {
+                            // Raw-wire per-frame capture (opt-in). Capture the literal SSE
+                            // data payload before any decoding, in stream order.
+                            if let Some(sink) = wire_sink.as_ref() {
+                                sink.on_wire(&RawWire::ResponseFrame {
+                                    provider_id: wire_provider_id.clone(),
+                                    model_id: wire_model_id.clone(),
+                                    frame_index: wire_frame_index,
+                                    raw_frame: msg.data.clone(),
+                                });
+                                wire_frame_index += 1;
+                            }
                             // OpenAI signals stream end with "[DONE]" (not valid JSON — check first)
                             if msg.data == "[DONE]" {
                                 break;
@@ -184,9 +209,18 @@ impl StreamProvider for OpenAiCompatProvider {
                                   OpenAI/others:  `delta.reasoning_content`
 
                                 `ThinkingFormat::Xai`        → read from `delta.reasoning`
-                                `ThinkingFormat::OpenRouter` → collect `delta.reasoning_details`
-                                                               entries where type == "thinking"
+                                `ThinkingFormat::OpenRouter` → prefer the plain `delta.reasoning`
+                                                               string; else assemble from any
+                                                               text-bearing `delta.reasoning_details`
+                                                               entry (type ∈ {"thinking","reasoning.text"}
+                                                               or any entry with non-empty text)
                                 all others                   → read from `delta.reasoning_content`
+
+                                OpenRouter de-dup note (CC-09a / gpt-oss): some upstreams (e.g.
+                                gpt-oss-via-OpenRouter) emit the SAME reasoning text on BOTH
+                                `delta.reasoning` (string) AND each `reasoning_details[].text`
+                                entry per frame. Preferring `delta.reasoning` when present and
+                                only falling back to `reasoning_details` avoids double-appending.
 
                                 RUST QUIRK: `.as_deref()` on `Option<String>` → `Option<&str>`
                                   `delta.reasoning` is `Option<String>`.
@@ -199,13 +233,27 @@ impl StreamProvider for OpenAiCompatProvider {
                                 // `reasoning_owned` anchors the String so `reasoning` (&str) can borrow it.
                                 let reasoning_owned = match compat.thinking_format {
                                     ThinkingFormat::OpenRouter => {
-                                        delta.reasoning_details.as_ref().map(|details| {
-                                            details
-                                                .iter()
-                                                .filter(|d| d.detail_type == "thinking")
-                                                .filter_map(|d| d.text.as_deref())
-                                                .collect::<String>()
-                                        })
+                                        // Primary: gpt-oss (and most OpenRouter upstreams) populate
+                                        // the plain `delta.reasoning` string directly. De-dup: when
+                                        // it is present we use it and do NOT also append from
+                                        // `reasoning_details` (the same text is mirrored there).
+                                        if let Some(r) = delta.reasoning.as_deref().filter(|s| !s.is_empty()) {
+                                            Some(r.to_string())
+                                        } else {
+                                            // Fallback: assemble from any text-bearing
+                                            // `reasoning_details` entry. Broadened from the old
+                                            // `type == "thinking"` filter (which matched zero of
+                                            // gpt-oss's `type == "reasoning.text"` entries) to accept
+                                            // any entry that carries non-empty text.
+                                            delta.reasoning_details.as_ref().and_then(|details| {
+                                                let s = details
+                                                    .iter()
+                                                    .filter_map(|d| d.text.as_deref())
+                                                    .filter(|t| !t.is_empty())
+                                                    .collect::<String>();
+                                                if s.is_empty() { None } else { Some(s) }
+                                            })
+                                        }
                                     }
                                     _ => None,
                                 };
@@ -394,6 +442,13 @@ impl StreamProvider for OpenAiCompatProvider {
             error_message: None,
         };
 
+        if let Some(sink) = wire_sink.as_ref() {
+            sink.on_wire(&RawWire::ResponseDone {
+                provider_id: wire_provider_id.clone(),
+                model_id: wire_model_id.clone(),
+                message_summary: format!("{} frame(s)", wire_frame_index),
+            });
+        }
         let _ = tx.send(StreamEvent::Done {
             message: message.clone(),
         });
@@ -693,7 +748,11 @@ struct OpenAiChoice {
 /// A single entry in OpenRouter's `reasoning_details` array.
 #[derive(Deserialize)]
 struct OpenRouterReasoningDetail {
+    /// The `type` tag (e.g. `"thinking"`, `"reasoning.text"`). Retained for
+    /// wire-shape fidelity and debugging; the reasoning-extraction selection
+    /// no longer filters on it (CC-09a broadened to any text-bearing entry).
     #[serde(rename = "type")]
+    #[allow(dead_code)]
     detail_type: String,
     #[serde(default)]
     text: Option<String>,
@@ -776,6 +835,7 @@ mod tests {
             temperature: None,
             cache_config: CacheConfig::default(),
             response_format: ResponseFormat::Text,
+            provider_wire_sink: None,
         };
 
         let body = build_request_body(&config, &model_config, &OpenAiCompat::openai());
@@ -806,6 +866,7 @@ mod tests {
             temperature: Some(0.5),
             cache_config: CacheConfig::default(),
             response_format: ResponseFormat::Text,
+            provider_wire_sink: None,
         };
 
         let body = build_request_body(&config, &model_config, &compat);
@@ -878,6 +939,7 @@ mod tests {
             temperature: None,
             cache_config: CacheConfig::default(),
             response_format: ResponseFormat::Text,
+            provider_wire_sink: None,
         };
 
         let body = build_request_body(&config, &model_config, &compat);
@@ -916,6 +978,7 @@ mod tests {
             temperature: None,
             cache_config: CacheConfig::default(),
             response_format: ResponseFormat::Text,
+            provider_wire_sink: None,
         };
 
         let body = build_request_body(&config, &model_config, &compat);

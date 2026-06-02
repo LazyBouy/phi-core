@@ -112,10 +112,24 @@ impl StreamProvider for MockProvider {
 
     async fn stream(
         &self,
-        _config: StreamConfig, // IGNORED — test double; real config not used (responses are pre-set)
+        config: StreamConfig, // responses are pre-set; `config` is used only for opt-in raw-wire capture
         tx: mpsc::UnboundedSender<StreamEvent>, // OBSERVER — receives synthetic events built from the next MockResponse
         cancel: tokio_util::sync::CancellationToken, // ABORT — honored (returns Cancelled if triggered before events are sent)
     ) -> Result<Message, ProviderError> {
+        // Opt-in raw-wire capture. The mock has no real HTTP body; emit a synthetic,
+        // credential-free request summary so deterministic no-network sink tests can
+        // exercise the full Request → ResponseFrame(s) → ResponseDone sequence.
+        let wire_sink = config.provider_wire_sink.clone();
+        let provider_id = self.provider_id().to_string();
+        let model_id = config.model_config.id.clone();
+        let mut frame_index: usize = 0;
+        if let Some(sink) = wire_sink.as_ref() {
+            sink.on_wire(&RawWire::Request {
+                provider_id: provider_id.clone(),
+                model_id: model_id.clone(),
+                body: format!("{{\"mock\":true,\"messages\":{}}}", config.messages.len()),
+            });
+        }
         /*
         RUST QUIRK: `{ let mut guard = self.responses.lock().unwrap(); ... }`
         The block `{ ... }` creates a scope. The `MutexGuard` (returned by `.lock()`)
@@ -146,6 +160,15 @@ impl StreamProvider for MockProvider {
         }
 
         let _ = tx.send(StreamEvent::Start);
+        if let Some(sink) = wire_sink.as_ref() {
+            sink.on_wire(&RawWire::ResponseFrame {
+                provider_id: provider_id.clone(),
+                model_id: model_id.clone(),
+                frame_index,
+                raw_frame: "event: start".to_string(),
+            });
+            frame_index += 1;
+        }
 
         /*
         RUST QUIRK: `match response { ... }` — consuming a moved value
@@ -161,6 +184,15 @@ impl StreamProvider for MockProvider {
                     content_index: 0,
                     delta: text.clone(),
                 });
+                if let Some(sink) = wire_sink.as_ref() {
+                    sink.on_wire(&RawWire::ResponseFrame {
+                        provider_id: provider_id.clone(),
+                        model_id: model_id.clone(),
+                        frame_index,
+                        raw_frame: format!("data: {{\"text\":{:?}}}", text),
+                    });
+                    frame_index += 1;
+                }
                 Message::Assistant {
                     content: vec![Content::Text { text }],
                     stop_reason: StopReason::Stop,
@@ -214,6 +246,26 @@ impl StreamProvider for MockProvider {
         };
 
         // Signal stream completion — both on the channel and as the return value
+        if let Some(sink) = wire_sink.as_ref() {
+            let summary = match &message {
+                Message::Assistant {
+                    content,
+                    stop_reason,
+                    ..
+                } => format!(
+                    "{:?} ({} block(s), {} frame(s))",
+                    stop_reason,
+                    content.len(),
+                    frame_index
+                ),
+                _ => format!("non-assistant ({} frame(s))", frame_index),
+            };
+            sink.on_wire(&RawWire::ResponseDone {
+                provider_id: provider_id.clone(),
+                model_id: model_id.clone(),
+                message_summary: summary,
+            });
+        }
         let _ = tx.send(StreamEvent::Done {
             message: message.clone(),
         });

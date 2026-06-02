@@ -95,6 +95,21 @@ impl StreamProvider for AnthropicProvider {
             config.model_config.id, is_oauth
         );
 
+        // Opt-in raw-wire capture. The credential rides the `x-api-key` (or OAuth
+        // `authorization: Bearer`) header added below; the serialized `body` is
+        // already token-free.
+        let wire_sink = config.provider_wire_sink.clone();
+        let wire_provider_id = "anthropic".to_string();
+        let wire_model_id = config.model_config.id.clone();
+        let mut wire_frame_index: usize = 0;
+        if let Some(sink) = wire_sink.as_ref() {
+            sink.on_wire(&RawWire::Request {
+                provider_id: wire_provider_id.clone(),
+                model_id: wire_model_id.clone(),
+                body: serde_json::to_string(&body).unwrap_or_default(),
+            });
+        }
+
         /*
         RUST QUIRK: Builder pattern on `reqwest::Client`
 
@@ -208,6 +223,16 @@ impl StreamProvider for AnthropicProvider {
                         None => break,
                         Some(Ok(Event::Open)) => {}
                         Some(Ok(Event::Message(msg))) => {
+                            // Raw-wire per-frame capture (opt-in) — literal SSE payload.
+                            if let Some(sink) = wire_sink.as_ref() {
+                                sink.on_wire(&RawWire::ResponseFrame {
+                                    provider_id: wire_provider_id.clone(),
+                                    model_id: wire_model_id.clone(),
+                                    frame_index: wire_frame_index,
+                                    raw_frame: msg.data.clone(),
+                                });
+                                wire_frame_index += 1;
+                            }
                             /*
                             RUST QUIRK: `msg.event.as_str()` for pattern matching
                             `msg.event` is a `String`. We can't match on `String` directly
@@ -442,6 +467,13 @@ impl StreamProvider for AnthropicProvider {
             error_message: None,
         };
 
+        if let Some(sink) = wire_sink.as_ref() {
+            sink.on_wire(&RawWire::ResponseDone {
+                provider_id: wire_provider_id.clone(),
+                model_id: wire_model_id.clone(),
+                message_summary: format!("{} frame(s)", wire_frame_index),
+            });
+        }
         let _ = tx.send(StreamEvent::Done {
             message: message.clone(),
         });
@@ -859,6 +891,7 @@ mod tests {
             temperature: None,
             cache_config: cache,
             response_format: ResponseFormat::Text,
+            provider_wire_sink: None,
         }
     }
 
@@ -1004,6 +1037,7 @@ mod tests {
                 strategy: CacheStrategy::Disabled,
             },
             response_format: ResponseFormat::Text,
+            provider_wire_sink: None,
         };
 
         let body = build_request_body(&config, false);
@@ -1061,6 +1095,7 @@ mod tests {
                 strategy: CacheStrategy::Disabled,
             },
             response_format: ResponseFormat::Text,
+            provider_wire_sink: None,
         };
 
         let body = build_request_body(&config, false);

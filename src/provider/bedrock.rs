@@ -103,6 +103,28 @@ impl StreamProvider for BedrockProvider {
             config.model_config.id, url
         );
 
+        // Opt-in raw-wire capture. Bedrock auth is AWS SigV4: the access-key / secret /
+        // session-token are parsed from `api_key` BELOW (`:splitn`) and applied to the
+        // request headers (incl. the Bearer fallback). The sink fires HERE — BEFORE any
+        // credential is parsed or signed — so the access-key / secret / session-token and
+        // `authorization` / `x-amz-*` headers NEVER reach the sink. The captured `body`
+        // is credential-free.
+        let wire_sink = config.provider_wire_sink.clone();
+        let wire_provider_id = model_config.provider.clone();
+        let wire_model_id = config.model_config.id.clone();
+        let mut wire_frame_index: usize = 0;
+        if let Some(sink) = wire_sink.as_ref() {
+            sink.on_wire(&RawWire::Request {
+                provider_id: wire_provider_id.clone(),
+                model_id: wire_model_id.clone(),
+                body: format!(
+                    "{{\"url\":{:?},\"payload\":{}}}",
+                    scrub_url_query(&url),
+                    serde_json::to_string(&body).unwrap_or_default()
+                ),
+            });
+        }
+
         /*
         RUST QUIRK: `api_key.splitn(3, ':').collect::<Vec<&str>>()`
 
@@ -183,6 +205,17 @@ impl StreamProvider for BedrockProvider {
 
                                 if line.is_empty() {
                                     continue;
+                                }
+
+                                // Raw-wire per-frame capture (opt-in) — literal stream line.
+                                if let Some(sink) = wire_sink.as_ref() {
+                                    sink.on_wire(&RawWire::ResponseFrame {
+                                        provider_id: wire_provider_id.clone(),
+                                        model_id: wire_model_id.clone(),
+                                        frame_index: wire_frame_index,
+                                        raw_frame: line.clone(),
+                                    });
+                                    wire_frame_index += 1;
                                 }
 
                                 let event: BedrockEvent = match serde_json::from_str(&line) {
@@ -272,6 +305,13 @@ impl StreamProvider for BedrockProvider {
             error_message: None,
         };
 
+        if let Some(sink) = wire_sink.as_ref() {
+            sink.on_wire(&RawWire::ResponseDone {
+                provider_id: wire_provider_id.clone(),
+                model_id: wire_model_id.clone(),
+                message_summary: format!("{} frame(s)", wire_frame_index),
+            });
+        }
         let _ = tx.send(StreamEvent::Done {
             message: message.clone(),
         });
@@ -515,6 +555,7 @@ mod tests {
             temperature: None,
             cache_config: CacheConfig::default(),
             response_format: ResponseFormat::Text,
+            provider_wire_sink: None,
         };
 
         let body = build_bedrock_body(&config);

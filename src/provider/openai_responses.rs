@@ -62,6 +62,20 @@ impl StreamProvider for OpenAiResponsesProvider {
             config.model_config.id, url
         );
 
+        // Opt-in raw-wire capture. The credential rides the `authorization: Bearer`
+        // header (added below); the serialized `body` is already token-free.
+        let wire_sink = config.provider_wire_sink.clone();
+        let wire_provider_id = model_config.provider.clone();
+        let wire_model_id = config.model_config.id.clone();
+        let mut wire_frame_index: usize = 0;
+        if let Some(sink) = wire_sink.as_ref() {
+            sink.on_wire(&RawWire::Request {
+                provider_id: wire_provider_id.clone(),
+                model_id: wire_model_id.clone(),
+                body: serde_json::to_string(&body).unwrap_or_default(),
+            });
+        }
+
         let client = reqwest::Client::new();
         let mut request = client
             .post(&url)
@@ -108,6 +122,16 @@ impl StreamProvider for OpenAiResponsesProvider {
                         None => break,
                         Some(Ok(reqwest_eventsource::Event::Open)) => {}
                         Some(Ok(reqwest_eventsource::Event::Message(msg))) => {
+                            // Raw-wire per-frame capture (opt-in) — literal SSE payload.
+                            if let Some(sink) = wire_sink.as_ref() {
+                                sink.on_wire(&RawWire::ResponseFrame {
+                                    provider_id: wire_provider_id.clone(),
+                                    model_id: wire_model_id.clone(),
+                                    frame_index: wire_frame_index,
+                                    raw_frame: msg.data.clone(),
+                                });
+                                wire_frame_index += 1;
+                            }
                             match msg.event.as_str() {
                                 "response.output_text.delta" => {
                                     if let Ok(data) = serde_json::from_str::<TextDeltaEvent>(&msg.data) {
@@ -263,6 +287,13 @@ impl StreamProvider for OpenAiResponsesProvider {
             error_message: None,
         };
 
+        if let Some(sink) = wire_sink.as_ref() {
+            sink.on_wire(&RawWire::ResponseDone {
+                provider_id: wire_provider_id.clone(),
+                model_id: wire_model_id.clone(),
+                message_summary: format!("{} frame(s)", wire_frame_index),
+            });
+        }
         let _ = tx.send(StreamEvent::Done {
             message: message.clone(),
         });

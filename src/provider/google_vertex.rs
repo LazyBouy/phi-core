@@ -96,6 +96,23 @@ impl StreamProvider for GoogleVertexProvider {
         // Build request body same as Google (same content format)
         let body = build_vertex_request_body(&config);
 
+        // Opt-in raw-wire capture. Vertex auth is an OAuth2 Bearer token carried in the
+        // `authorization` header (set on `vertex_model.headers` above), NOT in the body
+        // or URL query. The URL is scrubbed defensively before capture, and the captured
+        // `body` carries no credential.
+        if let Some(sink) = config.provider_wire_sink.as_ref() {
+            let redacted_url = scrub_url_query(&vertex_url);
+            sink.on_wire(&RawWire::Request {
+                provider_id: model_config.provider.clone(),
+                model_id: config.model_config.id.clone(),
+                body: format!(
+                    "{{\"url\":{:?},\"payload\":{}}}",
+                    redacted_url,
+                    serde_json::to_string(&body).unwrap_or_default()
+                ),
+            });
+        }
+
         let client = reqwest::Client::new();
         let mut request = client
             .post(&vertex_url)
@@ -149,6 +166,11 @@ async fn parse_google_sse_response(
     let mut usage = Usage::default();
     let mut stop_reason = StopReason::Stop;
 
+    // Opt-in raw-wire per-frame capture (request already captured by the Vertex caller).
+    let wire_sink = config.provider_wire_sink.clone();
+    let wire_model_id = config.model_config.id.clone();
+    let mut wire_frame_index: usize = 0;
+
     let _ = tx.send(StreamEvent::Start);
 
     let mut stream = response.bytes_stream();
@@ -181,6 +203,17 @@ async fn parse_google_sse_response(
 
                             if data.is_empty() {
                                 continue;
+                            }
+
+                            // Raw-wire per-frame capture (opt-in) — literal SSE payload.
+                            if let Some(sink) = wire_sink.as_ref() {
+                                sink.on_wire(&RawWire::ResponseFrame {
+                                    provider_id: provider_name.to_string(),
+                                    model_id: wire_model_id.clone(),
+                                    frame_index: wire_frame_index,
+                                    raw_frame: data.to_string(),
+                                });
+                                wire_frame_index += 1;
                             }
 
                             #[derive(Deserialize)]
@@ -303,6 +336,13 @@ async fn parse_google_sse_response(
         error_message: None,
     };
 
+    if let Some(sink) = wire_sink.as_ref() {
+        sink.on_wire(&RawWire::ResponseDone {
+            provider_id: provider_name.to_string(),
+            model_id: wire_model_id.clone(),
+            message_summary: format!("{} frame(s)", wire_frame_index),
+        });
+    }
     let _ = tx.send(StreamEvent::Done {
         message: message.clone(),
     });

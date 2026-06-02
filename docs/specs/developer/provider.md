@@ -1,4 +1,4 @@
-<!-- Last verified: 2026-04-05 by Claude Code -->
+<!-- Last verified: 2026-06-02 by Claude Code (0.11.0: NEW opt-in `StreamConfig::provider_wire_sink` raw-wire capture surface — RawWire variants + per-SSE-frame + per-auth-shape redaction; additive/default-None) -->
 # Provider System
 
 The provider system abstracts all LLM backends behind a single `StreamProvider` trait. The caller constructs a `ModelConfig` (the model's "identity card"), and the `ProviderRegistry` dispatches to the correct concrete provider at runtime. This design allows seamless switching between Anthropic, OpenAI, Google, Bedrock, Azure, and 15+ OpenAI-compatible providers without changing application code.
@@ -78,6 +78,20 @@ The core abstraction every LLM backend implements. The rest of the codebase inte
 | `stream()` | `(config, tx, cancel) -> Result<Message, ProviderError>` | [EXISTS] | Stream a completion; sends `StreamEvent`s through `tx` in real time; returns final assembled `Message` |
 
 **Dual-output contract**: The `tx` channel carries partial deltas for real-time UI updates. The return value carries the complete message after the stream ends. The loop cannot read its own output from the channel -- the return value is the protocol, the channel is the live feed.
+
+---
+
+## Raw-wire capture: `provider_wire_sink` [EXISTS]
+
+An **opt-in, default-inert** observability surface (added 0.11.0) for capturing exactly what was sent to and received from the model — the "what did the model actually see / produce?" question, answered from captured bytes rather than source. Install via `StreamConfig::provider_wire_sink: Option<Arc<dyn ProviderWireSink>>` (default `None`). With no sink, no provider constructs or emits any event and the hot path is byte-for-byte unchanged; baby-phi and all existing callers are unaffected.
+
+When a sink is set, every provider (all 7 network providers + `mock`) invokes `ProviderWireSink::on_wire(&RawWire)` with:
+
+- `RawWire::Request { provider_id, model_id, body }` — the serialized, **credential-free** request body, captured before transport auth is applied.
+- `RawWire::ResponseFrame { provider_id, model_id, frame_index, raw_frame }` — each raw SSE frame as it arrives, in stream order (per-SSE-frame, not finalized-message-only).
+- `RawWire::ResponseDone { provider_id, model_id, message_summary }` — a short, non-sensitive completion summary.
+
+**Redaction invariant (load-bearing)**: the sink never receives auth credentials. Header-level auth (Bearer / `x-api-key` / `api-key`) leaves the body token-free; URL-key auth (google / google_vertex) is scrubbed via `scrub_url_query()` before capture; SigV4 (bedrock) fires the sink **before** signing so the secret + `Authorization` / `x-amz-*` headers never reach it.
 
 ---
 

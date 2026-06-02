@@ -73,6 +73,30 @@ impl StreamProvider for GoogleProvider {
         let body = build_request_body(&config);
         debug!("Google GenAI request: model={}", config.model_config.id);
 
+        // Opt-in raw-wire capture. Google embeds the API key in the URL query
+        // (`?...&key=<API_KEY>`), so the URL is NEVER placed in a RawWire event; only
+        // the serialized `body` (which carries no credential) is captured. The
+        // `scrub_url_query` helper is the canonical primitive for any future consumer
+        // that needs a redacted URL.
+        let wire_sink = config.provider_wire_sink.clone();
+        let wire_provider_id = model_config.provider.clone();
+        let wire_model_id = config.model_config.id.clone();
+        let mut wire_frame_index: usize = 0;
+        if let Some(sink) = wire_sink.as_ref() {
+            // Defensive: capture the body, and a redacted URL for context. The redacted
+            // URL has the entire query string (incl. `key=`) stripped.
+            let redacted_url = scrub_url_query(&url);
+            sink.on_wire(&RawWire::Request {
+                provider_id: wire_provider_id.clone(),
+                model_id: wire_model_id.clone(),
+                body: format!(
+                    "{{\"url\":{:?},\"payload\":{}}}",
+                    redacted_url,
+                    serde_json::to_string(&body).unwrap_or_default()
+                ),
+            });
+        }
+
         let client = reqwest::Client::new();
         let mut request = client.post(&url).header("content-type", "application/json");
 
@@ -156,6 +180,18 @@ impl StreamProvider for GoogleProvider {
                                     continue;
                                 }
 
+                                // Raw-wire per-frame capture (opt-in) — literal SSE
+                                // data payload, in stream order.
+                                if let Some(sink) = wire_sink.as_ref() {
+                                    sink.on_wire(&RawWire::ResponseFrame {
+                                        provider_id: wire_provider_id.clone(),
+                                        model_id: wire_model_id.clone(),
+                                        frame_index: wire_frame_index,
+                                        raw_frame: data.to_string(),
+                                    });
+                                    wire_frame_index += 1;
+                                }
+
                                 let chunk: GoogleChunk = match serde_json::from_str(data) {
                                     Ok(c) => c,
                                     Err(e) => {
@@ -169,21 +205,48 @@ impl StreamProvider for GoogleProvider {
                                     if let Some(c) = &candidate.content {
                                         for part in &c.parts {
                                             if let Some(text) = &part.text {
-                                                let text_idx = content.iter().position(|c| matches!(c, Content::Text { .. }));
-                                                let idx = match text_idx {
-                                                    Some(i) => i,
-                                                    None => {
-                                                        content.push(Content::Text { text: String::new() });
-                                                        content.len() - 1
+                                                if part.thought == Some(true) {
+                                                    // Gemini 2.5 thinking part — route reasoning text
+                                                    // to the Thinking block (not the visible answer).
+                                                    let thinking_idx = content
+                                                        .iter()
+                                                        .position(|c| matches!(c, Content::Thinking { .. }));
+                                                    let idx = match thinking_idx {
+                                                        Some(i) => i,
+                                                        None => {
+                                                            content.push(Content::Thinking {
+                                                                thinking: String::new(),
+                                                                signature: None,
+                                                            });
+                                                            content.len() - 1
+                                                        }
+                                                    };
+                                                    if let Some(Content::Thinking { thinking, .. }) =
+                                                        content.get_mut(idx)
+                                                    {
+                                                        thinking.push_str(text);
                                                     }
-                                                };
-                                                if let Some(Content::Text { text: t }) = content.get_mut(idx) {
-                                                    t.push_str(text);
+                                                    let _ = tx.send(StreamEvent::ThinkingDelta {
+                                                        content_index: idx,
+                                                        delta: text.clone(),
+                                                    });
+                                                } else {
+                                                    let text_idx = content.iter().position(|c| matches!(c, Content::Text { .. }));
+                                                    let idx = match text_idx {
+                                                        Some(i) => i,
+                                                        None => {
+                                                            content.push(Content::Text { text: String::new() });
+                                                            content.len() - 1
+                                                        }
+                                                    };
+                                                    if let Some(Content::Text { text: t }) = content.get_mut(idx) {
+                                                        t.push_str(text);
+                                                    }
+                                                    let _ = tx.send(StreamEvent::TextDelta {
+                                                        content_index: idx,
+                                                        delta: text.clone(),
+                                                    });
                                                 }
-                                                let _ = tx.send(StreamEvent::TextDelta {
-                                                    content_index: idx,
-                                                    delta: text.clone(),
-                                                });
                                             }
                                             if let Some(fc) = &part.function_call {
                                                 let id = format!("google-fc-{}", content.len());
@@ -237,6 +300,13 @@ impl StreamProvider for GoogleProvider {
             error_message: None,
         };
 
+        if let Some(sink) = wire_sink.as_ref() {
+            sink.on_wire(&RawWire::ResponseDone {
+                provider_id: wire_provider_id.clone(),
+                model_id: wire_model_id.clone(),
+                message_summary: format!("{} frame(s)", wire_frame_index),
+            });
+        }
         let _ = tx.send(StreamEvent::Done {
             message: message.clone(),
         });
@@ -400,6 +470,11 @@ struct GoogleContent {
 struct GooglePart {
     #[serde(default)]
     text: Option<String>,
+    /// Gemini 2.5 marks chain-of-thought parts with `thought: true`. When set,
+    /// the part's `text` is reasoning (not the visible answer) and is routed to
+    /// `Content::Thinking` + `StreamEvent::ThinkingDelta` (CC-09a all-arms fix).
+    #[serde(default)]
+    thought: Option<bool>,
     #[serde(default, rename = "functionCall")]
     function_call: Option<GoogleFunctionCall>,
 }
@@ -443,6 +518,7 @@ mod tests {
             temperature: Some(0.7),
             cache_config: CacheConfig::default(),
             response_format: ResponseFormat::Text,
+            provider_wire_sink: None,
         };
 
         let body = build_request_body(&config);

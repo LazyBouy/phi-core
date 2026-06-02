@@ -140,6 +140,7 @@ fn make_stream_config(format: ResponseFormat) -> StreamConfig {
         temperature: None,
         cache_config: CacheConfig::default(),
         response_format: format,
+        provider_wire_sink: None,
     }
 }
 
@@ -176,6 +177,7 @@ async fn bedrock_rejects_structured_output_on_non_anthropic_model() {
         temperature: None,
         cache_config: CacheConfig::default(),
         response_format: ResponseFormat::JsonObject,
+        provider_wire_sink: None,
     };
 
     let provider = BedrockProvider;

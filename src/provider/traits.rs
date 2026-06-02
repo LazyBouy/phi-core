@@ -1,5 +1,7 @@
 use crate::types::*;
 use async_trait::async_trait;
+use std::fmt;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use super::model::ModelConfig;
@@ -72,6 +74,84 @@ pub enum StreamEvent {
     Error { message: Message },
 }
 
+/// Raw provider wire event — the exact bytes exchanged with the upstream LLM API.
+/*
+ARCHITECTURE: RawWire — opt-in observability of the literal request/response wire.
+
+`StreamEvent` is the *decoded* protocol (text deltas, tool calls, etc.). `RawWire`
+is the *undecoded* transport: the serialized request body and the raw SSE frames the
+provider receives. It exists so a debug/observability consumer can capture exactly
+what was sent to and received from the model — invaluable for "what did the model
+actually see?" investigations.
+
+Capture is entirely opt-in: a provider only emits `RawWire` events when the caller
+sets `StreamConfig::provider_wire_sink`. With no sink (the default), no `RawWire` is
+constructed and the hot path is byte-for-byte unchanged.
+
+REDACTION INVARIANT (load-bearing): the `Request` body / URL captured here MUST be
+free of auth credentials. Each provider invokes the sink at the point where the body
+is token-free:
+  - header-level auth (Bearer / x-api-key / api-key) → body is already credential-free.
+  - URL-key auth (google / google_vertex) → the URL query is scrubbed before capture.
+  - SigV4 auth (bedrock) → the sink fires BEFORE signing, so the access-key / secret /
+    session-token and `Authorization` / `x-amz-*` headers never reach the sink.
+*/
+#[derive(Debug, Clone)]
+pub enum RawWire {
+    /// The serialized (credential-free) request about to be sent to the provider.
+    Request {
+        provider_id: String,
+        model_id: String,
+        /// The request body as a string. For providers whose auth rides the URL
+        /// (google/vertex), any key-bearing query parameters are scrubbed first.
+        body: String,
+    },
+    /// A single raw SSE frame as it arrived from the provider, in stream order.
+    ResponseFrame {
+        provider_id: String,
+        model_id: String,
+        /// 0-based index of this frame within the response stream.
+        frame_index: usize,
+        raw_frame: String,
+    },
+    /// The response stream finished. `message_summary` is a short, non-sensitive
+    /// description of the completed message (e.g. content-block kinds / stop reason).
+    ResponseDone {
+        provider_id: String,
+        model_id: String,
+        message_summary: String,
+    },
+}
+
+/// A sink for [`RawWire`] events — opt-in raw-wire observability.
+///
+/// Install via [`StreamConfig::provider_wire_sink`]. When `None` (the default), no
+/// provider constructs or emits any `RawWire` event and behaviour is unchanged.
+///
+/// Implementations MUST be cheap and non-blocking on the hot path; the provider calls
+/// [`ProviderWireSink::on_wire`] inline within its send / stream-decode loop.
+pub trait ProviderWireSink: Send + Sync {
+    /// Receive one raw-wire event. Called inline by the provider; keep it fast.
+    fn on_wire(&self, ev: &RawWire);
+}
+
+/// Strip the query string from a URL so credential-bearing query parameters
+/// (e.g. Google / Vertex `?key=<API_KEY>` or `&key=<API_KEY>`) never reach a
+/// [`ProviderWireSink`]. Everything from the first `?` onward is removed and
+/// replaced with a `?<redacted>` marker so the captured value still reads as a
+/// URL while carrying no secret.
+///
+/// Used by the URL-key providers (google / google_vertex) before constructing a
+/// [`RawWire::Request`]. Header-auth providers (Bearer / x-api-key / api-key) and
+/// SigV4 providers do not put credentials in the URL, but the helper is safe to
+/// apply to any URL.
+pub fn scrub_url_query(url: &str) -> String {
+    match url.split_once('?') {
+        Some((base, _query)) => format!("{base}?<redacted>"),
+        None => url.to_string(),
+    }
+}
+
 /// Configuration for a streaming LLM call
 /*
 ARCHITECTURE: StreamConfig — the "envelope" passed into every provider call
@@ -100,7 +180,10 @@ RUST QUIRK: `Option<u32>` and `Option<f32>` — "nullable" fields
     `Some(v)` → caller explicitly overrides the value
   Python analogy: `max_tokens: int | None = None`
 */
-#[derive(Debug, Clone)]
+// `Debug` is implemented manually (below) because `provider_wire_sink` holds a
+// `dyn ProviderWireSink` trait object, which is not `Debug`. `Clone` stays derived
+// (`Arc<dyn ...>` is `Clone`). The manual impl preserves the public `impl Debug` API.
+#[derive(Clone)]
 pub struct StreamConfig {
     /// Complete provider identity: model id, api_key, base_url, compat flags, cost rates.
     /// All providers read `model_config.id` and `model_config.api_key`; most also read
@@ -121,6 +204,36 @@ pub struct StreamConfig {
     /// foundation model that lacks structured-output support. See the capability matrix
     /// in `docs/specs/developer/provider.md` for per-provider coverage.
     pub response_format: ResponseFormat,
+    /// Opt-in raw-wire observability sink. `None` (the default) means no provider
+    /// constructs or emits any [`RawWire`] event and behaviour is byte-for-byte
+    /// unchanged. When `Some`, each provider invokes the sink with the credential-free
+    /// request body and per-SSE-frame response. See [`ProviderWireSink`].
+    pub provider_wire_sink: Option<Arc<dyn ProviderWireSink>>,
+}
+
+impl fmt::Debug for StreamConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StreamConfig")
+            .field("model_config", &self.model_config)
+            .field("system_prompt", &self.system_prompt)
+            .field("messages", &self.messages)
+            .field("tools", &self.tools)
+            .field("thinking_level", &self.thinking_level)
+            .field("max_tokens", &self.max_tokens)
+            .field("temperature", &self.temperature)
+            .field("cache_config", &self.cache_config)
+            .field("response_format", &self.response_format)
+            // The sink is a `dyn` trait object (not `Debug`); print a placeholder.
+            .field(
+                "provider_wire_sink",
+                &if self.provider_wire_sink.is_some() {
+                    "<sink>"
+                } else {
+                    "None"
+                },
+            )
+            .finish()
+    }
 }
 
 /// Desired output shape for an LLM call.
@@ -599,5 +712,105 @@ mod tests {
         assert!(!is_context_overflow_message("invalid api key"));
         assert!(!is_context_overflow_message("internal server error"));
         assert!(!is_context_overflow_message(""));
+    }
+
+    // --- CC-09a P1: raw-wire sink contract ---
+
+    /// A counting sink used to assert that the default (`None`) sink is inert and that
+    /// a `Some(sink)` is invoked when wired.
+    #[derive(Default)]
+    struct CountingSink {
+        count: std::sync::atomic::AtomicUsize,
+    }
+    impl ProviderWireSink for CountingSink {
+        fn on_wire(&self, _ev: &RawWire) {
+            self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn minimal_stream_config() -> StreamConfig {
+        StreamConfig {
+            model_config: ModelConfig::anthropic("test", "test", "test"),
+            system_prompt: String::new(),
+            messages: vec![Message::user("hi")],
+            tools: vec![],
+            thinking_level: ThinkingLevel::Off,
+            max_tokens: None,
+            temperature: None,
+            cache_config: CacheConfig::default(),
+            response_format: ResponseFormat::Text,
+            provider_wire_sink: None,
+        }
+    }
+
+    #[test]
+    fn test_wire_sink_default_none_is_inert() {
+        // The default-constructed config carries no sink: providers never construct
+        // or emit any RawWire event, so the hot path is unchanged.
+        let config = minimal_stream_config();
+        assert!(config.provider_wire_sink.is_none());
+
+        // Sanity: a wired sink IS invoked when on_wire is called; a None sink is never
+        // reached because the provider guards the call site with `if let Some(sink)`.
+        let sink = Arc::new(CountingSink::default());
+        let ev = RawWire::Request {
+            provider_id: "test".into(),
+            model_id: "test".into(),
+            body: "{}".into(),
+        };
+        if let Some(s) = config.provider_wire_sink.as_ref() {
+            s.on_wire(&ev); // unreachable for the default config
+        }
+        assert_eq!(sink.count.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let wired = StreamConfig {
+            provider_wire_sink: Some(sink.clone()),
+            ..minimal_stream_config()
+        };
+        if let Some(s) = wired.provider_wire_sink.as_ref() {
+            s.on_wire(&ev);
+        }
+        assert_eq!(sink.count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_raw_wire_response_frame_variant_roundtrip() {
+        let ev = RawWire::ResponseFrame {
+            provider_id: "openai_compat".into(),
+            model_id: "openai/gpt-oss-20b".into(),
+            frame_index: 3,
+            raw_frame: "data: {\"choices\":[]}".into(),
+        };
+        match ev {
+            RawWire::ResponseFrame {
+                provider_id,
+                model_id,
+                frame_index,
+                raw_frame,
+            } => {
+                assert_eq!(provider_id, "openai_compat");
+                assert_eq!(model_id, "openai/gpt-oss-20b");
+                assert_eq!(frame_index, 3);
+                assert_eq!(raw_frame, "data: {\"choices\":[]}");
+            }
+            _ => panic!("expected ResponseFrame variant"),
+        }
+    }
+
+    #[test]
+    fn test_stream_config_debug_impl_prints_sink_placeholder() {
+        // None → "None"; Some → "<sink>". The manual Debug impl must keep every other
+        // field debuggable so `format!("{:?}", config)` still compiles everywhere.
+        let none_cfg = minimal_stream_config();
+        let none_dbg = format!("{none_cfg:?}");
+        assert!(none_dbg.contains("StreamConfig"));
+        assert!(none_dbg.contains("provider_wire_sink: \"None\""));
+
+        let some_cfg = StreamConfig {
+            provider_wire_sink: Some(Arc::new(CountingSink::default())),
+            ..minimal_stream_config()
+        };
+        let some_dbg = format!("{some_cfg:?}");
+        assert!(some_dbg.contains("provider_wire_sink: \"<sink>\""));
     }
 }
