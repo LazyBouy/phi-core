@@ -142,6 +142,11 @@ pub struct BasicAgent {
     pub tool_execution: ToolExecutionStrategy,
     pub tool_timeout: Option<std::time::Duration>,
     pub response_format: crate::provider::ResponseFormat,
+    /// Optional raw-wire capture sink, threaded into `AgentLoopConfig` at
+    /// `build_loop_config`. When `Some`, the agent loop emits `RawWire` frames to
+    /// this sink for every provider call. Default `None` (zero overhead). Set via
+    /// [`with_provider_wire_sink`](BasicAgent::with_provider_wire_sink).
+    pub provider_wire_sink: Option<Arc<dyn crate::provider::ProviderWireSink>>,
     pub retry_config: crate::provider::retry::RetryConfig,
 
     // Lifecycle callbacks
@@ -243,6 +248,7 @@ impl BasicAgent {
             tool_execution: ToolExecutionStrategy::default(), // Parallel
             tool_timeout: None,
             response_format: crate::provider::ResponseFormat::Text,
+            provider_wire_sink: None,
             retry_config: crate::provider::retry::RetryConfig::default(), // 3 retries
             before_turn: None,
             after_turn: None,
@@ -395,6 +401,20 @@ impl BasicAgent {
     /// Set the desired LLM output shape. See [`crate::provider::ResponseFormat`].
     pub fn with_response_format(mut self, format: crate::provider::ResponseFormat) -> Self {
         self.response_format = format;
+        self
+    }
+
+    /// Install a raw-wire capture sink. When set, the agent loop emits `RawWire`
+    /// frames (request bytes + per-frame response bytes) to `sink` for every
+    /// provider call — the canonical opt-in path for capturing exact provider wire
+    /// bytes (replay, cost-analysis, debug-tee). Default is no sink (zero overhead).
+    /// See [`crate::provider::ProviderWireSink`] and
+    /// [`AgentLoopConfig::provider_wire_sink`](crate::agent_loop::AgentLoopConfig::provider_wire_sink).
+    pub fn with_provider_wire_sink(
+        mut self,
+        sink: Arc<dyn crate::provider::ProviderWireSink>,
+    ) -> Self {
+        self.provider_wire_sink = Some(sink);
         self
     }
 
@@ -1147,6 +1167,7 @@ impl BasicAgent {
             tool_execution: self.tool_execution.clone(),
             tool_timeout: self.tool_timeout,
             response_format: self.response_format.clone(),
+            provider_wire_sink: self.provider_wire_sink.clone(),
             retry_config: self.retry_config.clone(),
             get_follow_up_messages: Some(Box::new(move || {
                 let mut queue = lock_queue(&follow_up_queue);

@@ -269,6 +269,7 @@ impl AgentTool for SubAgentTool {
             tool_execution: self.tool_execution.clone(),
             tool_timeout: None,
             response_format: crate::provider::ResponseFormat::Text,
+            provider_wire_sink: None,
             retry_config: self.retry_config.clone(),
             before_turn: None,
             after_turn: None,

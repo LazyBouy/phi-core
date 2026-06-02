@@ -278,9 +278,10 @@ pub(super) async fn stream_assistant_response(
             temperature: config.temperature,
             cache_config: config.cache_config.clone(),
             response_format: config.response_format.clone(),
-            // Raw-wire capture is opt-in; default `None` keeps the hot path unchanged.
-            // CC-09b wires a real sink from the daemon-side debug subscriber.
-            provider_wire_sink: None,
+            // Raw-wire capture is opt-in; threads the consumer-supplied sink (default
+            // `None`) from `AgentLoopConfig` into the provider's `StreamConfig` so a
+            // daemon-side debug subscriber can capture exact provider wire bytes.
+            provider_wire_sink: config.provider_wire_sink.clone(),
         };
 
         // Create a fresh channel per attempt — previous stream_rx is dropped when loop continues.

@@ -392,6 +392,7 @@ pub trait Agent: Send {
             tool_execution: self.tool_execution(),
             tool_timeout: self.tool_timeout(),
             response_format: self.response_format(),
+            provider_wire_sink: None,
             retry_config: self.retry_config(),
             before_turn: None,
             after_turn: None,

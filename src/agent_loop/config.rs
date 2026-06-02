@@ -1,6 +1,6 @@
 use crate::context::{ContextConfig, ExecutionLimits};
 use crate::provider::context_translation::ContextTranslationStrategy;
-use crate::provider::{ModelConfig, ResponseFormat, StreamProvider};
+use crate::provider::{ModelConfig, ProviderWireSink, ResponseFormat, StreamProvider};
 use crate::types::*;
 use std::future::Future;
 use std::pin::Pin;
@@ -321,4 +321,17 @@ pub struct AgentLoopConfig {
     /// from providers that support it. See `provider::ResponseFormat` and the
     /// capability matrix in `docs/specs/developer/provider.md`.
     pub response_format: ResponseFormat,
+
+    /// Optional raw-wire capture sink. When `Some`, the agent loop threads it into
+    /// every per-attempt [`StreamConfig`](crate::provider::StreamConfig) so the
+    /// provider emits `RawWire` frames (request bytes + per-frame response bytes)
+    /// to the sink. When `None` (the default), no `RawWire` is produced and the hot
+    /// path is byte-identical to historical behaviour.
+    ///
+    /// Set via [`BasicAgent::with_provider_wire_sink`](crate::agents::BasicAgent::with_provider_wire_sink)
+    /// for the canonical opt-in path; consumers building `AgentLoopConfig` directly
+    /// can populate this field to capture exact provider wire bytes (replay,
+    /// cost-analysis, debug-tee). The sink is wired to `StreamConfig` at
+    /// `streaming.rs`'s per-attempt config build.
+    pub provider_wire_sink: Option<Arc<dyn ProviderWireSink>>,
 }

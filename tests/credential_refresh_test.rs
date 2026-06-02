@@ -134,6 +134,7 @@ fn make_config(
         tool_execution: ToolExecutionStrategy::default(),
         tool_timeout: None,
         response_format: phi_core::provider::ResponseFormat::Text,
+        provider_wire_sink: None,
         retry_config: phi_core::RetryConfig::none(), // exclude RateLimited/Network retries from the count
         before_turn: None,
         after_turn: None,

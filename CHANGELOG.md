@@ -12,6 +12,35 @@ _No unreleased changes._
 
 ---
 
+## [0.11.1] — 2026-06-02
+
+**Patch release (additive / opt-in).** Threads the 0.11.0 `provider_wire_sink`
+capture surface from the consumer down to the provider call so a
+`BasicAgent`/daemon can actually install a sink. Previously the loop-construction
+site (`streaming.rs`) hardcoded `provider_wire_sink: None`, leaving the 0.11.0
+`StreamConfig.provider_wire_sink` field unreachable from any consumer. Additive,
+default-`None`; baby-phi is unaffected and needs no source edits.
+
+### Added
+
+- **`AgentLoopConfig.provider_wire_sink: Option<Arc<dyn ProviderWireSink>>`** —
+  consumer plumbing so a caller can install a raw-wire capture sink that the
+  agent loop threads into every per-attempt `StreamConfig`.
+- **`BasicAgent::with_provider_wire_sink(sink)`** builder setter (mirrors
+  `with_provider_override` / `with_response_format`), plus the corresponding
+  `BasicAgent.provider_wire_sink` field defaulted to `None`. `build_loop_config`
+  propagates it into `AgentLoopConfig`; the `Agent::build_config` default path
+  and `sub_agent.rs` construction set `None`.
+
+### Changed
+
+- **`streaming.rs` wires the consumer sink.** The per-attempt `StreamConfig`
+  build now sets `provider_wire_sink: config.provider_wire_sink.clone()` instead
+  of a hardcoded `None`, so a sink installed via `BasicAgent` (or directly on
+  `AgentLoopConfig`) reaches the provider and fires `ProviderWireSink::on_wire`.
+
+---
+
 ## [0.11.0] — 2026-06-02
 
 **Minor release (additive / opt-in).** Adds an opt-in raw-wire capture surface
