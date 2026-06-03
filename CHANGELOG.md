@@ -12,6 +12,27 @@ _No unreleased changes._
 
 ---
 
+## [0.11.4] — 2026-06-03
+
+**Patch release (host-controlled session identity; surfaced by i-phi e2e testing).**
+
+- **`BasicAgent::with_session_id(impl Into<String>)`** (`agents/basic_agent.rs`).
+  A constructor-time builder setter that seeds the agent's `session_id`, the
+  complement to the existing `Agent::session_id` getter and `rotate_session`
+  (which only rotates to a fresh random id). By default `BasicAgent::new`
+  assigns a random `session_id`; a host that manages session identity
+  externally — e.g. a daemon that issues a session id at session-create time and
+  uses it as the on-disk record key / wire directory — can now make the agent
+  emit its events under THAT id, so the materialized `Session` (and anything
+  keyed on the event `session_id`, like a `SessionStore`) lands under the id the
+  host already handed to its client. Without this the agent's events carried its
+  internal random id and the persisted record was unreachable by the host's
+  external id. General capability (any multi-agent host needs to control session
+  identity); no behavioural change for callers that don't call it. Closes the
+  kernel side of i-phi D-TEST-0020 Bug D.
+
+---
+
 ## [0.11.3] — 2026-06-03
 
 **Patch release (two runtime-correctness fixes surfaced by i-phi e2e testing).**

@@ -486,6 +486,43 @@ async fn test_basic_agent_new_session() {
 }
 
 // ---------------------------------------------------------------------------
+// test_basic_agent_with_session_id_threads_into_events (Bug D / D-TEST-0020)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_basic_agent_with_session_id_threads_into_events() {
+    // A host that seeds the agent's session_id (e.g. a daemon that issued an
+    // external id and uses it as the on-disk record key) must see the
+    // materialized Session keyed under THAT id — otherwise the persisted
+    // record lands under the agent's internal random id, unreachable by the
+    // host's external id.
+    let provider = Arc::new(MockProvider::text("hi"));
+    let mut agent = BasicAgent::new(ModelConfig::anthropic("mock", "mock", "test"))
+        .with_provider_override(provider)
+        .with_session_id("ext-seeded-id-123");
+
+    assert_eq!(
+        agent.session_id(),
+        "ext-seeded-id-123",
+        "with_session_id must seed the getter"
+    );
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    agent.prompt_with_sender("hello", tx).await;
+
+    let mut recorder = SessionRecorder::new(SessionRecorderConfig::default());
+    while let Ok(event) = rx.try_recv() {
+        recorder.on_event(event);
+    }
+    recorder.flush();
+
+    assert!(
+        recorder.get_session("ext-seeded-id-123").is_some(),
+        "the materialized session must be keyed under the seeded external id"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // test_basic_agent_check_and_rotate
 // ---------------------------------------------------------------------------
 

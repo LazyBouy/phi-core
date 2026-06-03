@@ -294,6 +294,28 @@ impl BasicAgent {
         self.session.take()
     }
 
+    /// Seed the agent's `session_id` at construction (builder form).
+    ///
+    /// By default `BasicAgent::new` assigns a fresh random `session_id`
+    /// (`uuid::Uuid::new_v4`). A host that manages session identity externally
+    /// — e.g. a daemon that issues a session id at session-create time and uses
+    /// it as the on-disk record key / wire directory — must be able to make the
+    /// agent emit its events under THAT id, so the materialized [`Session`] (and
+    /// anything keyed on the event `session_id`, like a `SessionStore`) lands
+    /// under the id the host already handed to its client. Without this the
+    /// agent's events carry its internal random id and the persisted record is
+    /// unreachable by the host's external id.
+    ///
+    /// This is the constructor-time complement to the existing
+    /// [`Agent::session_id`] getter and [`Self::rotate_session`] (which only
+    /// rotates to a NEW random id). Call before the first prompt; the id is
+    /// threaded into every emitted [`crate::AgentEvent`] and the per-thread loop
+    /// counters from that point on.
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = session_id.into();
+        self
+    }
+
     /*
     RUST QUIRK: Builder pattern — `mut self` + return `Self`
 
