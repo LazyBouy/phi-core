@@ -1,4 +1,4 @@
-<!-- Last verified: 2026-05-23 by Claude Code -->
+<!-- Last verified: 2026-06-03 by Claude Code -->
 # Composition I — the braking layer
 
 Composition I is phi-core's **opt-in braking layer** [EXISTS]. It lets the
@@ -139,6 +139,30 @@ ctx.build_trunk_context_with_policy(&policy, current_turn)
 
 (`build_trunk_context()` returns the raw walk with no filtering, useful
 for tests and tooling that want the unredacted view.)
+
+## How node markers + annotations reach the model
+
+`node_id` and `tags` live as **metadata** on `LlmMessage`; the `convert_to_llm`
+step strips them before the provider call. So policy-filtering alone does not
+put anything in front of the model — a final weave step bakes the survivors into
+the message **content**:
+
+```rust
+let trunk = ctx.build_trunk_context_with_policy(&policy, current_turn);
+let woven = AgentContext::weave_braking_annotations(trunk);
+```
+
+`weave_braking_annotations` prepends, per trunk message:
+
+- `[n<id>]` — the node marker, so the model can read a valid `step` for
+  `revert_to_state` (the tool's `step` accepts exactly this inline render). Without
+  it the model has no way to know a target node from a cold start.
+- `[<kind>: <text>]` — each surviving `Lesson` / `Finding` / `Outcome` /
+  `Checkpoint` tag, so "the next turn sees the lesson" is literally true.
+
+The agent loop calls this on the revert-mode trunk path only
+(`active_node_id.is_some()`); non-revert consumers are byte-identical (their
+messages carry no `node_id`, so the weave is a pass-through).
 
 ## What 0.8.0 does NOT ship
 

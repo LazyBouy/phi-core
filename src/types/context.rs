@@ -4,6 +4,29 @@ use super::node_tag::NodeId;
 use super::tool::AgentTool;
 use std::sync::Arc;
 
+/// Composition I — prepend a braking marker (`[n<id>] …`) onto a message's
+/// content so it reaches the provider. Prefixes the leading text block when one
+/// exists (the common case for user prompts + tool results); otherwise inserts a
+/// fresh leading text block (e.g. an assistant message whose first block is a
+/// `ToolCall`). Used only by [`AgentContext::weave_braking_annotations`].
+fn prepend_marker_to_message(message: &mut super::content::Message, marker: &str) {
+    use super::content::{Content, Message};
+    let content = match message {
+        Message::User { content, .. }
+        | Message::Assistant { content, .. }
+        | Message::ToolResult { content, .. } => content,
+    };
+    match content.first_mut() {
+        Some(Content::Text { text }) => *text = format!("{marker} {text}"),
+        _ => content.insert(
+            0,
+            Content::Text {
+                text: marker.to_string(),
+            },
+        ),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // In-run context entry (2-stream architecture)
 // ---------------------------------------------------------------------------
@@ -232,6 +255,53 @@ impl AgentContext {
             }
         }
         base
+    }
+
+    /// Composition I — weave node markers + surviving tag annotations into the
+    /// message **content** the model actually sees.
+    ///
+    /// `build_trunk_context[_with_policy]` indexes nodes and filters tags by the
+    /// decay policy, but `node_id` + `tags` live as METADATA on
+    /// [`LlmMessage`](super::agent_message::LlmMessage) that the `convert_to_llm`
+    /// step strips before the provider call. So historically the model saw
+    /// neither the `n<id>` it must echo into `revert_to_state(step=…)` nor the
+    /// lesson/finding summary the tool promises "the next turn sees" — making the
+    /// revert tool unusable from a cold start (it could not know a valid `step`).
+    ///
+    /// This bakes both into the content, in place, so they survive to the wire:
+    /// - each `Llm` message carrying a `node_id` gets a leading `[n<id>]` marker;
+    /// - each surviving [`NodeTag`](super::node_tag::NodeTag) renders right after
+    ///   the marker as `[<kind>: <text>]` (e.g. `[lesson: …]` / `[checkpoint: …]`).
+    ///
+    /// Caller contract: invoke ONLY on the revert-mode trunk path
+    /// (`active_node_id.is_some()`), after `build_trunk_context_with_policy` has
+    /// already decayed out-of-window tags. Messages without a `node_id` pass
+    /// through untouched, so non-revert consumers are byte-identical.
+    pub fn weave_braking_annotations(messages: Vec<AgentMessage>) -> Vec<AgentMessage> {
+        use super::node_tag::TagKind;
+        messages
+            .into_iter()
+            .map(|m| match m {
+                AgentMessage::Llm(mut lm) => {
+                    let Some(node_id) = lm.node_id else {
+                        return AgentMessage::Llm(lm);
+                    };
+                    let mut marker = format!("[{}]", node_id.render());
+                    for tag in &lm.tags {
+                        let kind = match tag.kind {
+                            TagKind::Lesson => "lesson",
+                            TagKind::Finding => "finding",
+                            TagKind::Outcome => "outcome",
+                            TagKind::Checkpoint => "checkpoint",
+                        };
+                        marker.push_str(&format!(" [{}: {}]", kind, tag.text));
+                    }
+                    prepend_marker_to_message(&mut lm.message, &marker);
+                    AgentMessage::Llm(lm)
+                }
+                other => other,
+            })
+            .collect()
     }
 
     /// Composition I — parent-chain assembly.
@@ -678,5 +748,69 @@ mod build_trunk_context_tests {
             })
             .sum::<usize>();
         assert_eq!(original_tags, 1);
+    }
+
+    // ── D-TEST-0036 — braking annotations woven into model-visible content ──
+
+    fn first_text(m: &AgentMessage) -> String {
+        match m {
+            AgentMessage::Llm(lm) => match &lm.message {
+                Message::User { content, .. }
+                | Message::Assistant { content, .. }
+                | Message::ToolResult { content, .. } => content
+                    .iter()
+                    .find_map(|c| match c {
+                        Content::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default(),
+            },
+            _ => String::new(),
+        }
+    }
+
+    #[test]
+    fn weave_braking_annotations_renders_marker_and_tags_into_content() {
+        // A trunk node with a Lesson tag → content must carry BOTH the `[n7]`
+        // marker (so the model can target it via revert step) AND the lesson
+        // text (so "the next turn sees the lesson" — the tool's promise).
+        let mut am = assistant("explored the npm path", 1, NodeId(7), None);
+        if let AgentMessage::Llm(lm) = &mut am {
+            lm.tags
+                .push(tag(TagKind::Lesson, 0, "npm is denied; do not retry"));
+        }
+        let woven = AgentContext::weave_braking_annotations(vec![am]);
+        let text = first_text(&woven[0]);
+        assert!(text.starts_with("[n7]"), "marker missing: {text}");
+        assert!(
+            text.contains("[lesson: npm is denied; do not retry]"),
+            "lesson annotation missing: {text}"
+        );
+        assert!(
+            text.contains("explored the npm path"),
+            "original content lost: {text}"
+        );
+    }
+
+    #[test]
+    fn weave_braking_annotations_marks_untagged_nodes() {
+        // No tags → still gets the `[n3]` marker (cold-start addressability).
+        let am = user("state your name", 1, NodeId(3), None);
+        let woven = AgentContext::weave_braking_annotations(vec![am]);
+        let text = first_text(&woven[0]);
+        assert_eq!(text, "[n3] state your name");
+    }
+
+    #[test]
+    fn weave_braking_annotations_passes_through_nodeless_messages() {
+        // A message with no node_id (non-revert metadata) is byte-identical.
+        let am = AgentMessage::Llm(LlmMessage::new(Message::User {
+            content: vec![Content::Text {
+                text: "no node here".into(),
+            }],
+            timestamp: 1,
+        }));
+        let woven = AgentContext::weave_braking_annotations(vec![am]);
+        assert_eq!(first_text(&woven[0]), "no node here");
     }
 }

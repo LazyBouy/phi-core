@@ -146,7 +146,14 @@ pub(super) async fn stream_assistant_response(
     // policy field has no effect — `build_working_context` takes its linear
     // path which is byte-identical to pre-0.10 behaviour.
     let base_messages = if context.active_node_id.is_some() {
-        context.build_trunk_context_with_policy(&config.revert_render_policy, turn_index)
+        // Revert mode: assemble the active trunk + decay tags by policy, then
+        // weave the `[n<id>]` markers + surviving lesson/finding annotations into
+        // the content so the model can actually SEE them (and thus supply a valid
+        // `revert_to_state(step=…)`). Metadata-only node_id/tags are stripped at
+        // convert_to_llm; this bakes them into content first. (D-TEST-0036)
+        let trunk =
+            context.build_trunk_context_with_policy(&config.revert_render_policy, turn_index);
+        AgentContext::weave_braking_annotations(trunk)
     } else {
         context.build_working_context()
     };

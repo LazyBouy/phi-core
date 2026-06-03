@@ -12,6 +12,34 @@ _No unreleased changes._
 
 ---
 
+## [0.11.3] — 2026-06-03
+
+**Patch release (two runtime-correctness fixes surfaced by i-phi e2e testing).**
+
+- **Harmony tool-call name sanitization** (`provider/openai_compat.rs`). Some
+  providers (observed: OpenRouter's gpt-oss / harmony-format conversion) leak a
+  model-format control token into the structured `function.name` field — e.g.
+  `"name":"repo_facts<|channel|>commentary"`. The contaminated name then fails
+  tool-registry dispatch and any consumer permission-rule match, breaking tool
+  calls intermittently for harmony-format models. The streamed tool-call name is
+  now truncated at the first `<|` control-token delimiter (`sanitize_tool_name`)
+  before it reaches the tool registry / `Content::ToolCall`. Clean names (no
+  `<|`) are unchanged. (i-phi D-TEST-0038)
+
+- **Composition I braking annotations reach the model** (`types/context.rs`,
+  `agent_loop/streaming.rs`). `revert_to_state`'s `step` requires a node id
+  (`n<id>`), and the render policy decides which `Lesson`/`Finding` tags survive
+  — but `node_id` and `tags` lived as metadata that `convert_to_llm` stripped, so
+  the model saw **neither** the node markers it must echo into `step` **nor** the
+  lesson summaries the tool promises "the next turn sees". The revert tool was
+  therefore unusable from a cold start. New `AgentContext::weave_braking_annotations`
+  bakes `[n<id>]` markers + surviving `[<kind>: <text>]` tag annotations into the
+  message **content** on the revert-mode trunk path (`active_node_id.is_some()`).
+  Non-revert consumers are byte-identical (their messages carry no `node_id`, so
+  the weave is a pass-through). (i-phi D-TEST-0036)
+
+---
+
 ## [0.11.2] — 2026-06-03
 
 **Minor release (breaking-but-tiny hook-return flip).** The `before_tool_execution`

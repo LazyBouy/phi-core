@@ -331,11 +331,15 @@ impl StreamProvider for OpenAiCompatProvider {
                                         }
                                         if let Some(f) = &tc.function {
                                             if let Some(name) = &f.name {
-                                                buf.name.clone_from(name);
+                                                // Sanitize harmony/control-token contamination (e.g.
+                                                // gpt-oss `repo_facts<|channel|>commentary`) so the
+                                                // tool registry + permission layer see the canonical
+                                                // name. See `sanitize_tool_name`.
+                                                buf.name = sanitize_tool_name(name);
                                                 let _ = tx.send(StreamEvent::ToolCallStart {
                                                     content_index: content.len() + tc_index,
                                                     id: buf.id.clone(),
-                                                    name: name.clone(),
+                                                    name: buf.name.clone(),
                                                 });
                                             }
                                             if let Some(args) = &f.arguments {
@@ -469,6 +473,23 @@ struct ToolCallBuffer {
     id: String,        // tool call ID (arrives once, in the first chunk for this index)
     name: String,      // function name (arrives once)
     arguments: String, // JSON arguments (accumulated across many chunks)
+}
+
+/// Strip harmony / control-token contamination from a tool-call function name.
+///
+/// Some providers leak model-format control tokens into the *structured*
+/// `function.name` field. The observed case: OpenRouter's gpt-oss (harmony
+/// format) conversion returns `"name":"repo_facts<|channel|>commentary"` — the
+/// trailing `<|channel|>commentary` harmony control token is packed into the
+/// name. A legitimate OpenAI-style function name matches `[A-Za-z0-9_-]{1,64}`
+/// and never contains the harmony control-token delimiter `<|`, so we truncate
+/// at the first `<|` and trim surrounding whitespace. This yields the canonical
+/// name the tool registry + any consumer permission layer expect; without it a
+/// contaminated name fails tool dispatch / permission-rule matching.
+///
+/// Defensive + provider-agnostic: a clean name (no `<|`) is returned unchanged.
+fn sanitize_tool_name(raw: &str) -> String {
+    raw.split("<|").next().unwrap_or(raw).trim().to_string()
 }
 
 /// Builds the JSON request body for the OpenAI Chat Completions API.
@@ -986,5 +1007,29 @@ mod tests {
         let tool_msg = msgs.last().unwrap();
         // Text-only: content should be a plain string
         assert_eq!(tool_msg["content"], "hello");
+    }
+
+    #[test]
+    fn test_sanitize_tool_name_strips_harmony_channel_token() {
+        // Regression for the gpt-oss / harmony leak: OpenRouter returned
+        // `"name":"repo_facts<|channel|>commentary"` in the structured
+        // function.name field; the harmony control token must be stripped so
+        // the tool registry + permission layer see the canonical `repo_facts`.
+        assert_eq!(
+            sanitize_tool_name("repo_facts<|channel|>commentary"),
+            "repo_facts"
+        );
+        // Other harmony control tokens (analysis/final/constrain) are truncated
+        // at the first `<|` delimiter regardless of which token follows.
+        assert_eq!(sanitize_tool_name("bash<|channel|>analysis"), "bash");
+        assert_eq!(
+            sanitize_tool_name("read_file<|constrain|>json"),
+            "read_file"
+        );
+        // Clean names pass through unchanged (no `<|` ⇒ no truncation).
+        assert_eq!(sanitize_tool_name("repo_facts"), "repo_facts");
+        assert_eq!(sanitize_tool_name("write_file"), "write_file");
+        // Surrounding whitespace is trimmed.
+        assert_eq!(sanitize_tool_name("  bash  "), "bash");
     }
 }
