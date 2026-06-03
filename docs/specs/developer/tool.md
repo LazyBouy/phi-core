@@ -1,4 +1,4 @@
-<!-- Last verified: 2026-04-05 by Claude Code -->
+<!-- Last verified: 2026-06-03 by Claude Code (CC-10a: before_tool_execution returns ToolGate { Allow, Deny { reason } }; denied tool_result carries the reason) -->
 # Tool System
 
 The tool system defines how agents interact with the external world. Every capability an agent has -- running shell commands, reading files, calling APIs, delegating to sub-agents -- is expressed as a tool implementing the `AgentTool` trait. The agent loop discovers tools by name from a registry, executes them with lifecycle events, and feeds results back to the LLM.
@@ -145,12 +145,12 @@ Lifecycle hooks that fire around tool execution. All are `Option<Arc<dyn Fn(...)
 
 | Hook | Signature | Status | Fires When |
 |------|-----------|--------|------------|
-| `before_tool_execution` | `(tool_name, tool_call_id, args) -> bool` | [EXISTS] | Before `ToolExecutionStart`; return `false` to skip the call |
+| `before_tool_execution` | `(tool_name, tool_call_id, args) -> ToolGate` | [EXISTS] | Before `ToolExecutionStart`; return `ToolGate::Deny { reason }` to skip the call (the `reason` becomes the synthetic `tool_result` text), or `ToolGate::Allow` to run it |
 | `after_tool_execution` | `(tool_name, tool_call_id, is_error)` | [EXISTS] | After `ToolExecutionEnd` |
 | `before_tool_execution_update` | `(tool_name, tool_call_id, text) -> bool` | [EXISTS] | Before each `ToolExecutionUpdate`; return `false` to suppress the event |
 | `after_tool_execution_update` | `(tool_name, tool_call_id, text)` | [EXISTS] | After each `ToolExecutionUpdate` (only if not suppressed) |
 
-**Hook ordering**: Hooks fire strictly before their paired event is emitted. When `before_tool_execution` returns `false`, no `ToolExecutionStart`/`End` events are emitted; a synthetic error `ToolResult` is sent to the LLM so it knows the call was skipped.
+**Hook ordering**: Hooks fire strictly before their paired event is emitted. When `before_tool_execution` returns `ToolGate::Deny { reason }`, no `ToolExecutionStart`/`End` events are emitted; a synthetic error `ToolResult` carrying the supplied `reason` is sent to the LLM so it learns *why* the call was blocked and can self-correct. (Since 0.11.2 the hook returns `ToolGate { Allow, Deny { reason } }` instead of `bool`; a caller with no specific reason may pass `ToolGate::DEFAULT_DENY_REASON`, the historical opaque string.)
 
 ---
 

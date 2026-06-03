@@ -1,4 +1,4 @@
-<!-- Last verified: 2026-05-16 by Claude Code -->
+<!-- Last verified: 2026-06-03 by Claude Code (CC-10a: before_tool_execution signature bool → ToolGate) -->
 # phi-core — System Architecture
 
 ## 1. Component Map
@@ -870,7 +870,7 @@ All fields on `Agent`:
 | `last_loop_id` | `Option<String>` | `loop_id` of the most recently started loop; set after each `prompt_*` or `continue_loop_*` call. Becomes `parent_loop_id` on the next continuation. |
 | `before_loop` | `Option<BeforeLoopFn>` | Hook called once before `AgentStart`. Signature: `fn(&[AgentMessage], loop_index: usize) -> bool`; return `false` to abort before `AgentStart`. |
 | `after_loop` | `Option<AfterLoopFn>` | Hook called once after `AgentEnd`. Signature: `fn(&[AgentMessage], &Usage)`. |
-| `before_tool_execution` | `Option<BeforeToolExecutionFn>` | Hook called before each `ToolExecutionStart`. Signature: `fn(&str, &str, &JSON) -> bool` (tool_name, call_id, args); return `false` to skip. |
+| `before_tool_execution` | `Option<BeforeToolExecutionFn>` | Hook called before each `ToolExecutionStart`. Signature: `fn(&str, &str, &JSON) -> ToolGate` (tool_name, call_id, args); return `ToolGate::Deny { reason }` to skip (the `reason` becomes the synthetic `tool_result` text) or `ToolGate::Allow` to run. |
 | `after_tool_execution` | `Option<AfterToolExecutionFn>` | Hook called after each `ToolExecutionEnd`. Signature: `fn(&str, &str, bool)` (tool_name, call_id, is_error). |
 | `before_tool_execution_update` | `Option<BeforeToolExecutionUpdateFn>` | Hook called before each `ToolExecutionUpdate`. Signature: `fn(&str, &str, &str) -> bool` (tool_name, call_id, text); return `false` to suppress the event. |
 | `after_tool_execution_update` | `Option<AfterToolExecutionUpdateFn>` | Hook called after each `ToolExecutionUpdate` (only when not suppressed). Signature: `fn(&str, &str, &str)`. |

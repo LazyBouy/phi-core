@@ -6,6 +6,7 @@
 use super::reference::{parse_config_ref, ConfigRef};
 use super::schema::AgentConfig;
 use crate::agent_loop::script_callback::{is_script_path, ScriptCallback};
+use crate::agent_loop::ToolGate;
 use crate::agents::system_prompt::{CustomPromptStrategy, PromptBlockDef, SystemPrompt};
 use crate::agents::{Agent, AgentProfile, BasicAgent};
 use crate::context::{CompactionConfig, CompactionScope, ContextConfig, ExecutionLimits};
@@ -906,7 +907,15 @@ fn wire_script_callbacks(
                     .ok()
                     .and_then(|v| v.get("allow").and_then(|a| a.as_bool()))
                     .unwrap_or(true);
-                Box::pin(async move { allow })
+                // The script hook protocol only carries `allow: bool` today; a
+                // denial maps to the documented default reason (reason-from-script
+                // is a future additive extension).
+                let gate = if allow {
+                    ToolGate::Allow
+                } else {
+                    ToolGate::deny(ToolGate::DEFAULT_DENY_REASON)
+                };
+                Box::pin(async move { gate })
             })));
         }
     }

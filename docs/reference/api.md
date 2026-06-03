@@ -1,4 +1,4 @@
-<!-- Last verified: 2026-05-16 by Claude Code -->
+<!-- Last verified: 2026-06-03 by Claude Code (CC-10a: on_before_tool_execution return bool → ToolGate) -->
 # API Reference
 
 ## Top-Level Functions
@@ -132,7 +132,7 @@ All return `Self` for chaining (unless noted as `Result`).
 | `on_before_turn(f: Fn(&[AgentMessage], usize) -> bool) -> Self` | Called before each LLM call; return `false` to abort |
 | `on_after_turn(f: Fn(&[AgentMessage], &Usage)) -> Self` | Called after each LLM response and tool execution |
 | `on_error(f: Fn(&str)) -> Self` | Called when the LLM returns `StopReason::Error` |
-| `on_before_tool_execution(f: Fn(&str, &str, &Value) -> bool) -> Self` | Called before each tool call `(name, call_id, args)`; return `false` to skip |
+| `on_before_tool_execution(f: Fn(&str, &str, &Value) -> ToolGate) -> Self` | Called before each tool call `(name, call_id, args)`; return `ToolGate::Deny { reason }` to skip (the `reason` becomes the synthetic `tool_result` text) or `ToolGate::Allow` to run |
 | `on_after_tool_execution(f: Fn(&str, &str, bool)) -> Self` | Called after each tool call `(name, call_id, is_error)` |
 | `on_before_tool_execution_update(f: Fn(&str, &str, &str) -> bool) -> Self` | Called before each streaming tool update `(name, call_id, text)`; return `false` to suppress the event |
 | `on_after_tool_execution_update(f: Fn(&str, &str, &str)) -> Self` | Called after each streaming tool update `(name, call_id, text)` |

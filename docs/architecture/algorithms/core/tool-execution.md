@@ -1,4 +1,4 @@
-<!-- Last verified: 2026-04-05 by Claude Code -->
+<!-- Last verified: 2026-06-03 by Claude Code (CC-10a / phi-core 0.11.2 — before_tool_execution returns ToolGate { Allow, Deny { reason } }; denied tool_result carries the reason; no ToolExecutionStart/End on deny) -->
 
 > For pseudocode conventions, see the [README](../README.md#pseudocode-conventions).
 ### `execute_tool_calls` *(src/agent_loop/)*
@@ -141,16 +141,19 @@ FUNCTION execute_single_tool(
   tool ← find tool WHERE tool.name() == name  // may be None
 
   // ── before_tool_execution hook ───────────────────────────────────────────
-  // Return false to skip this tool call entirely.
+  // Returns ToolGate { Allow, Deny { reason } } (0.11.2; was bool).
+  // Deny { reason } skips this tool call entirely and puts `reason` into the
+  // synthetic error ToolResult, so the LLM learns *why* the call was blocked.
   IF config.before_tool_execution defined THEN
-    IF NOT before_tool_execution(name, id, args) THEN
-      // Emit a skipped error result so the LLM knows the call did not run
-      skip_result ← ToolResult{ content: [Text("Tool call skipped by before_tool_execution hook")], is_error: true }
-      EMIT ToolExecutionEnd(id, name, skip_result, is_error=true, child_loop_id=None)
-      msg ← Message::ToolResult{ ..., is_error: true }
-      EMIT MessageStart(msg); EMIT MessageEnd(msg)
-      RETURN (msg, true)
-    END IF
+    MATCH before_tool_execution(name, id, args):
+      Deny { reason } →
+        // Emit a skipped error result carrying the supplied reason. No
+        // ToolExecutionStart/End is emitted for a denied call.
+        msg ← Message::ToolResult{ content: [Text(reason)], is_error: true }
+        EMIT MessageStart(msg); EMIT MessageEnd(msg)
+        RETURN (msg, true)
+      Allow → (fall through and run the tool)
+    END MATCH
   END IF
 
   EMIT ToolExecutionStart(tool_call_id=id, tool_name=name, args)

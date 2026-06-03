@@ -1,4 +1,4 @@
-<!-- Last verified: 2026-05-24 by Claude Code (phi-core 0.9.0 — 9 of 11 lifecycle Fns are now async; tool-update hooks intentionally stay sync) -->
+<!-- Last verified: 2026-06-03 by Claude Code (CC-10a / phi-core 0.11.2 — before_tool_execution returns ToolGate { Allow, Deny { reason } }; denied tool_result carries the reason) -->
 # Lifecycle Callbacks
 
 phi-core provides four tiers of lifecycle callbacks that let you observe and control the agent loop without modifying its internals. Loop-level, turn-level, and tool-level callbacks are set on `AgentLoopConfig` (or via `Agent` builder methods). Session-level callbacks (`before_task` / `after_task`) are set on `SessionRecorderConfig`.
@@ -105,14 +105,22 @@ let agent = BasicAgent::new(ModelConfig::anthropic("claude-sonnet-4-20250514", "
 
 ### `before_tool_execution`
 
-Called before each tool starts, after the `ToolExecutionStart` event would normally emit. Receives the tool name, call ID, and arguments. Return `false` to skip the tool — a `ToolExecutionEnd` with an error result is emitted and the tool's `execute()` is never called.
+Called before each tool starts, after the `ToolExecutionStart` event would normally emit. Receives the tool name, call ID, and arguments. Return `ToolGate::Deny { reason }` to skip the tool — a synthetic error `ToolResult` carrying `reason` is emitted (so the model learns *why* the call was blocked and can self-correct) and the tool's `execute()` is never called; return `ToolGate::Allow` to run it.
+
+> Since 0.11.2 the hook returns `ToolGate { Allow, Deny { reason } }` instead of `bool` (`true → Allow`, `false → Deny { reason }`). A caller with no specific reason may pass `ToolGate::DEFAULT_DENY_REASON` (the historical opaque skip string).
 
 ```rust
+use phi_core::agent_loop::ToolGate;
+
 let agent = BasicAgent::new(ModelConfig::anthropic("claude-sonnet-4-20250514", "Claude Sonnet 4", &api_key))
     .on_before_tool_execution(|name, call_id, _args| {
         println!("About to run tool: {}", name);
-        // Return false to block specific tools:
-        name != "bash" // block bash, allow everything else
+        // Block specific tools with a reason the model can read:
+        if name == "bash" {
+            ToolGate::deny("bash is not allowed for this agent")
+        } else {
+            ToolGate::Allow
+        }
     });
 ```
 
@@ -207,12 +215,12 @@ after_loop
 
 ### Short-Circuit Rules
 
-| Hook returns `false` | Effect |
+| Hook returns the abort verdict | Effect |
 |---|---|
-| `before_loop` | Aborts before `AgentStart`; emits `AgentEnd(messages=[])` |
-| `before_turn` | Skips turn; neither `TurnStart` nor `TurnEnd` is emitted |
-| `before_tool_execution` | Skips tool; emits error `ToolExecutionEnd` without calling `execute()` |
-| `before_tool_execution_update` | Suppresses `ToolExecutionUpdate`; tool keeps running; `ToolResult` unaffected |
+| `before_loop` (`false`) | Aborts before `AgentStart`; emits `AgentEnd(messages=[])` |
+| `before_turn` (`false`) | Skips turn; neither `TurnStart` nor `TurnEnd` is emitted |
+| `before_tool_execution` (`ToolGate::Deny { reason }`) | Skips tool; synthesises an error `ToolResult` carrying `reason` (no `ToolExecutionStart`/`End`) without calling `execute()` |
+| `before_tool_execution_update` (`false`) | Suppresses `ToolExecutionUpdate`; tool keeps running; `ToolResult` unaffected |
 
 ---
 
@@ -277,6 +285,8 @@ When the token is cancelled:
 All callbacks are optional and independent:
 
 ```rust
+use phi_core::agent_loop::ToolGate;
+
 let agent = BasicAgent::new(ModelConfig::anthropic("claude-sonnet-4-20250514", "Claude Sonnet 4", &api_key))
     .on_before_loop(|_msgs, _| true)
     .on_after_loop(|msgs, usage| {
@@ -289,7 +299,7 @@ let agent = BasicAgent::new(ModelConfig::anthropic("claude-sonnet-4-20250514", "
     .on_error(|err| eprintln!("Error: {}", err))
     .on_before_tool_execution(|name, _id, _args| {
         println!("Running: {}", name);
-        true
+        ToolGate::Allow
     })
     .on_after_tool_execution(|name, _id, is_error| {
         println!("Tool {} finished (error={})", name, is_error);
@@ -304,7 +314,7 @@ For direct loop usage without the `Agent` wrapper:
 
 ```rust
 use std::sync::Arc;
-use phi_core::agent_loop::AgentLoopConfig;
+use phi_core::agent_loop::{AgentLoopConfig, ToolGate};
 use phi_core::provider::ModelConfig;
 
 let config = AgentLoopConfig {
@@ -317,7 +327,7 @@ let config = AgentLoopConfig {
     after_turn: Some(Arc::new(|_msgs, _usage| { /* log */ })),
     on_error: Some(Arc::new(|err| eprintln!("{}", err))),
     // Tool-level
-    before_tool_execution: Some(Arc::new(|name, id, args| true)),
+    before_tool_execution: Some(Arc::new(|name, id, args| ToolGate::Allow)),
     after_tool_execution: Some(Arc::new(|name, id, is_error| {})),
     before_tool_execution_update: Some(Arc::new(|name, id, text| true)),
     after_tool_execution_update: Some(Arc::new(|name, id, text| {})),

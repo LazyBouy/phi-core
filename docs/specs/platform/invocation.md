@@ -1,4 +1,4 @@
-<!-- Last verified: 2026-04-05 by Claude Code -->
+<!-- Last verified: 2026-06-03 by Claude Code (CC-10a: before_tool_execution skip semantic bool → ToolGate::Deny { reason }) -->
 # Invocation Layer
 
 > **Scope note:** The invocation layer is split between phi-core (library-level config parsing and agent construction) and baby-phi (platform-level UI, CLI adapter, WASM plugins). This spec covers the full vision; the phi-core portion is largely implemented.
@@ -255,7 +255,7 @@ Initially: references to built-in callback identifiers. Phase 2: WASM plugin ref
 | `after_turn` | string | `null` | `[Code-only: Phase 2]` After each LLM turn. |
 | `before_loop` | string | `null` | `[Code-only: Phase 2]` Before agent loop starts. Return false to abort. |
 | `after_loop` | string | `null` | `[Code-only: Phase 2]` After agent loop ends. |
-| `before_tool_execution` | string | `null` | `[Code-only: Phase 2]` Before each tool call. Return false to skip. |
+| `before_tool_execution` | string | `null` | `[Code-only: Phase 2]` Before each tool call. Return `ToolGate::Deny { reason }` to skip (the reason reaches the model's `tool_result`) or `ToolGate::Allow` to run. |
 | `after_tool_execution` | string | `null` | `[Code-only: Phase 2]` After each tool call. |
 | `before_tool_execution_update` | string | `null` | `[Code-only: Phase 2]` Before each streaming tool update. |
 | `after_tool_execution_update` | string | `null` | `[Code-only: Phase 2]` After each streaming tool update. |

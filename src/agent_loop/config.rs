@@ -78,15 +78,61 @@ pub type AfterTurnFn =
     Arc<dyn for<'a> Fn(&'a [AgentMessage], &'a Usage) -> HookFuture<'a, ()> + Send + Sync>;
 
 // ── Tool execution hooks ─────────────────────────────────────────────────────
+/// Verdict returned by [`BeforeToolExecutionFn`] for a single tool call.
+///
+/// `Allow` runs the tool normally. `Deny { reason }` skips the tool call and
+/// synthesises an error `ToolResult` whose text is the supplied `reason`, so the
+/// model is told **why** the call was blocked and can self-correct instead of
+/// re-trying the blocked tool. A caller that has no specific reason may pass the
+/// documented default [`ToolGate::DEFAULT_DENY_REASON`] (the historical opaque
+/// string) — e.g. via [`ToolGate::deny`] with that literal.
+///
+/// 0.11.2: replaces the previous `-> bool` return (`true → Allow`,
+/// `false → Deny { reason }`). The enum is intentionally additive-friendly:
+/// future verdict variants (e.g. `Defer`, `AskUser`) extend it without another
+/// signature break.
+#[derive(Debug, Clone)]
+pub enum ToolGate {
+    /// Run the tool call normally.
+    Allow,
+    /// Skip the tool call; `reason` becomes the synthetic error `ToolResult` text.
+    Deny {
+        /// Human-/model-readable explanation of why the tool was blocked.
+        reason: String,
+    },
+}
+
+impl ToolGate {
+    /// The historical opaque deny string, preserved as the documented default a
+    /// caller MAY pass when it has no specific reason. Before 0.11.2 this was the
+    /// only text a blocked tool's `ToolResult` could carry.
+    pub const DEFAULT_DENY_REASON: &'static str =
+        "Tool execution skipped by before_tool_execution hook.";
+
+    /// Construct a `Deny` verdict carrying `reason`.
+    ///
+    /// Pass [`ToolGate::DEFAULT_DENY_REASON`] for the historical opaque string.
+    pub fn deny(reason: impl Into<String>) -> Self {
+        ToolGate::Deny {
+            reason: reason.into(),
+        }
+    }
+}
+
 /// Called before each tool call (before `ToolExecutionStart` is emitted).
 ///
 /// Arguments: `(tool_name, tool_call_id, args)`.
-/// Return `false` to skip the call: an error `ToolResult` is synthesised so the LLM still
-/// receives a response, but `ToolExecutionStart`/`End` are **not** emitted.
+/// Return [`ToolGate::Allow`] to run the tool, or [`ToolGate::Deny`] `{ reason }`
+/// to skip the call: an error `ToolResult` carrying `reason` is synthesised so the
+/// LLM still receives a response (and learns why the tool was blocked), but
+/// `ToolExecutionStart`/`End` are **not** emitted.
 ///
-/// 0.9.0: async hook.
+/// 0.9.0: async hook. 0.11.2: return type `bool → ToolGate`
+/// (`true → Allow`, `false → Deny { reason }`).
 pub type BeforeToolExecutionFn = Arc<
-    dyn for<'a> Fn(&'a str, &'a str, &'a serde_json::Value) -> HookFuture<'a, bool> + Send + Sync,
+    dyn for<'a> Fn(&'a str, &'a str, &'a serde_json::Value) -> HookFuture<'a, ToolGate>
+        + Send
+        + Sync,
 >;
 /// Called after each tool call (after `ToolExecutionEnd` is emitted).
 ///

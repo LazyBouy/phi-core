@@ -248,13 +248,12 @@ pub(super) async fn execute_single_tool(
     // We use it directly — if None, we return a "tool not found" error result below.
     let tool = tools.iter().find(|t| t.name() == name);
 
-    // before_tool_execution hook — false skips this tool call entirely
+    // before_tool_execution hook — Deny skips this tool call entirely and the
+    // Deny reason becomes the synthetic ToolResult text (the model is told why).
     if let Some(ref hook) = config.before_tool_execution {
-        if !hook(name, id, args).await {
+        if let ToolGate::Deny { reason } = hook(name, id, args).await {
             let skipped_result = ToolResult {
-                content: vec![Content::Text {
-                    text: "Tool execution skipped by before_tool_execution hook.".to_string(),
-                }],
+                content: vec![Content::Text { text: reason }],
                 details: serde_json::Value::Null,
                 child_loop_id: None,
             };

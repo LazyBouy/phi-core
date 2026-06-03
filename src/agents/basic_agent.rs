@@ -10,7 +10,7 @@ use crate::agent_loop::{
     agent_loop, agent_loop_continue, AfterCompactionEndFn, AfterLoopFn, AfterToolExecutionFn,
     AfterToolExecutionUpdateFn, AfterTurnFn, AgentLoopConfig, BeforeCompactionStartFn,
     BeforeLoopFn, BeforeToolExecutionFn, BeforeToolExecutionUpdateFn, BeforeTurnFn, ConvertToLlmFn,
-    OnErrorFn, TransformContextFn,
+    OnErrorFn, ToolGate, TransformContextFn,
 };
 use crate::context::{CompactionStrategy, ContextConfig, ExecutionLimits};
 use crate::mcp::{McpClient, McpError, McpToolAdapter};
@@ -597,10 +597,12 @@ impl BasicAgent {
         self
     }
 
-    /// Set the before-tool-execution hook. Return `false` to skip the tool call.
+    /// Set the before-tool-execution hook. Return [`ToolGate::Allow`] to run the
+    /// tool, or [`ToolGate::Deny`] `{ reason }` to skip it (the reason becomes the
+    /// synthetic `ToolResult` text the model sees).
     pub fn on_before_tool_execution(
         mut self,
-        f: impl Fn(&str, &str, &serde_json::Value) -> bool + Send + Sync + 'static,
+        f: impl Fn(&str, &str, &serde_json::Value) -> ToolGate + Send + Sync + 'static,
     ) -> Self {
         self.before_tool_execution = Some(Arc::new(move |name, id, args| {
             let r = f(name, id, args);

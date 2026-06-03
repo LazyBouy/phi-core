@@ -3,7 +3,9 @@
 use phi_core::agent_loop::evaluation::{
     ElaborateEvaluation, PickFirstEvaluation, TokenEfficientEvaluation, TransparentEvaluation,
 };
-use phi_core::agent_loop::{agent_loop, agent_loop_continue, agent_loop_parallel, AgentLoopConfig};
+use phi_core::agent_loop::{
+    agent_loop, agent_loop_continue, agent_loop_parallel, AgentLoopConfig, ToolGate,
+};
 use phi_core::provider::mock::*;
 use phi_core::provider::{MockProvider, ModelConfig};
 use phi_core::*;
@@ -3569,7 +3571,7 @@ fn test_new_builder_methods_compile() {
         .with_config_id("test-config")
         .on_before_loop(|_msgs, _n| true)
         .on_after_loop(|_msgs, _usage| {})
-        .on_before_tool_execution(|_name, _id, _args| true)
+        .on_before_tool_execution(|_name, _id, _args| ToolGate::Allow)
         .on_after_tool_execution(|_name, _id, _error| {})
         .on_before_tool_execution_update(|_name, _id, _text| true)
         .on_after_tool_execution_update(|_name, _id, _text| {})
@@ -3676,7 +3678,7 @@ async fn test_tool_execution_hooks_fire() {
     let mut config = make_config(provider);
     config.before_tool_execution = Some(Arc::new(move |_name, _id, _args| {
         before_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-        Box::pin(async move { true })
+        Box::pin(async move { ToolGate::Allow })
     }));
     config.after_tool_execution = Some(Arc::new(move |_name, _id, _err| {
         after_clone.store(true, std::sync::atomic::Ordering::SeqCst);

@@ -1,4 +1,4 @@
-<!-- Last verified: 2026-04-05 by Claude Code -->
+<!-- Last verified: 2026-06-03 by Claude Code (CC-10a: before_tool_execution returns ToolGate { Allow, Deny { reason } } instead of bool) -->
 # Configuration
 
 Configuration controls agent behavior at three levels: context management (`ContextConfig`), execution safety (`ExecutionLimits`), and the unified loop config (`AgentLoopConfig`) that bundles model, hooks, compaction, limits, caching, retry, and filters into a single borrowed struct for each `agent_loop` call.
@@ -167,7 +167,7 @@ All static settings for a single `agent_loop` / `agent_loop_continue` call. Borr
 
 | Field | Type | Status | Description |
 |-------|------|--------|-------------|
-| `before_tool_execution` | `Option<BeforeToolExecutionFn>` | [EXISTS] | `(tool_name, tool_call_id, args) -> bool`; return `false` to skip |
+| `before_tool_execution` | `Option<BeforeToolExecutionFn>` | [EXISTS] | `(tool_name, tool_call_id, args) -> ToolGate { Allow, Deny { reason } }`; return `Deny { reason }` to skip (the `reason` becomes the synthetic `tool_result` text) |
 | `after_tool_execution` | `Option<AfterToolExecutionFn>` | [EXISTS] | `(tool_name, tool_call_id, is_error)` |
 | `before_tool_execution_update` | `Option<BeforeToolExecutionUpdateFn>` | [EXISTS] | `(tool_name, tool_call_id, text) -> bool`; return `false` to suppress |
 | `after_tool_execution_update` | `Option<AfterToolExecutionUpdateFn>` | [EXISTS] | `(tool_name, tool_call_id, text)` |

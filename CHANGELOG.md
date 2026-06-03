@@ -12,6 +12,49 @@ _No unreleased changes._
 
 ---
 
+## [0.11.2] — 2026-06-03
+
+**Minor release (breaking-but-tiny hook-return flip).** The `before_tool_execution`
+hook now returns `ToolGate { Allow, Deny { reason } }` instead of `bool`. A denied
+tool's `reason` lands in the model's synthetic `tool_result` instead of a hardcoded
+opaque string, so the model is told **why** the tool was blocked and can self-correct
+instead of re-trying the denied tool and burning tokens. The Allow path and the
+Deny-with-default-reason path are byte-for-byte behaviour-compatible with 0.11.1.
+
+**Migration:** `true → ToolGate::Allow`; `false → ToolGate::Deny { reason }` (use
+`ToolGate::deny(reason)`; pass `ToolGate::DEFAULT_DENY_REASON` for the historical
+opaque string). Non-installers (`before_tool_execution: None`) are unaffected — `None`
+is type-agnostic. **baby-phi ripple is 0 source edits** (it only sets the field to
+`None`); installers that previously returned `false` now return
+`ToolGate::Deny { reason }`, supplying a real denial reason from their permission/policy layer.
+
+### Added
+
+- **`ToolGate` enum** (`agent_loop::config`) — `Allow` runs the tool; `Deny { reason }`
+  skips it and synthesises an error `ToolResult` whose text is `reason`. Intentionally
+  additive-friendly: future verdict variants (`Defer`, `AskUser`, …) extend it without
+  another signature break.
+- **`ToolGate::DEFAULT_DENY_REASON`** const — the historical opaque skip string
+  (`"Tool execution skipped by before_tool_execution hook."`), preserved as the
+  documented default a caller MAY pass.
+- **`ToolGate::deny(reason)`** convenience constructor.
+
+### Changed
+
+- **`BeforeToolExecutionFn` return type `bool → ToolGate`** (`HookFuture<'a, bool>` →
+  `HookFuture<'a, ToolGate>`). `BasicAgent::on_before_tool_execution`'s closure bound
+  flips from `-> bool` to `-> ToolGate` accordingly.
+- **The denied `tool_result` now carries the supplied `Deny` reason** instead of the
+  hardcoded opaque string (`agent_loop/tools.rs`). Hook ordering is unchanged: a denied
+  call still emits `MessageStart`/`MessageEnd` for the synthetic result and **no**
+  `ToolExecutionStart`/`End`.
+- **The script-callback bridge** (`config/builder.rs`) maps its `allow: bool` to
+  `ToolGate::Allow` / `ToolGate::deny(DEFAULT_DENY_REASON)`. The `.sh`/`.py` hook
+  protocol is unchanged (still `{ "allow": bool }`); reason-from-script is a future
+  additive extension.
+
+---
+
 ## [0.11.1] — 2026-06-02
 
 **Patch release (additive / opt-in).** Threads the 0.11.0 `provider_wire_sink`
