@@ -350,10 +350,12 @@ async fn test_bash_blocked_command() {
 async fn test_default_tools_complete() {
     let tools = phi_core::tools::default_tools();
     let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
-    assert_eq!(names.len(), 6);
+    // 6 core coding tools + the `tool_help` on-demand doc channel (CC-15 #52).
+    assert_eq!(names.len(), 7);
     assert!(names.contains(&"bash"));
     assert!(names.contains(&"edit_file"));
     assert!(names.contains(&"list_files"));
+    assert!(names.contains(&"tool_help"));
 }
 
 // --- Image support tests ---

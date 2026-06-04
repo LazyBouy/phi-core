@@ -709,6 +709,25 @@ impl BasicAgent {
         self
     }
 
+    /// Enable the `tool_help` on-demand documentation channel.
+    ///
+    /// Registers a [`ToolHelpTool`](crate::tools::ToolHelpTool) carrying the
+    /// kernel's short canonical manuals for its built-in tools (the braking
+    /// trio + prun). A model can call `tool_help(tool_name)` to fetch a tool's
+    /// full mental model + worked examples on demand — permission-safe (no
+    /// filesystem exposure), so it works even when the agent is sandboxed.
+    ///
+    /// This is the explicit opt-in path for consumers that build their tool set
+    /// by hand (rather than via [`default_tools`](crate::tools::default_tools),
+    /// which already includes `tool_help`). A consumer that wants richer
+    /// per-tool bodies can register its own [`ToolHelpTool`] via
+    /// [`with_tools`](Self::with_tools) instead.
+    pub fn with_tool_help(mut self) -> Self {
+        self.tools
+            .push(Arc::new(crate::tools::ToolHelpTool::with_default_help()));
+        self
+    }
+
     /// Override the kind-aware render policy used when revert mode is active.
     ///
     /// The policy controls how `Lesson` / `Finding` tags decay out of the

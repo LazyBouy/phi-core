@@ -8,7 +8,39 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-_No unreleased changes._
+**Braking UX + on-demand tool documentation (general-merit; surfaced by i-phi e2e testing).**
+
+- **`tool_help` built-in tool** (`tools/tool_help.rs`; `ToolHelpTool`). A
+  permission-safe, on-demand documentation channel: `tool_help(tool_name)`
+  returns a named tool's full manual (mental model + worked examples + failure
+  modes) so a model can self-serve the depth exactly when it needs it, instead
+  of every model paying the full token cost of an exhaustive `description()` on
+  every turn. Ships the kernel's short canonical manuals for the braking trio
+  (`revert_to_state` / `prun` / `prun_with_memo`) consumer-agnostically; a
+  downstream can supply richer per-tool bodies via `ToolHelpTool::new(map)`.
+  Added to `default_tools()` (now 7 tools) and to `BasicAgent::with_tool_help()`
+  (explicit opt-in for hand-built tool sets). Unlike a path-in-description +
+  `read_file` channel, it exposes no filesystem and works even when the agent is
+  sandboxed/locked down.
+- **`revert_to_state` self-description rewrite** (`tools/revert.rs`
+  `description()` + `step` param). The description now teaches the model the
+  mental model it needs to use the tool correctly: the conversation is a TREE of
+  nodes, the inline `[nN]` markers ARE those nodes, naming a node in `step`
+  makes it the new tip (dropping everything after), how to choose the node (just
+  before the branch to discard; `n0` = full restart), and to CONTINUE FORWARD
+  after reverting instead of repeating abandoned steps. Points at
+  `tool_help("revert_to_state")` for the full manual. A weaker model could
+  previously call `revert_to_state` mechanically but loop (revert to `n0`
+  repeatedly) because the description never taught the tree model.
+- **`weave_braking_annotations` dedup + forward-progress marker**
+  (`types/context.rs`). (a) Consecutive identical lesson/finding tags on the
+  same node now render ONCE instead of stacking (repeated reverts to the same
+  node previously stacked the same lesson up to 6×, burying the model in noise).
+  (b) The rebuilt trunk tip — the reverted-to node — now carries a
+  forward-progress marker ("reverted to this node — continue forward …") when a
+  revert just landed there, steering weaker models onward instead of looping on
+  the re-presented task. The 5-turn-window decay policy
+  (`build_trunk_context_with_policy`) is unchanged.
 
 ---
 

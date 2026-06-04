@@ -1,4 +1,4 @@
-<!-- Last verified: 2026-04-05 by Claude Code -->
+<!-- Last verified: 2026-06-04 by Claude Code (CC-15: add tool_help on-demand doc channel; default_tools() now 7) -->
 
 # Tools
 
@@ -134,6 +134,34 @@ let mut tools = default_tools();
 tools.push(Box::new(WeatherTool));
 let agent = BasicAgent::new(model_config).with_tools(tools);
 ```
+
+`default_tools()` returns the 6 core coding tools (`bash`, `read_file`,
+`write_file`, `edit_file`, `list_files`, `search`) plus `tool_help` (7 total).
+The opt-in braking tools (`revert_to_state`, `prun`) are NOT in this set — they
+register via `BasicAgent::with_revert_tool()` / `with_prun_tool()`.
+
+## The `tool_help` documentation channel
+
+Tool self-descriptions (`description()`) are paid on every turn, so a tool with
+a non-trivial mental model faces a dilemma: under-describe (weak models loop or
+misuse it) or over-pack (every model pays the full token cost every turn).
+`tool_help` resolves this — a model calls `tool_help(tool_name)` to fetch a
+tool's full manual (mental model + worked examples + failure modes) on demand,
+paying the cost only when it needs the depth.
+
+```rust
+// In default_tools(); or add explicitly to a hand-built tool set:
+let agent = BasicAgent::new(model_config)
+    .with_revert_tool()
+    .with_tool_help();
+```
+
+`tool_help` is permission-safe — unlike a path-in-description + `read_file`, it
+exposes no filesystem and works even when the agent is sandboxed/locked down.
+`ToolHelpTool::with_default_help()` ships the kernel's short canonical manuals
+for the braking trio consumer-agnostically; a consumer that wants richer
+per-tool bodies supplies its own `tool_name → help_text` map via
+`ToolHelpTool::new(map)`.
 
 ## Error Handling
 

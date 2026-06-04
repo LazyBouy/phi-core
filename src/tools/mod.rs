@@ -2,7 +2,7 @@
 /*
 ARCHITECTURE: tools/ — the standard toolkit for coding agents
 
-This module provides 6 built-in tools that together cover the core operations
+This module provides the built-in tools that together cover the core operations
 of a coding agent:
   `BashTool`       — run shell commands (most powerful; the agent's hands)
   `ReadFileTool`   — read file contents
@@ -10,9 +10,13 @@ of a coding agent:
   `EditFileTool`   — precise text replacement within a file
   `ListFilesTool`  — list directory contents
   `SearchTool`     — grep / content search across files
+  `ToolHelpTool`   — `tool_help(tool_name)`: on-demand extended-manual channel
 
-`default_tools()` returns all six in a `Vec<Arc<dyn AgentTool>>` — the canonical
-"batteries included" tool set. Callers that want a subset can build their own Vec.
+`default_tools()` returns the 6 core coding tools plus `tool_help` (7 total) in a
+`Vec<Arc<dyn AgentTool>>` — the canonical "batteries included" tool set. Callers
+that want a subset can build their own Vec. The opt-in braking tools
+(`revert_to_state`, `prun`) are NOT in this set — they register via
+`BasicAgent::with_revert_tool()` / `with_prun_tool()`.
 
 RUST QUIRK: `pub mod` vs `pub use`
 
@@ -43,6 +47,7 @@ pub mod prun;
 pub mod registry;
 pub mod revert;
 pub mod search;
+pub mod tool_help;
 
 pub use bash::BashTool;
 pub use edit::EditFileTool;
@@ -52,15 +57,20 @@ pub use prun::{PrunRecord, PrunRequest, PrunTool, PrunVariant};
 pub use registry::ToolRegistry;
 pub use revert::{RevertRecord, RevertRequest, RevertTool};
 pub use search::SearchTool;
+pub use tool_help::ToolHelpTool;
 
 use crate::types::AgentTool;
 use std::sync::Arc;
 
 /// Get the standard set of coding agent tools.
 ///
-/// Returns all 6 built-in tools ready for use with `Agent::with_tools()` or
+/// Returns the 6 core coding tools plus the `tool_help` on-demand documentation
+/// channel (7 total), ready for use with `Agent::with_tools()` or
 /// `AgentLoopConfig`. Each tool is heap-allocated behind an `Arc<dyn AgentTool>`,
 /// which allows them to be shared across parallel agent branches at zero copy cost.
+///
+/// `tool_help(tool_name)` lets a model self-serve any tool's extended manual on
+/// demand (permission-safe; no filesystem exposure) — see [`tool_help`].
 pub fn default_tools() -> Vec<Arc<dyn AgentTool>> {
     vec![
         Arc::new(BashTool::default()),
@@ -69,5 +79,6 @@ pub fn default_tools() -> Vec<Arc<dyn AgentTool>> {
         Arc::new(EditFileTool::new()),
         Arc::new(ListFilesTool::default()),
         Arc::new(SearchTool::default()),
+        Arc::new(tool_help::ToolHelpTool::with_default_help()),
     ]
 }

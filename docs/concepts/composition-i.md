@@ -1,4 +1,4 @@
-<!-- Last verified: 2026-06-03 by Claude Code -->
+<!-- Last verified: 2026-06-04 by Claude Code (CC-15: revert description teaches tree/node model + tool_help ref; weave dedups consecutive lessons + weaves a forward-progress marker at the trunk tip) -->
 # Composition I — the braking layer
 
 Composition I is phi-core's **opt-in braking layer** [EXISTS]. It lets the
@@ -54,6 +54,14 @@ The agent calls it inline whenever it decides to abandon work. Example:
     step="n10",
     summary="bubble sort (O(n²)) timed out — try a faster algorithm")
 ```
+
+The tool's `description()` teaches the model the mental model it needs: the
+conversation is a TREE of nodes, the inline `[nN]` markers ARE those nodes,
+naming a node in `step` makes it the new tip (dropping everything after), how to
+choose the node (just before the branch to discard; `n0` = full restart), and to
+CONTINUE FORWARD after reverting rather than repeat the abandoned steps. For the
+full manual + worked examples the model can call `tool_help("revert_to_state")`
+(the on-demand documentation channel — see [`tools.md`](tools.md)).
 
 The tool itself only **enqueues** a `RevertRequest`. The actual revert is
 applied between turns by `apply_revert` — synchronous, no LLM call, mirrors
@@ -159,10 +167,20 @@ let woven = AgentContext::weave_braking_annotations(trunk);
   it the model has no way to know a target node from a cold start.
 - `[<kind>: <text>]` — each surviving `Lesson` / `Finding` / `Outcome` /
   `Checkpoint` tag, so "the next turn sees the lesson" is literally true.
+  **Consecutive identical lesson/finding tags on the same node render once** —
+  repeated reverts to the same node previously stacked the same lesson up to 6×,
+  burying weaker models in duplicated noise.
+- A **forward-progress marker** at the trunk tip — when the reverted-to node (the
+  active node, last on the trunk) carries a `Lesson` / `Finding` tag (the signal
+  that a revert just landed there), the weave appends "reverted to this node —
+  continue forward with a new approach; do not repeat the abandoned steps". This
+  steers a weaker model onward instead of re-executing the step it just abandoned
+  and looping.
 
 The agent loop calls this on the revert-mode trunk path only
 (`active_node_id.is_some()`); non-revert consumers are byte-identical (their
-messages carry no `node_id`, so the weave is a pass-through).
+messages carry no `node_id`, so the weave is a pass-through). The 5-turn-window
+decay policy (`build_trunk_context_with_policy`) is unchanged.
 
 ## What 0.8.0 does NOT ship
 

@@ -105,7 +105,7 @@ impl AgentTool for RevertTool {
     }
 
     fn description(&self) -> &str {
-        "Abandon the current branch and return the conversation trunk to an earlier node. Use when a branch failed (failure), an exploration is finished (tangent), a sub-task is sealed (completion), or the trunk is long enough that a checkpoint helps (step-summary). Supply a one-line `summary` distilling what to remember; it is attached as an annotation on the target node so the next turn sees the lesson without the abandoned chatter. Abandoned messages stay in the forensic session log; only the active conversation context is rebuilt."
+        "Rewind the conversation to an earlier point and resume from there. The conversation is a TREE of nodes: each assistant/tool step is a node, tagged inline in the messages as [n0], [n1], [n2], … in order — those tags ARE the nodes, and the `step` arg names one of them. Naming a node in `step` makes it the new tip: every node AFTER it is dropped from your active context (the dropped messages stay in the forensic session log; only your working context changes). After reverting, CONTINUE FORWARD with your new approach from that node — do NOT repeat the steps you just abandoned (the `summary` you supply is pinned to the target node to remind you what was tried). Use when a branch failed (failure), an exploration is finished (tangent), a sub-task is sealed (completion), or a long trunk needs a checkpoint (step-summary). For the full tree model and worked examples, call tool_help(\"revert_to_state\")."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -119,11 +119,11 @@ impl AgentTool for RevertTool {
                 },
                 "step": {
                     "type": "string",
-                    "description": "Node identifier to revert to. Accepts the inline render (e.g. \"n10\") or a bare integer (\"10\")."
+                    "description": "The node to rewind to — its inline tag (e.g. \"n10\") or bare integer (\"10\"). Read the [nN] tags in the conversation and choose the node JUST BEFORE the branch you want to discard. Reverting to n0 discards the entire conversation back to the first node — only do that to restart from scratch. Everything after the chosen node leaves your active context."
                 },
                 "summary": {
                     "type": "string",
-                    "description": "Optional one-line summary attached as an annotation on the target node — what to remember about the abandoned branch."
+                    "description": "Optional one-line summary attached as an annotation on the target node — what to remember about the abandoned branch so the next turn carries the lesson forward without the abandoned chatter."
                 }
             },
             "required": ["category", "step"]
@@ -203,5 +203,70 @@ impl AgentTool for RevertTool {
             details: serde_json::Value::Null,
             child_loop_id: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tool() -> RevertTool {
+        RevertTool::new(Arc::new(Mutex::new(Vec::new())))
+    }
+
+    #[test]
+    fn description_teaches_tree_node_model_and_forward_continuation() {
+        // D-TEST-0046 (#48): the self-description must teach the model the
+        // mental model it needs — (a) the conversation is a tree of nodes,
+        // (b) the [nN] markers ARE those nodes, (c) naming a node makes it the
+        // new tip dropping everything after, (d) continue FORWARD after revert.
+        let t = tool();
+        let desc = t.description();
+        assert!(
+            desc.contains("TREE of nodes"),
+            "description must teach the tree model: {desc}"
+        );
+        assert!(
+            desc.contains("[n0]") && desc.contains("those tags ARE the nodes"),
+            "description must teach that the [nN] markers ARE the nodes: {desc}"
+        );
+        assert!(
+            desc.contains("new tip") && desc.contains("dropped from your active context"),
+            "description must teach that naming a node makes it the new tip: {desc}"
+        );
+        assert!(
+            desc.contains("CONTINUE FORWARD"),
+            "description must teach forward-continuation: {desc}"
+        );
+    }
+
+    #[test]
+    fn description_names_the_tool_help_doc_reference() {
+        // The locked read-channel (F-tooldoc-read-channel.a): the description
+        // points the model at the extended manual via tool_help(...).
+        let t = tool();
+        let desc = t.description();
+        assert!(
+            desc.contains("tool_help(\"revert_to_state\")"),
+            "description must name the tool_help doc-reference: {desc}"
+        );
+    }
+
+    #[test]
+    fn step_param_teaches_node_selection() {
+        // The step param must teach selection ("just before the branch") and
+        // the n0 = full-restart semantics — not just the render format.
+        let schema = tool().parameters_schema();
+        let step_desc = schema["properties"]["step"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(
+            step_desc.contains("JUST BEFORE the branch"),
+            "step param must teach node selection: {step_desc}"
+        );
+        assert!(
+            step_desc.contains("n0 discards the entire conversation"),
+            "step param must teach n0 = full restart: {step_desc}"
+        );
     }
 }
