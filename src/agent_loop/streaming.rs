@@ -150,7 +150,7 @@ pub(super) async fn stream_assistant_response(
         // weave the `[n<id>]` markers + surviving lesson/finding annotations into
         // the content so the model can actually SEE them (and thus supply a valid
         // `revert_to_state(step=…)`). Metadata-only node_id/tags are stripped at
-        // convert_to_llm; this bakes them into content first. (D-TEST-0036)
+        // convert_to_llm; this bakes them into content first.
         let trunk =
             context.build_trunk_context_with_policy(&config.revert_render_policy, turn_index);
         AgentContext::weave_braking_annotations(trunk)

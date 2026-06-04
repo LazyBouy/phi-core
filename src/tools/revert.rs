@@ -216,7 +216,7 @@ mod tests {
 
     #[test]
     fn description_teaches_tree_node_model_and_forward_continuation() {
-        // D-TEST-0046 (#48): the self-description must teach the model the
+        // The self-description must teach the model the
         // mental model it needs — (a) the conversation is a tree of nodes,
         // (b) the [nN] markers ARE those nodes, (c) naming a node makes it the
         // new tip dropping everything after, (d) continue FORWARD after revert.

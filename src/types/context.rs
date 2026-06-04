@@ -280,7 +280,7 @@ impl AgentContext {
     pub fn weave_braking_annotations(messages: Vec<AgentMessage>) -> Vec<AgentMessage> {
         use super::node_tag::TagKind;
 
-        // D-TEST-0045 (#47) — locate the trunk tip (the LAST node-bearing
+        // Locate the trunk tip (the LAST node-bearing
         // message), which is the active / reverted-to node. When that node
         // carries ≥ 1 decay-able lesson/finding tag — the signal that a revert
         // just landed there (apply_revert attaches the summary tag to the
@@ -306,11 +306,11 @@ impl AgentContext {
                         return AgentMessage::Llm(lm);
                     };
                     let mut marker = format!("[{}]", node_id.render());
-                    // D-TEST-0045 (#47) — dedup consecutive identical lesson/
-                    // finding tags (same kind + same text) on the same node.
-                    // Repeated reverts to the same node stack duplicate tags
-                    // (observed 6× on n0 at t13 HTC-0002); rendering each run
-                    // once removes the wall of noise that confuses weak models.
+                    // Dedup consecutive identical lesson/finding tags (same
+                    // kind + same text) on the same node. Repeated reverts to
+                    // the same node stack duplicate tags; rendering each run
+                    // once removes the wall of noise that can confuse weaker
+                    // models into looping.
                     let mut last_rendered: Option<(TagKind, &str)> = None;
                     let mut has_lesson_tag = false;
                     for tag in &lm.tags {
@@ -329,9 +329,8 @@ impl AgentContext {
                         marker.push_str(&format!(" [{}: {}]", kind, tag.text));
                         last_rendered = Some((tag.kind, tag.text.as_str()));
                     }
-                    // D-TEST-0045 (#47) — forward-progress marker at the trunk
-                    // tip when a revert landed there (tip node carries a
-                    // lesson/finding tag).
+                    // Forward-progress marker at the trunk tip when a revert
+                    // landed there (tip node carries a lesson/finding tag).
                     if Some(idx) == tip_idx && has_lesson_tag {
                         marker.push_str(
                             " [reverted to this node — continue forward with a new approach; do not repeat the abandoned steps]",
@@ -791,7 +790,7 @@ mod build_trunk_context_tests {
         assert_eq!(original_tags, 1);
     }
 
-    // ── D-TEST-0036 — braking annotations woven into model-visible content ──
+    // ── braking annotations woven into model-visible content ──
 
     fn first_text(m: &AgentMessage) -> String {
         match m {
@@ -855,12 +854,12 @@ mod build_trunk_context_tests {
         assert_eq!(first_text(&woven[0]), "no node here");
     }
 
-    // ── D-TEST-0045 (#47) — dedup consecutive identical lessons + tip marker ──
+    // ── dedup consecutive identical lessons + tip marker ──
 
     #[test]
     fn weave_braking_annotations_dedups_consecutive_identical_lessons() {
-        // Repeated reverts to the same node stack the SAME lesson 6× (observed
-        // at t13 HTC-0002). The weave must render the run ONCE, not 6×.
+        // Repeated reverts to the same node stack the SAME lesson 6×. The
+        // weave must render the run ONCE, not 6×.
         let mut am = assistant("re-read the task", 1, NodeId(0), None);
         if let AgentMessage::Llm(lm) = &mut am {
             for _ in 0..6 {

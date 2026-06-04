@@ -1,7 +1,7 @@
 //! Model-invocable tool that returns a named tool's extended manual on demand.
 //
 // ARCHITECTURE: ToolHelpTool — an on-demand, permission-safe tool-documentation
-// channel (D-TEST-0050 / #52).
+// channel.
 //
 // Why a kernel tool (general merit, not a single-consumer requirement):
 //   - Self-descriptions (`AgentTool::description()`) are the ONLY channel a model
