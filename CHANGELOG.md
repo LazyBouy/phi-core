@@ -32,15 +32,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `tool_help("revert_to_state")` for the full manual. A weaker model could
   previously call `revert_to_state` mechanically but loop (revert to `n0`
   repeatedly) because the description never taught the tree model.
-- **`weave_braking_annotations` dedup + forward-progress marker**
-  (`types/context.rs`). (a) Consecutive identical lesson/finding tags on the
-  same node now render ONCE instead of stacking (repeated reverts to the same
-  node previously stacked the same lesson up to 6×, burying the model in noise).
-  (b) The rebuilt trunk tip — the reverted-to node — now carries a
-  forward-progress marker ("reverted to this node — continue forward …") when a
-  revert just landed there, steering weaker models onward instead of looping on
-  the re-presented task. The 5-turn-window decay policy
-  (`build_trunk_context_with_policy`) is unchanged.
+- **`weave_braking_annotations` rewind-with-breadcrumb rework**
+  (`types/context.rs`). Three braking-machinery robustness improvements, all
+  confined to the weave + the revert-apply step (signatures unchanged; non-revert
+  consumers stay byte-identical). (a) **All-identical lesson/finding dedup** — an
+  identical `(kind, text)` tag on a node now renders ONCE even when interleaved
+  with other tags (was: consecutive-only, so `[finding][lesson][lesson]`
+  ordering still stacked the repeat). Repeated reverts to the same node could
+  otherwise bury the model in a wall of duplicate lessons. (b) **Forward-progress
+  note off tool-result nodes** — the "continue forward" instruction is now
+  emitted as a standalone synthetic meta-note (a nodeless entry inserted right
+  after the reverted-to tip) instead of being prepended onto the tip message's
+  content. The tip can be a tool-result node; gluing the marker onto it risked a
+  weaker model misreading it as "the tool triggered a rewind". The standalone
+  note keeps attribution unambiguous regardless of the tip's message-type. (c)
+  **Rewind breadcrumb (progress thread)** — `apply_revert` (`agent_loop/run.rs`)
+  now composes a one-line breadcrumb of the abandoned branch from the agent's
+  revert `summary` plus the tool-call NAMES extracted from the abandoned span
+  (`compose_revert_breadcrumb`; shapes like `reverted past: wrote plan-v1.md
+  (write_file abandoned)`). The breadcrumb rides on the reverted-to node's
+  summary tag and the weave renders it in the standalone note, so the rebuilt
+  trunk keeps a one-line progress thread of what was tried-and-abandoned —
+  mirroring the `prun_with_memo` "drop the content, leave a memo" pattern. Only
+  tool-call names are carried; the abandoned content itself is never
+  re-introduced. The 5-turn-window decay policy
+  (`build_trunk_context_with_policy`) is unchanged. (Braking machinery surfaced
+  during downstream consumer e2e testing: a clean rewind erased the model's
+  progress thread — a strong model reverted then stopped, a weak model looped.)
 
 ---
 

@@ -654,6 +654,30 @@ fn apply_prun(
     }
 }
 
+/// Compose the one-line progress-thread breadcrumb attached to a reverted-to
+/// node's summary tag.
+///
+/// Shapes (mirroring the `prun_with_memo` memo: drop content, keep a memo):
+/// - summary + tool names → `"reverted past: <summary> (<names> abandoned)"`;
+/// - summary only (no tool calls on the abandoned span) → `"reverted past: <summary>"`;
+/// - tool names only (agent omitted summary) → `"reverted past: <names> (abandoned)"`;
+/// - neither → `""` (empty; the render policy + a future fallback generator
+///   handle the empty-text case).
+///
+/// Only the tool-call NAMES are carried, never the abandoned content itself —
+/// re-introducing the abandoned branch is exactly the noise wall a revert is
+/// meant to remove.
+fn compose_revert_breadcrumb(summary: &str, tool_names: &[String]) -> String {
+    let summary = summary.trim();
+    let names = tool_names.join(", ");
+    match (summary.is_empty(), tool_names.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => format!("reverted past: {summary}"),
+        (true, false) => format!("reverted past: {names} (abandoned)"),
+        (false, false) => format!("reverted past: {summary} ({names} abandoned)"),
+    }
+}
+
 /// Composition I — apply one `RevertRequest` between turns.
 ///
 /// Mirrors [`apply_prun`] structurally: synchronous, no I/O, emits a single
@@ -665,7 +689,8 @@ fn apply_prun(
 /// Effects on success:
 /// 1. `context.active_node_id` becomes `Some(request.target)`.
 /// 2. A `NodeTag` is attached to the target [`LlmMessage`] carrying the
-///    agent-supplied summary (empty `text` if `summary` was `None`).
+///    composed breadcrumb (empty `text` if `summary` was `None` AND the
+///    abandoned span had no tool calls).
 /// 3. `RevertApplied { applied: true, .. }` is emitted with the list of
 ///    `abandoned_node_ids`.
 ///
@@ -779,13 +804,51 @@ fn apply_revert(
         _ => true,
     });
 
-    // (6) Attach the summary tag to the target node. Empty text when the
-    // agent omitted `summary` — Phase 5's render policy can still classify
-    // (kind is well-defined) and a future fallback generator slots into the
-    // empty-text branch.
+    // (5b) Compose the progress-thread breadcrumb. A revert drops the
+    // post-target branch, erasing the model's record of what it just tried; a
+    // clean rewind alone leaves a weak model looping and a strong model
+    // stopping. Mirroring the `prun_with_memo` "drop content, leave a memo"
+    // kernel pattern, we distill the abandoned span into a ONE-LINE breadcrumb —
+    // the agent-supplied summary plus the NAMES of the tool calls that were on
+    // the abandoned branch — so the rebuilt trunk keeps a progress thread the
+    // model can pick up from. The abandoned content itself is NOT reintroduced;
+    // only the tool-call names + the summary. General braking-machinery merit:
+    // any consumer reverting repeatedly keeps a progress thread.
+    let abandoned_tool_names: Vec<String> = {
+        let mut names: Vec<String> = Vec::new();
+        for m in &context.messages[target_idx + 1..] {
+            let AgentMessage::Llm(lm) = m else { continue };
+            match &lm.message {
+                Message::Assistant { content, .. } => {
+                    for block in content {
+                        if let crate::types::Content::ToolCall { name, .. } = block {
+                            if !names.contains(name) {
+                                names.push(name.clone());
+                            }
+                        }
+                    }
+                }
+                Message::ToolResult { tool_name, .. } => {
+                    if !names.contains(tool_name) {
+                        names.push(tool_name.clone());
+                    }
+                }
+                Message::User { .. } => {}
+            }
+        }
+        names
+    };
+    let summary_text = request.summary.clone().unwrap_or_default();
+    let breadcrumb = compose_revert_breadcrumb(&summary_text, &abandoned_tool_names);
+
+    // (6) Attach the breadcrumb as the summary tag on the target node. Empty
+    // text only when the agent omitted `summary` AND the abandoned span had no
+    // tool calls — Phase 5's render policy can still classify (kind is
+    // well-defined) and a future fallback generator slots into the empty-text
+    // branch.
     let tag = NodeTag::new(
         request.category.tag_kind(),
-        request.summary.clone().unwrap_or_default(),
+        breadcrumb,
         current_turn as u32,
         abandoned_node_ids.clone(),
     );
@@ -895,9 +958,12 @@ mod apply_revert_tests {
         };
         assert_eq!(target_msg.tags.len(), 1);
         assert_eq!(target_msg.tags[0].kind, TagKind::Lesson);
+        // The tag text is now the composed breadcrumb. The abandoned span here
+        // is text-only assistant messages (no tool calls), so the breadcrumb is
+        // the summary-only shape `reverted past: <summary>`.
         assert_eq!(
             target_msg.tags[0].text,
-            "bubble sort timed out — try a faster algorithm"
+            "reverted past: bubble sort timed out — try a faster algorithm"
         );
         assert_eq!(target_msg.tags[0].created_at_turn, 7);
         assert_eq!(
@@ -1088,5 +1154,161 @@ mod apply_revert_tests {
         };
         assert_eq!(tag.kind, TagKind::Checkpoint);
         assert_eq!(tag.text, "");
+    }
+
+    // ── progress-thread breadcrumb ──
+
+    fn assistant_toolcall_node(
+        tool: &str,
+        ts: u64,
+        node: NodeId,
+        parent: Option<NodeId>,
+    ) -> AgentMessage {
+        AgentMessage::Llm(
+            LlmMessage::new(Message::Assistant {
+                content: vec![Content::ToolCall {
+                    id: format!("tc-{ts}"),
+                    name: tool.to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                stop_reason: StopReason::ToolUse,
+                model: "test".into(),
+                provider: "test".into(),
+                usage: Usage::default(),
+                timestamp: ts,
+                error_message: None,
+            })
+            .with_node_identity(node, parent),
+        )
+    }
+
+    #[test]
+    fn breadcrumb_composed_from_summary_and_tool_names() {
+        // The abandoned span carries two tool calls; the breadcrumb names them
+        // alongside the agent summary so the model knows concretely what it
+        // tried-and-abandoned.
+        let mut ctx = AgentContext {
+            messages: vec![
+                user_msg_node("write a plan", 1, NodeId(10), None),
+                assistant_toolcall_node("write_file", 2, NodeId(11), Some(NodeId(10))),
+                assistant_toolcall_node("run_tests", 3, NodeId(12), Some(NodeId(11))),
+            ],
+            next_node_id: 13,
+            ..Default::default()
+        };
+        let (tx, _rx) = mpsc::unbounded_channel::<AgentEvent>();
+        let req = RevertRequest {
+            category: RevertCategory::Failure,
+            target: NodeId(10),
+            summary: Some("wrote plan-v1.md".into()),
+        };
+
+        apply_revert(&mut ctx, &req, 4, &tx, "loop-1");
+
+        let tag = match &ctx.messages[0] {
+            AgentMessage::Llm(lm) => &lm.tags[0],
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            tag.text,
+            "reverted past: wrote plan-v1.md (write_file, run_tests abandoned)"
+        );
+    }
+
+    #[test]
+    fn breadcrumb_summary_only_when_span_has_no_tool_calls() {
+        // A pure-text abandoned branch (no tool calls) falls back to the
+        // summary alone — a graceful narrowing, not a deferred feature.
+        let mut ctx = AgentContext {
+            messages: vec![
+                user_msg_node("write a plan", 1, NodeId(10), None),
+                assistant_msg_node(
+                    "thinking out loud, no tools",
+                    2,
+                    NodeId(11),
+                    Some(NodeId(10)),
+                ),
+            ],
+            next_node_id: 12,
+            ..Default::default()
+        };
+        let (tx, _rx) = mpsc::unbounded_channel::<AgentEvent>();
+        let req = RevertRequest {
+            category: RevertCategory::Tangent,
+            target: NodeId(10),
+            summary: Some("approach v1 was tangential".into()),
+        };
+
+        apply_revert(&mut ctx, &req, 4, &tx, "loop-1");
+
+        let tag = match &ctx.messages[0] {
+            AgentMessage::Llm(lm) => &lm.tags[0],
+            _ => unreachable!(),
+        };
+        assert_eq!(tag.text, "reverted past: approach v1 was tangential");
+    }
+
+    #[test]
+    fn abandoned_branch_content_not_reintroduced() {
+        // The rebuilt active trunk must NOT carry the abandoned branch's body
+        // text — only the one-line breadcrumb. We assert the abandoned message
+        // bodies are absent from the woven trunk after the revert.
+        let mut ctx = AgentContext {
+            messages: vec![
+                user_msg_node("write a plan", 1, NodeId(10), None),
+                assistant_toolcall_node("write_file", 2, NodeId(11), Some(NodeId(10))),
+                assistant_msg_node(
+                    "ABANDONED-BODY-secret detail that must not survive",
+                    3,
+                    NodeId(12),
+                    Some(NodeId(11)),
+                ),
+            ],
+            next_node_id: 13,
+            ..Default::default()
+        };
+        let (tx, _rx) = mpsc::unbounded_channel::<AgentEvent>();
+        let req = RevertRequest {
+            category: RevertCategory::Failure,
+            target: NodeId(10),
+            summary: Some("wrote plan-v1.md".into()),
+        };
+
+        apply_revert(&mut ctx, &req, 4, &tx, "loop-1");
+
+        // Build the rendered trunk the way the loop does (revert mode).
+        let policy = crate::types::RevertRenderPolicy::default();
+        let trunk = ctx.build_trunk_context_with_policy(&policy, 4);
+        let woven = AgentContext::weave_braking_annotations(trunk);
+
+        let all_text: String = woven
+            .iter()
+            .map(|m| match m {
+                AgentMessage::Llm(lm) => match &lm.message {
+                    Message::User { content, .. }
+                    | Message::Assistant { content, .. }
+                    | Message::ToolResult { content, .. } => content
+                        .iter()
+                        .filter_map(|c| match c {
+                            Content::Text { text } => Some(text.clone()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                },
+                _ => String::new(),
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        // The abandoned body text is gone; the one-line breadcrumb survives.
+        assert!(
+            !all_text.contains("ABANDONED-BODY-secret"),
+            "abandoned branch content must not be reintroduced: {all_text}"
+        );
+        assert!(
+            all_text.contains("reverted past: wrote plan-v1.md"),
+            "the one-line breadcrumb must survive into the trunk: {all_text}"
+        );
     }
 }

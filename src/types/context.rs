@@ -27,6 +27,38 @@ fn prepend_marker_to_message(message: &mut super::content::Message, marker: &str
     }
 }
 
+/// Composition I — build the standalone forward-progress meta-note emitted at
+/// the trunk tip after a revert lands.
+///
+/// The note is a fresh nodeless [`AgentMessage::Llm`] carrying a `User`-shaped
+/// system line, so it renders as its own clearly-separated entry rather than
+/// being prepended onto whatever message-type the tip is (a tool-result tip
+/// must not read as "the tool triggered a rewind"). `breadcrumb` is the tip
+/// tag's text — the revert summary plus the abandoned-span tool-call names
+/// composed by `apply_revert` — and is surfaced verbatim so the model knows
+/// concretely what was just tried-and-abandoned. The instruction is concrete
+/// and directive: re-read the task, do the next uncompleted step, do not redo
+/// completed steps, do not stop. Used only by [`AgentContext::weave_braking_annotations`].
+fn forward_progress_meta_note(breadcrumb: &str) -> AgentMessage {
+    use super::content::{Content, Message};
+    let trimmed = breadcrumb.trim();
+    let crumb = if trimmed.is_empty() {
+        String::new()
+    } else {
+        format!(" {trimmed}.")
+    };
+    let text = format!(
+        "[braking note]{crumb} You just reverted to this node. Re-read the task \
+         and continue forward from here: do the next uncompleted step, do NOT \
+         redo steps you already completed, and do NOT stop — keep going until \
+         the task is done."
+    );
+    AgentMessage::Llm(super::agent_message::LlmMessage::new(Message::User {
+        content: vec![Content::Text { text }],
+        timestamp: 0,
+    }))
+}
+
 // ---------------------------------------------------------------------------
 // In-run context entry (2-stream architecture)
 // ---------------------------------------------------------------------------
@@ -279,15 +311,19 @@ impl AgentContext {
     /// through untouched, so non-revert consumers are byte-identical.
     pub fn weave_braking_annotations(messages: Vec<AgentMessage>) -> Vec<AgentMessage> {
         use super::node_tag::TagKind;
+        use std::collections::HashSet;
 
         // Locate the trunk tip (the LAST node-bearing
         // message), which is the active / reverted-to node. When that node
         // carries ≥ 1 decay-able lesson/finding tag — the signal that a revert
         // just landed there (apply_revert attaches the summary tag to the
-        // target node, which becomes the active node) — we weave a
-        // forward-progress marker so a weaker model is steered onward instead
-        // of looping on the re-presented task. General braking-machinery merit:
-        // any consumer reverting repeatedly benefits.
+        // target node, which becomes the active node) — we emit a standalone
+        // forward-progress meta-note AFTER the tip so a weaker model is steered
+        // onward instead of looping on the re-presented task. The note is a
+        // fresh nodeless entry, never glued onto whatever message-type the tip
+        // is — a tool-result tip must not read as "the tool triggered a
+        // rewind". General braking-machinery merit: any consumer reverting
+        // repeatedly benefits from an attribution-clean continue-forward signal.
         let tip_idx = messages
             .iter()
             .enumerate()
@@ -297,7 +333,12 @@ impl AgentContext {
                 _ => None,
             });
 
-        messages
+        // First pass: weave the per-node `[n<id>]` markers + surviving
+        // lesson/finding tags into each node's content. The forward-progress
+        // line is NOT prepended here — it is emitted as its own entry below so
+        // it is never attributed to a tool-result node.
+        let mut tip_summary: Option<String> = None;
+        let mut woven: Vec<AgentMessage> = messages
             .into_iter()
             .enumerate()
             .map(|(idx, m)| match m {
@@ -306,19 +347,24 @@ impl AgentContext {
                         return AgentMessage::Llm(lm);
                     };
                     let mut marker = format!("[{}]", node_id.render());
-                    // Dedup consecutive identical lesson/finding tags (same
-                    // kind + same text) on the same node. Repeated reverts to
-                    // the same node stack duplicate tags; rendering each run
-                    // once removes the wall of noise that can confuse weaker
-                    // models into looping.
-                    let mut last_rendered: Option<(TagKind, &str)> = None;
-                    let mut has_lesson_tag = false;
+                    // Dedup ALL identical lesson/finding tags (same kind + same
+                    // text) on the same node — not just consecutive runs.
+                    // Repeated reverts to the same node stack duplicate tags,
+                    // and other tags can interleave between the repeats; a
+                    // seen-set renders each `(kind, text)` once regardless of
+                    // ordering, removing the wall of noise that can confuse
+                    // weaker models into looping.
+                    let mut seen: HashSet<(TagKind, &str)> = HashSet::new();
+                    let mut tip_lesson: Option<&str> = None;
                     for tag in &lm.tags {
-                        if matches!(tag.kind, TagKind::Lesson | TagKind::Finding) {
-                            has_lesson_tag = true;
+                        let is_lesson = matches!(tag.kind, TagKind::Lesson | TagKind::Finding);
+                        if !seen.insert((tag.kind, tag.text.as_str())) {
+                            continue; // identical tag already rendered on this node
                         }
-                        if last_rendered == Some((tag.kind, tag.text.as_str())) {
-                            continue; // consecutive identical tag — render once
+                        // Remember the first lesson/finding text on the tip — it
+                        // carries the revert breadcrumb composed by apply_revert.
+                        if Some(idx) == tip_idx && is_lesson && tip_lesson.is_none() {
+                            tip_lesson = Some(tag.text.as_str());
                         }
                         let kind = match tag.kind {
                             TagKind::Lesson => "lesson",
@@ -327,21 +373,30 @@ impl AgentContext {
                             TagKind::Checkpoint => "checkpoint",
                         };
                         marker.push_str(&format!(" [{}: {}]", kind, tag.text));
-                        last_rendered = Some((tag.kind, tag.text.as_str()));
                     }
-                    // Forward-progress marker at the trunk tip when a revert
-                    // landed there (tip node carries a lesson/finding tag).
-                    if Some(idx) == tip_idx && has_lesson_tag {
-                        marker.push_str(
-                            " [reverted to this node — continue forward with a new approach; do not repeat the abandoned steps]",
-                        );
+                    if let Some(text) = tip_lesson {
+                        tip_summary = Some(text.to_string());
                     }
                     prepend_marker_to_message(&mut lm.message, &marker);
                     AgentMessage::Llm(lm)
                 }
                 other => other,
             })
-            .collect()
+            .collect();
+
+        // Second pass: when a revert just landed on the tip (it carries a
+        // lesson/finding tag), insert a standalone forward-progress meta-note
+        // right after the tip. The note carries the breadcrumb (the tip tag's
+        // text, composed by apply_revert) plus a concrete, directive
+        // continue-forward instruction. It is a nodeless synthetic entry, so it
+        // is never confused with a real trunk node and is byte-invisible to
+        // non-revert consumers.
+        if let (Some(tip), Some(summary)) = (tip_idx, tip_summary) {
+            let note = forward_progress_meta_note(&summary);
+            woven.insert(tip + 1, note);
+        }
+
+        woven
     }
 
     /// Composition I — parent-chain assembly.
@@ -587,6 +642,21 @@ mod build_trunk_context_tests {
         )
     }
 
+    fn tool_result(text: &str, ts: u64, node: NodeId, parent: Option<NodeId>) -> AgentMessage {
+        AgentMessage::Llm(
+            LlmMessage::new(Message::ToolResult {
+                tool_call_id: "tc-1".to_string(),
+                tool_name: "write_file".to_string(),
+                content: vec![Content::Text {
+                    text: text.to_string(),
+                }],
+                is_error: false,
+                timestamp: ts,
+            })
+            .with_node_identity(node, parent),
+        )
+    }
+
     #[test]
     fn linear_path_when_active_pointer_is_none() {
         // Critical opt-in regression test: byte-identical to pre-0.8.0 path
@@ -770,6 +840,39 @@ mod build_trunk_context_tests {
     }
 
     #[test]
+    fn five_turn_decay_policy_unchanged_after_rework() {
+        // Regression guard: the marker-rework + breadcrumb + all-identical
+        // dedup must NOT perturb the 5-turn decay window. Default policy = 5-turn window,
+        // count cap 3. 4 lessons at turns 0..3 evaluated at current_turn=10: all
+        // fall outside the window, the count cap retains the 3 newest (turns
+        // 1,2,3) — byte-identical to the pre-rework decay contract.
+        let ctx = build_ctx_with_tags(vec![
+            (NodeId(0), tag(TagKind::Lesson, 0, "L0")),
+            (NodeId(1), tag(TagKind::Lesson, 1, "L1")),
+            (NodeId(2), tag(TagKind::Lesson, 2, "L2")),
+            (NodeId(3), tag(TagKind::Lesson, 3, "L3")),
+        ]);
+        let policy = RevertRenderPolicy::default();
+        assert_eq!(policy.lesson_window_turns, 5);
+        let built = ctx.build_trunk_context_with_policy(&policy, 10);
+        let mut kept_turns: Vec<u32> = built
+            .iter()
+            .filter_map(|m| match m {
+                AgentMessage::Llm(lm) => Some(lm.tags.iter()),
+                _ => None,
+            })
+            .flatten()
+            .map(|t| t.created_at_turn)
+            .collect();
+        kept_turns.sort();
+        assert_eq!(
+            kept_turns,
+            vec![1, 2, 3],
+            "5-turn decay window must be unchanged"
+        );
+    }
+
+    #[test]
     fn render_policy_does_not_mutate_original_context() {
         let ctx = build_ctx_with_tags(vec![(NodeId(0), tag(TagKind::Lesson, 0, "L0"))]);
         let policy = RevertRenderPolicy {
@@ -854,7 +957,7 @@ mod build_trunk_context_tests {
         assert_eq!(first_text(&woven[0]), "no node here");
     }
 
-    // ── dedup consecutive identical lessons + tip marker ──
+    // ── dedup all-identical lessons + tip marker ──
 
     #[test]
     fn weave_braking_annotations_dedups_consecutive_identical_lessons() {
@@ -882,8 +985,33 @@ mod build_trunk_context_tests {
     }
 
     #[test]
+    fn dedups_all_identical_lessons_even_when_interleaved() {
+        // A `finding` interleaved between two identical `lesson` tags
+        // defeated the old consecutive-only dedup. The all-identical seen-set
+        // renders the repeated lesson ONCE regardless of ordering, while the
+        // distinct finding still renders.
+        let mut am = assistant("explored", 1, NodeId(0), None);
+        if let AgentMessage::Llm(lm) = &mut am {
+            lm.tags.push(tag(TagKind::Lesson, 0, "npm denied"));
+            lm.tags.push(tag(TagKind::Finding, 0, "registry is slow"));
+            lm.tags.push(tag(TagKind::Lesson, 0, "npm denied")); // non-consecutive repeat
+        }
+        let woven = AgentContext::weave_braking_annotations(vec![am]);
+        let text = first_text(&woven[0]);
+        assert_eq!(
+            text.matches("[lesson: npm denied]").count(),
+            1,
+            "interleaved identical lesson must render once: {text}"
+        );
+        assert!(
+            text.contains("[finding: registry is slow]"),
+            "the interleaved distinct finding must still render: {text}"
+        );
+    }
+
+    #[test]
     fn weave_braking_annotations_keeps_distinct_lessons() {
-        // Dedup is consecutive-identical only — distinct lessons must all render.
+        // Dedup is all-identical — distinct lessons must all still render.
         let mut am = assistant("explored two paths", 1, NodeId(0), None);
         if let AgentMessage::Llm(lm) = &mut am {
             lm.tags.push(tag(TagKind::Lesson, 0, "npm denied"));
@@ -898,8 +1026,10 @@ mod build_trunk_context_tests {
     #[test]
     fn weave_braking_annotations_weaves_forward_progress_marker_at_tip() {
         // The trunk tip (last node-bearing message) carrying a lesson tag is
-        // the reverted-to node → a forward-progress marker must be woven in to
-        // steer a weak model onward instead of re-executing the abandoned step.
+        // the reverted-to node → a forward-progress meta-note must be emitted
+        // to steer a weak model onward instead of re-executing the abandoned
+        // step. The marker lives OFF the tip message's content in a STANDALONE
+        // meta-note entry (so it is never attributed to a tool node).
         let root = user("write a plan", 1, NodeId(0), None);
         let mut tip = assistant("reverted here", 2, NodeId(1), Some(NodeId(0)));
         if let AgentMessage::Llm(lm) = &mut tip {
@@ -907,19 +1037,86 @@ mod build_trunk_context_tests {
                 .push(tag(TagKind::Lesson, 1, "v1 was tangential, restarting"));
         }
         let woven = AgentContext::weave_braking_annotations(vec![root, tip]);
-        // Root (no lesson tag, not tip-with-lesson at idx 0 since the tip is
-        // idx 1) carries NO forward-progress marker.
+        // The forward-progress instruction is NOT prepended onto any pre-existing
+        // node's content — it lives in its own entry.
         assert!(
             !first_text(&woven[0]).contains("continue forward"),
-            "non-tip node must not carry the forward marker: {}",
+            "root node must not carry the forward marker: {}",
             first_text(&woven[0])
         );
-        // Tip carries the marker.
+        assert!(
+            !first_text(&woven[1]).contains("continue forward"),
+            "tip node content must not carry the forward marker (it is a standalone note now): {}",
+            first_text(&woven[1])
+        );
+        // A standalone meta-note entry was appended after the tip carrying the
+        // directive phrasing.
+        assert_eq!(woven.len(), 3, "a standalone meta-note must be inserted");
+        let note_text = first_text(&woven[2]);
+        assert!(
+            note_text.contains("[braking note]")
+                && note_text.contains("continue forward")
+                && note_text.contains("do NOT stop"),
+            "standalone meta-note must carry the directive forward-progress phrasing: {note_text}"
+        );
+    }
+
+    #[test]
+    fn marker_not_woven_onto_tool_result_node() {
+        // When the trunk tip is a `Message::ToolResult`, the forward-progress
+        // string must NOT be glued onto that node's content (a model misreads
+        // "[continue forward] <tool output>" as "the tool triggered a revert").
+        // It is emitted as a SEPARATE entry instead.
+        let root = user("write a plan", 1, NodeId(0), None);
+        let mut tip = tool_result("file written", 2, NodeId(1), Some(NodeId(0)));
+        if let AgentMessage::Llm(lm) = &mut tip {
+            lm.tags
+                .push(tag(TagKind::Lesson, 1, "v1 was tangential, restarting"));
+        }
+        let woven = AgentContext::weave_braking_annotations(vec![root, tip]);
+        // The tool-result tip's own content carries the `[n1]` marker + lesson
+        // tag but NOT the forward-progress directive.
         let tip_text = first_text(&woven[1]);
         assert!(
-            tip_text.contains("continue forward with a new approach")
-                && tip_text.contains("do not repeat the abandoned steps"),
-            "tip must carry the forward-progress marker: {tip_text}"
+            tip_text.starts_with("[n1]") && tip_text.contains("file written"),
+            "tool-result tip keeps its marker + content: {tip_text}"
+        );
+        assert!(
+            !tip_text.contains("continue forward"),
+            "forward-progress string must NOT be woven onto the tool-result node: {tip_text}"
+        );
+        // The forward-progress directive lives in its own appended entry.
+        assert_eq!(woven.len(), 3);
+        assert!(
+            first_text(&woven[2]).contains("continue forward"),
+            "forward-progress directive must be a separate entry: {}",
+            first_text(&woven[2])
+        );
+    }
+
+    #[test]
+    fn forward_marker_is_standalone_meta_note() {
+        // The forward-progress marker renders as its own entry with concrete,
+        // directive phrasing (re-read the task, do the next uncompleted step,
+        // do not redo completed steps, do not stop).
+        let mut tip = assistant("reverted here", 1, NodeId(0), None);
+        if let AgentMessage::Llm(lm) = &mut tip {
+            lm.tags
+                .push(tag(TagKind::Lesson, 0, "approach v1 abandoned"));
+        }
+        let woven = AgentContext::weave_braking_annotations(vec![tip]);
+        // tip (idx 0) + standalone note (idx 1).
+        assert_eq!(woven.len(), 2, "a standalone note must follow the tip");
+        let note_text = first_text(&woven[1]);
+        assert!(note_text.contains("[braking note]"), "{note_text}");
+        assert!(note_text.contains("Re-read the task"), "{note_text}");
+        assert!(note_text.contains("next uncompleted step"), "{note_text}");
+        assert!(note_text.contains("do NOT"), "{note_text}");
+        assert!(note_text.contains("continue forward"), "{note_text}");
+        // The breadcrumb (the lesson text) is surfaced in the note.
+        assert!(
+            note_text.contains("approach v1 abandoned"),
+            "breadcrumb summary must appear in the note: {note_text}"
         );
     }
 
@@ -929,6 +1126,12 @@ mod build_trunk_context_tests {
         // no forward-progress marker (avoids spamming every trunk build).
         let am = assistant("ordinary tip", 1, NodeId(5), None);
         let woven = AgentContext::weave_braking_annotations(vec![am]);
+        // No lesson/finding tag on the tip → no standalone meta-note inserted.
+        assert_eq!(
+            woven.len(),
+            1,
+            "no note must be inserted without a lesson tag"
+        );
         let text = first_text(&woven[0]);
         assert!(
             !text.contains("continue forward"),

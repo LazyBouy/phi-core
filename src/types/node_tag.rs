@@ -107,7 +107,7 @@ impl RevertCategory {
 /// The kind drives the render policy (added in Phase 5):
 /// - `Lesson` / `Finding` — decay-able (sliding window).
 /// - `Outcome` / `Checkpoint` — pinned while live work depends on them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TagKind {
     Lesson,

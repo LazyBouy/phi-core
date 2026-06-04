@@ -1,4 +1,4 @@
-<!-- Last verified: 2026-06-04 by Claude Code (CC-15: revert description teaches tree/node model + tool_help ref; weave dedups consecutive lessons + weaves a forward-progress marker at the trunk tip) -->
+<!-- Last verified: 2026-06-04 by Claude Code (revert continue-forward rework: revert description teaches the tree/node model + references tool_help; weave dedups ALL identical lessons (was consecutive-only), emits the forward-progress instruction as a standalone meta-note off tool-result nodes, and renders a rewind breadcrumb composed by apply_revert from summary + abandoned tool-call names — the rebuilt trunk keeps a one-line progress thread) -->
 # Composition I — the braking layer
 
 Composition I is phi-core's **opt-in braking layer** [EXISTS]. It lets the
@@ -160,27 +160,46 @@ let trunk = ctx.build_trunk_context_with_policy(&policy, current_turn);
 let woven = AgentContext::weave_braking_annotations(trunk);
 ```
 
-`weave_braking_annotations` prepends, per trunk message:
+`weave_braking_annotations` weaves, per trunk message:
 
 - `[n<id>]` — the node marker, so the model can read a valid `step` for
   `revert_to_state` (the tool's `step` accepts exactly this inline render). Without
   it the model has no way to know a target node from a cold start.
 - `[<kind>: <text>]` — each surviving `Lesson` / `Finding` / `Outcome` /
   `Checkpoint` tag, so "the next turn sees the lesson" is literally true.
-  **Consecutive identical lesson/finding tags on the same node render once** —
-  repeated reverts to the same node previously stacked the same lesson up to 6×,
-  burying weaker models in duplicated noise.
-- A **forward-progress marker** at the trunk tip — when the reverted-to node (the
-  active node, last on the trunk) carries a `Lesson` / `Finding` tag (the signal
-  that a revert just landed there), the weave appends "reverted to this node —
-  continue forward with a new approach; do not repeat the abandoned steps". This
-  steers a weaker model onward instead of re-executing the step it just abandoned
-  and looping.
+  **An identical `(kind, text)` lesson/finding tag on a node renders once** even
+  when other tags interleave between the repeats — a seen-set, not a
+  consecutive-only check, so a `[finding][lesson][lesson]` ordering no longer
+  stacks the duplicate. Repeated reverts to the same node could otherwise bury
+  weaker models in a wall of duplicated noise.
 
-The agent loop calls this on the revert-mode trunk path only
+Then, when a revert just landed on the trunk tip (the reverted-to node carries a
+`Lesson` / `Finding` tag), the weave inserts a **standalone forward-progress
+meta-note** as a fresh nodeless entry right after the tip:
+
+- The note is its OWN entry — it is **not** prepended onto the tip message's
+  content. The tip can be a `ToolResult` node; gluing a "continue forward"
+  instruction onto a tool result risks a weaker model misreading it as "the tool
+  triggered a rewind". A standalone note keeps attribution unambiguous regardless
+  of what message-type the tip is.
+- The note carries a **rewind breadcrumb** of the abandoned branch — a one-line
+  `reverted past: <summary> (<tool-names> abandoned)` thread composed by
+  `apply_revert` (see below) — plus a concrete, directive continue-forward
+  instruction. This restores the model's progress thread after a rewind (a clean
+  rewind erases it, so a model may stop or loop), mirroring the `prun_with_memo`
+  "drop the content, leave a memo" pattern. Only the tool-call NAMES are carried;
+  the abandoned content itself is never re-introduced.
+
+The breadcrumb is composed in `apply_revert` (`agent_loop/run.rs`): when a revert
+drops the post-target span, `compose_revert_breadcrumb` builds the one-liner from
+the agent's revert `summary` plus the tool-call names extracted from the abandoned
+span, and rides it on the reverted-to node's summary tag for the weave to render.
+
+The agent loop calls the weave on the revert-mode trunk path only
 (`active_node_id.is_some()`); non-revert consumers are byte-identical (their
-messages carry no `node_id`, so the weave is a pass-through). The 5-turn-window
-decay policy (`build_trunk_context_with_policy`) is unchanged.
+messages carry no `node_id`, so the weave is a pass-through and no note is
+inserted). The 5-turn-window decay policy (`build_trunk_context_with_policy`) is
+unchanged.
 
 ## What 0.8.0 does NOT ship
 
