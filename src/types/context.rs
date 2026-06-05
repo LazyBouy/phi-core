@@ -27,38 +27,6 @@ fn prepend_marker_to_message(message: &mut super::content::Message, marker: &str
     }
 }
 
-/// Composition I — build the standalone forward-progress meta-note emitted at
-/// the trunk tip after a revert lands.
-///
-/// The note is a fresh nodeless [`AgentMessage::Llm`] carrying a `User`-shaped
-/// system line, so it renders as its own clearly-separated entry rather than
-/// being prepended onto whatever message-type the tip is (a tool-result tip
-/// must not read as "the tool triggered a rewind"). `breadcrumb` is the tip
-/// tag's text — the revert summary plus the abandoned-span tool-call names
-/// composed by `apply_revert` — and is surfaced verbatim so the model knows
-/// concretely what was just tried-and-abandoned. The instruction is concrete
-/// and directive: re-read the task, do the next uncompleted step, do not redo
-/// completed steps, do not stop. Used only by [`AgentContext::weave_braking_annotations`].
-fn forward_progress_meta_note(breadcrumb: &str) -> AgentMessage {
-    use super::content::{Content, Message};
-    let trimmed = breadcrumb.trim();
-    let crumb = if trimmed.is_empty() {
-        String::new()
-    } else {
-        format!(" {trimmed}.")
-    };
-    let text = format!(
-        "[braking note]{crumb} You just reverted to this node. Re-read the task \
-         and continue forward from here: do the next uncompleted step, do NOT \
-         redo steps you already completed, and do NOT stop — keep going until \
-         the task is done."
-    );
-    AgentMessage::Llm(super::agent_message::LlmMessage::new(Message::User {
-        content: vec![Content::Text { text }],
-        timestamp: 0,
-    }))
-}
-
 // ---------------------------------------------------------------------------
 // In-run context entry (2-stream architecture)
 // ---------------------------------------------------------------------------
@@ -302,12 +270,20 @@ impl AgentContext {
     /// only:
     ///
     /// - **Abandon-class tip** (the tip carries a decay-able `Lesson`/`Finding`
-    ///   tag, the signal that a revert just landed there): the tip's heavy
-    ///   `ToolCall` blocks are stripped from the rendered message. The one-line
-    ///   breadcrumb already lives on the tip's tag (composed by `apply_revert`)
-    ///   and is woven into content by `weave_braking_annotations` downstream, so
-    ///   the model reads the breadcrumb where the ~80-line body used to be. No
-    ///   `ToolCall` remains, so nothing dangles.
+    ///   tag, the signal that a revert just landed there): the whole cluster is
+    ///   collapsed atomically to a single clean assistant node carrying the
+    ///   breadcrumb, with NO heavy `ToolCall` and NO orphaned tool-result. The
+    ///   one-line breadcrumb (composed by `apply_revert`) is woven into content
+    ///   by `weave_braking_annotations` downstream, so the model reads the
+    ///   breadcrumb where the ~80-line body used to be. Two tip shapes are
+    ///   handled: a **call-tip** (the tip IS the assistant tool-call node) strips
+    ///   the tip's heavy `ToolCall` blocks — its matching tool-result is off-trunk
+    ///   (a child excluded by the parent-chain walk), so nothing dangles; a
+    ///   **result-tip** (the tip is the matching tool-result, the #59 shape) finds
+    ///   the parent assistant-call node on the trunk, strips ITS `ToolCall` blocks,
+    ///   MOVES the tip's `NodeTag`(s) onto that parent, and REMOVES the tool-result
+    ///   tip from the trunk Vec — so there is no orphaned result (a `tool_call_id`
+    ///   with no matching call would be rejected by OpenAI-compat providers).
     /// - **Pinned tip** (`Outcome`/`Checkpoint`, NOT decay-able): the cluster is
     ///   load-bearing (a sealed result the model may re-read), so it is kept
     ///   WHOLE — if the tip is a tool-call whose matching tool-result is
@@ -354,33 +330,97 @@ impl AgentContext {
         };
         let abandon_class = tag.kind.is_decayable();
 
-        // The tip must be an assistant message carrying ≥ 1 ToolCall for the
-        // cluster mechanics to apply; otherwise there is no heavy tool-body to
-        // reclaim and no dangling-call hazard.
+        // Classify the tip's message shape. The cluster mechanics apply to two
+        // shapes the revert can land on:
+        //
+        //  (1) the tip is the assistant TOOL-CALL node itself — its `Content::
+        //      ToolCall` carries the heavy `arguments`. (`deepseek` reverted
+        //      `step="n0"` onto this shape.)
+        //  (2) the tip is the matching TOOL-RESULT node — the heavy `arguments`
+        //      live in the tip's PARENT assistant-call node, which stays
+        //      on-trunk (the tip's `tool_call_id` names it). This is the
+        //      #59-canonical shape: `minimax` reverted `step="n1"` onto the
+        //      tool-result of the abandoned `write_file`, leaving the heavy
+        //      plan-v1 in the parent call node `n0`.
+        //
+        // For shape (1) `tip_call_id` is the tip's own ToolCall id; for shape
+        // (2) it is the tip's `tool_call_id` linking back to the parent call.
+        // Either way, `tip_call_id` identifies the cluster's tool invocation.
+        let tip_is_call = matches!(tip.message, Message::Assistant { .. });
         let tip_call_id = match &tip.message {
             Message::Assistant { content, .. } => content.iter().find_map(|b| match b {
                 Content::ToolCall { id, .. } => Some(id.clone()),
                 _ => None,
             }),
+            Message::ToolResult { tool_call_id, .. } => Some(tool_call_id.clone()),
             _ => None,
         };
         let Some(tip_call_id) = tip_call_id else {
-            return trunk; // tip is not a tool-call node → no cluster to reclaim
+            return trunk; // tip is neither a tool-call node nor a tool-result → no cluster
         };
 
         if abandon_class {
-            // Abandon-class: strip the heavy ToolCall blocks from the tip so the
-            // rendered trunk carries the breadcrumb (woven from the tag) instead
-            // of the ~80-line abandoned body. Dropping the ToolCall also removes
-            // the dangling-call hazard (no call → nothing to dangle). Keep any
-            // non-ToolCall blocks (e.g. a leading Thinking/Text the assistant
-            // emitted alongside the call).
-            if let AgentMessage::Llm(lm) = &mut trunk[tip_idx] {
-                if let Message::Assistant { content, .. } = &mut lm.message {
-                    content.retain(|b| !matches!(b, Content::ToolCall { .. }));
+            if tip_is_call {
+                // Shape (1): the tip is the abandoned assistant tool-call node.
+                // Strip the heavy ToolCall blocks from the tip so the rendered
+                // trunk carries the breadcrumb (woven from the tag) instead of
+                // the ~80-line abandoned body. Dropping the ToolCall also
+                // removes the dangling-call hazard (no call → nothing to
+                // dangle). Keep any non-ToolCall blocks (e.g. a leading
+                // Thinking/Text the assistant emitted alongside the call).
+                if let AgentMessage::Llm(lm) = &mut trunk[tip_idx] {
+                    if let Message::Assistant { content, .. } = &mut lm.message {
+                        content.retain(|b| !matches!(b, Content::ToolCall { .. }));
+                    }
+                }
+            } else {
+                // Shape (2) — the #59-canonical tool-RESULT tip. The heavy body
+                // lives in the tip's PARENT assistant-call node (the on-trunk
+                // node whose `Content::ToolCall.id` == the tip's `tool_call_id`).
+                // Collapse the WHOLE cluster atomically so the rendered trunk
+                // carries a single clean assistant node with the breadcrumb tag,
+                // NO heavy ToolCall, and NO orphaned tool-result:
+                //
+                //  (a) find the parent assistant-call node on the trunk;
+                //  (b) strip its ToolCall blocks (reclaim the heavy plan-v1 body);
+                //  (c) MOVE the tip's NodeTag(s) onto the parent node so the
+                //      breadcrumb renders on the surviving assistant node;
+                //  (d) REMOVE the tool-result tip from the trunk Vec so there is
+                //      no orphaned result (a tool_call_id with no matching call
+                //      → OpenAI-compat providers reject it).
+                //
+                // The parent assistant node becomes the last node-bearing
+                // message, carrying the moved tag — so the downstream weave's
+                // tip detection finds it and folds the continue-forward directive
+                // onto it.
+                if let Some(parent_idx) = trunk.iter().position(|m| match m {
+                    AgentMessage::Llm(lm) => match &lm.message {
+                        Message::Assistant { content, .. } => content.iter().any(
+                            |b| matches!(b, Content::ToolCall { id, .. } if *id == tip_call_id),
+                        ),
+                        _ => false,
+                    },
+                    _ => false,
+                }) {
+                    // (c) lift the tip's tags out before we remove it.
+                    let moved_tags = match &trunk[tip_idx] {
+                        AgentMessage::Llm(lm) => lm.tags.clone(),
+                        _ => Vec::new(),
+                    };
+                    // (b) strip the parent call's heavy ToolCall blocks and (c)
+                    // append the moved tags onto the parent node.
+                    if let AgentMessage::Llm(lm) = &mut trunk[parent_idx] {
+                        if let Message::Assistant { content, .. } = &mut lm.message {
+                            content.retain(|b| !matches!(b, Content::ToolCall { .. }));
+                        }
+                        lm.tags.extend(moved_tags);
+                    }
+                    // (d) remove the tool-result tip from the trunk so no
+                    // orphaned result survives.
+                    trunk.remove(tip_idx);
                 }
             }
-        } else {
+        } else if tip_is_call {
             // Pinned: keep the cluster WHOLE. If the matching tool-result is
             // off-trunk (the #59 shape: revert targeted the call node, so its
             // result child was excluded by the parent-chain walk), re-append it
@@ -406,6 +446,10 @@ impl AgentContext {
                 }
             }
         }
+        // Pinned + tool-result tip: the cluster (parent call + result) is
+        // already whole on-trunk (the parent-chain walk keeps the call as the
+        // tip's parent), so nothing dangles and there is no action — the
+        // `else if tip_is_call` guard above falls through to here as a no-op.
 
         trunk
     }
@@ -434,17 +478,18 @@ impl AgentContext {
         use super::node_tag::TagKind;
         use std::collections::HashSet;
 
-        // Locate the trunk tip (the LAST node-bearing
-        // message), which is the active / reverted-to node. When that node
-        // carries ≥ 1 decay-able lesson/finding tag — the signal that a revert
-        // just landed there (apply_revert attaches the summary tag to the
-        // target node, which becomes the active node) — we emit a standalone
-        // forward-progress meta-note AFTER the tip so a weaker model is steered
-        // onward instead of looping on the re-presented task. The note is a
-        // fresh nodeless entry, never glued onto whatever message-type the tip
-        // is — a tool-result tip must not read as "the tool triggered a
-        // rewind". General braking-machinery merit: any consumer reverting
-        // repeatedly benefits from an attribution-clean continue-forward signal.
+        // Locate the trunk tip (the LAST node-bearing message), which is the
+        // active / reverted-to node. When that node carries ≥ 1 decay-able
+        // lesson/finding tag — the signal that a revert just landed there
+        // (apply_revert attaches the summary tag to the target node, which
+        // becomes the active node) — we fold a forward-progress directive
+        // DIRECTLY into the tip node's woven annotation (right after its
+        // `[lesson: …]` tag) so a weaker model is steered onward instead of
+        // looping on the re-presented task. The directive is part of the tip
+        // node's content marker — there is NO standalone `Message::User` note.
+        // General braking-machinery merit: any consumer reverting repeatedly
+        // benefits from an attribution-clean continue-forward signal that does
+        // not introduce a phantom user-role message.
         let tip_idx = messages
             .iter()
             .enumerate()
@@ -454,12 +499,11 @@ impl AgentContext {
                 _ => None,
             });
 
-        // First pass: weave the per-node `[n<id>]` markers + surviving
-        // lesson/finding tags into each node's content. The forward-progress
-        // line is NOT prepended here — it is emitted as its own entry below so
-        // it is never attributed to a tool-result node.
-        let mut tip_summary: Option<String> = None;
-        let mut woven: Vec<AgentMessage> = messages
+        // Single pass: weave the per-node `[n<id>]` markers + surviving
+        // lesson/finding tags into each node's content. On the abandon-class
+        // tip (a tip carrying a lesson/finding tag), the continue-forward
+        // directive is appended onto that node's marker right after its tags.
+        let woven: Vec<AgentMessage> = messages
             .into_iter()
             .enumerate()
             .map(|(idx, m)| match m {
@@ -476,16 +520,17 @@ impl AgentContext {
                     // ordering, removing the wall of noise that can confuse
                     // weaker models into looping.
                     let mut seen: HashSet<(TagKind, &str)> = HashSet::new();
-                    let mut tip_lesson: Option<&str> = None;
+                    let mut tip_has_lesson = false;
                     for tag in &lm.tags {
                         let is_lesson = matches!(tag.kind, TagKind::Lesson | TagKind::Finding);
                         if !seen.insert((tag.kind, tag.text.as_str())) {
                             continue; // identical tag already rendered on this node
                         }
-                        // Remember the first lesson/finding text on the tip — it
-                        // carries the revert breadcrumb composed by apply_revert.
-                        if Some(idx) == tip_idx && is_lesson && tip_lesson.is_none() {
-                            tip_lesson = Some(tag.text.as_str());
+                        // The tip carrying a lesson/finding tag is the
+                        // reverted-to node → fold the continue-forward directive
+                        // onto it below.
+                        if Some(idx) == tip_idx && is_lesson {
+                            tip_has_lesson = true;
                         }
                         let kind = match tag.kind {
                             TagKind::Lesson => "lesson",
@@ -495,8 +540,14 @@ impl AgentContext {
                         };
                         marker.push_str(&format!(" [{}: {}]", kind, tag.text));
                     }
-                    if let Some(text) = tip_lesson {
-                        tip_summary = Some(text.to_string());
+                    // Fold the forward-progress directive into the tip node's
+                    // annotation (right after its lesson tag), scoped to the
+                    // abandon-class tip where the standalone note fired before.
+                    if tip_has_lesson {
+                        marker.push_str(
+                            " [continue forward: do the next uncompleted step; \
+                             do NOT redo completed steps; do NOT stop]",
+                        );
                     }
                     prepend_marker_to_message(&mut lm.message, &marker);
                     AgentMessage::Llm(lm)
@@ -504,18 +555,6 @@ impl AgentContext {
                 other => other,
             })
             .collect();
-
-        // Second pass: when a revert just landed on the tip (it carries a
-        // lesson/finding tag), insert a standalone forward-progress meta-note
-        // right after the tip. The note carries the breadcrumb (the tip tag's
-        // text, composed by apply_revert) plus a concrete, directive
-        // continue-forward instruction. It is a nodeless synthetic entry, so it
-        // is never confused with a real trunk node and is byte-invisible to
-        // non-revert consumers.
-        if let (Some(tip), Some(summary)) = (tip_idx, tip_summary) {
-            let note = forward_progress_meta_note(&summary);
-            woven.insert(tip + 1, note);
-        }
 
         woven
     }
@@ -1151,10 +1190,9 @@ mod build_trunk_context_tests {
     #[test]
     fn weave_braking_annotations_weaves_forward_progress_marker_at_tip() {
         // The trunk tip (last node-bearing message) carrying a lesson tag is
-        // the reverted-to node → a forward-progress meta-note must be emitted
-        // to steer a weak model onward instead of re-executing the abandoned
-        // step. The marker lives OFF the tip message's content in a STANDALONE
-        // meta-note entry (so it is never attributed to a tool node).
+        // the reverted-to node → the continue-forward directive must be FOLDED
+        // INTO that tip node's woven annotation (right after its `[lesson: …]`
+        // tag). There is NO standalone `Message::User` braking note.
         let root = user("write a plan", 1, NodeId(0), None);
         let mut tip = assistant("reverted here", 2, NodeId(1), Some(NodeId(0)));
         if let AgentMessage::Llm(lm) = &mut tip {
@@ -1162,36 +1200,48 @@ mod build_trunk_context_tests {
                 .push(tag(TagKind::Lesson, 1, "v1 was tangential, restarting"));
         }
         let woven = AgentContext::weave_braking_annotations(vec![root, tip]);
-        // The forward-progress instruction is NOT prepended onto any pre-existing
-        // node's content — it lives in its own entry.
+        // No standalone note is inserted — the output length is unchanged.
+        assert_eq!(
+            woven.len(),
+            2,
+            "no standalone braking note must be inserted (directive is folded into the tip)"
+        );
+        // The root node does NOT carry the forward directive.
         assert!(
             !first_text(&woven[0]).contains("continue forward"),
-            "root node must not carry the forward marker: {}",
+            "root node must not carry the forward directive: {}",
             first_text(&woven[0])
         );
+        // The tip node's OWN annotation carries the lesson tag AND the folded
+        // continue-forward directive.
+        let tip_text = first_text(&woven[1]);
         assert!(
-            !first_text(&woven[1]).contains("continue forward"),
-            "tip node content must not carry the forward marker (it is a standalone note now): {}",
-            first_text(&woven[1])
+            tip_text.starts_with("[n1]")
+                && tip_text.contains("[lesson: v1 was tangential, restarting]"),
+            "tip keeps its marker + lesson tag: {tip_text}"
         );
-        // A standalone meta-note entry was appended after the tip carrying the
-        // directive phrasing.
-        assert_eq!(woven.len(), 3, "a standalone meta-note must be inserted");
-        let note_text = first_text(&woven[2]);
         assert!(
-            note_text.contains("[braking note]")
-                && note_text.contains("continue forward")
-                && note_text.contains("do NOT stop"),
-            "standalone meta-note must carry the directive forward-progress phrasing: {note_text}"
+            tip_text.contains("[continue forward:")
+                && tip_text.contains("next uncompleted step")
+                && tip_text.contains("do NOT stop"),
+            "tip annotation must carry the folded continue-forward directive: {tip_text}"
+        );
+        // No phantom `Message::User` braking-note entry exists in the output.
+        assert!(
+            !woven.iter().any(|m| matches!(
+                m,
+                AgentMessage::Llm(lm) if lm.node_id.is_none()
+                    && matches!(&lm.message, Message::User { .. })
+            )),
+            "no standalone Message::User braking note must be present"
         );
     }
 
     #[test]
-    fn marker_not_woven_onto_tool_result_node() {
-        // When the trunk tip is a `Message::ToolResult`, the forward-progress
-        // string must NOT be glued onto that node's content (a model misreads
-        // "[continue forward] <tool output>" as "the tool triggered a revert").
-        // It is emitted as a SEPARATE entry instead.
+    fn forward_directive_folded_onto_tool_result_tip_annotation() {
+        // When the trunk tip is a `Message::ToolResult` carrying a lesson tag,
+        // the continue-forward directive is folded into the tip's OWN
+        // annotation (right after its lesson tag) — there is no separate entry.
         let root = user("write a plan", 1, NodeId(0), None);
         let mut tip = tool_result("file written", 2, NodeId(1), Some(NodeId(0)));
         if let AgentMessage::Llm(lm) = &mut tip {
@@ -1199,59 +1249,63 @@ mod build_trunk_context_tests {
                 .push(tag(TagKind::Lesson, 1, "v1 was tangential, restarting"));
         }
         let woven = AgentContext::weave_braking_annotations(vec![root, tip]);
-        // The tool-result tip's own content carries the `[n1]` marker + lesson
-        // tag but NOT the forward-progress directive.
+        // No standalone entry is appended.
+        assert_eq!(woven.len(), 2, "no standalone note entry must be inserted");
         let tip_text = first_text(&woven[1]);
         assert!(
             tip_text.starts_with("[n1]") && tip_text.contains("file written"),
             "tool-result tip keeps its marker + content: {tip_text}"
         );
         assert!(
-            !tip_text.contains("continue forward"),
-            "forward-progress string must NOT be woven onto the tool-result node: {tip_text}"
-        );
-        // The forward-progress directive lives in its own appended entry.
-        assert_eq!(woven.len(), 3);
-        assert!(
-            first_text(&woven[2]).contains("continue forward"),
-            "forward-progress directive must be a separate entry: {}",
-            first_text(&woven[2])
+            tip_text.contains("[lesson: v1 was tangential, restarting]")
+                && tip_text.contains("[continue forward:"),
+            "the directive is folded into the tool-result tip's annotation: {tip_text}"
         );
     }
 
     #[test]
-    fn forward_marker_is_standalone_meta_note() {
-        // The forward-progress marker renders as its own entry with concrete,
-        // directive phrasing (re-read the task, do the next uncompleted step,
-        // do not redo completed steps, do not stop).
+    fn forward_directive_folds_into_tip_annotation() {
+        // The continue-forward directive renders folded into the tip node's
+        // annotation with concrete, directive phrasing (do the next uncompleted
+        // step, do not redo completed steps, do not stop). No standalone note.
         let mut tip = assistant("reverted here", 1, NodeId(0), None);
         if let AgentMessage::Llm(lm) = &mut tip {
             lm.tags
                 .push(tag(TagKind::Lesson, 0, "approach v1 abandoned"));
         }
         let woven = AgentContext::weave_braking_annotations(vec![tip]);
-        // tip (idx 0) + standalone note (idx 1).
-        assert_eq!(woven.len(), 2, "a standalone note must follow the tip");
-        let note_text = first_text(&woven[1]);
-        assert!(note_text.contains("[braking note]"), "{note_text}");
-        assert!(note_text.contains("Re-read the task"), "{note_text}");
-        assert!(note_text.contains("next uncompleted step"), "{note_text}");
-        assert!(note_text.contains("do NOT"), "{note_text}");
-        assert!(note_text.contains("continue forward"), "{note_text}");
-        // The breadcrumb (the lesson text) is surfaced in the note.
+        // Only the tip entry — no separate note.
+        assert_eq!(woven.len(), 1, "no standalone note must follow the tip");
+        let tip_text = first_text(&woven[0]);
+        // The lesson breadcrumb renders on the tip's annotation.
         assert!(
-            note_text.contains("approach v1 abandoned"),
-            "breadcrumb summary must appear in the note: {note_text}"
+            tip_text.contains("[lesson: approach v1 abandoned]"),
+            "the lesson breadcrumb must render on the tip: {tip_text}"
+        );
+        // The folded continue-forward directive carries the concrete phrasing.
+        assert!(tip_text.contains("[continue forward:"), "{tip_text}");
+        assert!(tip_text.contains("next uncompleted step"), "{tip_text}");
+        assert!(
+            tip_text.contains("do NOT redo completed steps"),
+            "{tip_text}"
+        );
+        assert!(tip_text.contains("do NOT stop"), "{tip_text}");
+        // No `[braking note]` standalone-note phrasing remains anywhere.
+        assert!(
+            !woven
+                .iter()
+                .any(|m| first_text(m).contains("[braking note]")),
+            "no standalone [braking note] entry must exist"
         );
     }
 
     #[test]
     fn weave_braking_annotations_no_forward_marker_without_lesson() {
         // A tip node with NO lesson/finding tag is not a fresh-revert tip →
-        // no forward-progress marker (avoids spamming every trunk build).
+        // no forward-progress directive (avoids spamming every trunk build).
         let am = assistant("ordinary tip", 1, NodeId(5), None);
         let woven = AgentContext::weave_braking_annotations(vec![am]);
-        // No lesson/finding tag on the tip → no standalone meta-note inserted.
+        // No lesson/finding tag on the tip → no directive folded, no note added.
         assert_eq!(
             woven.len(),
             1,
@@ -1260,7 +1314,7 @@ mod build_trunk_context_tests {
         let text = first_text(&woven[0]);
         assert!(
             !text.contains("continue forward"),
-            "untagged tip must not carry the forward marker: {text}"
+            "untagged tip must not carry the forward directive: {text}"
         );
     }
 }
@@ -1446,6 +1500,114 @@ mod collapse_abandon_class_cluster_tests {
         );
     }
 
+    /// The #59-canonical (minimax) shape: user task (n0) → assistant write_file
+    /// CALL (n1, heavy) → write_file RESULT (n2). `revert_to_state(failure,
+    /// step="n2")` targets the tool-RESULT node n2; n1 (its parent call) stays
+    /// on-trunk and carries the heavy plan-v1 body.
+    fn fixture_59_tool_result_tip() -> AgentContext {
+        AgentContext {
+            messages: vec![
+                user_node("write a plan", 1, NodeId(0), None),
+                tool_call_node(
+                    "call_abc",
+                    "PLAN-V1-HEAVY-BODY",
+                    2,
+                    NodeId(1),
+                    Some(NodeId(0)),
+                ),
+                result_node("call_abc", 3, NodeId(2), Some(NodeId(1))),
+            ],
+            next_node_id: 3,
+            active_node_id: Some(NodeId(2)), // reverted onto the tool-RESULT node
+            ..Default::default()
+        }
+    }
+
+    /// Does the rendered trunk contain ANY tool-result for `call_id`?
+    fn trunk_has_tool_result(trunk: &[AgentMessage], call_id: &str) -> bool {
+        trunk.iter().any(|m| match m {
+            AgentMessage::Llm(lm) => matches!(
+                &lm.message,
+                Message::ToolResult { tool_call_id, .. } if tool_call_id == call_id
+            ),
+            _ => false,
+        })
+    }
+
+    #[test]
+    fn abandon_class_collapses_when_tip_is_tool_result_collapses_whole_cluster() {
+        // The #59-canonical shape the live close-gate caught: the model reverts
+        // onto the tool-RESULT node (minimax `step="n1"`). The trunk tip is a
+        // `Message::ToolResult`; the heavy body lives in its PARENT
+        // assistant-call node (still on-trunk). The WHOLE cluster must collapse
+        // atomically — the previous fix stripped the parent call but KEPT the
+        // tool-result tip, leaving an ORPHANED result (a tool_call_id with no
+        // matching call → OpenAI-compat providers reject it).
+        let mut ctx = fixture_59_tool_result_tip();
+        // apply_revert attaches the abandon-class (Lesson) breadcrumb on the
+        // target tool-result node naming the abandoned write_file work.
+        tag_message(
+            &mut ctx.messages,
+            2,
+            TagKind::Lesson,
+            "reverted past: plan-v1 abandoned (write_file abandoned)",
+        );
+        // Trunk = parent-chain from n2 = [n0, n1, n2]; the parent call n1 carries
+        // the heavy body, the tip n2 is the tool-result.
+        let trunk = ctx.build_trunk_context();
+        assert!(
+            trunk_has_heavy_args(&trunk, "PLAN-V1-HEAVY-BODY"),
+            "precondition: the parent call still carries the heavy body before collapse"
+        );
+        assert!(
+            trunk_has_tool_result(&trunk, "call_abc"),
+            "precondition: the tool-result tip is on the trunk before collapse"
+        );
+
+        let before = serde_json::to_string(&ctx.messages).unwrap();
+        let collapsed = ctx.collapse_abandon_class_cluster(trunk);
+
+        // (a) the parent call's heavy ToolCall args are GONE.
+        assert!(
+            !trunk_has_heavy_args(&collapsed, "PLAN-V1-HEAVY-BODY"),
+            "tool-result-tip collapse must strip the parent call's heavy body"
+        );
+        // (b) there is NO Message::ToolResult left for this cluster — the
+        // tool-result tip is removed, so no orphaned result survives.
+        assert!(
+            !trunk_has_tool_result(&collapsed, "call_abc"),
+            "the tool-result tip must be removed — no orphaned result"
+        );
+        // (c) the breadcrumb tag renders on the SURVIVING assistant node (moved
+        // from the removed tool-result tip onto the parent call node).
+        assert!(
+            trunk_has_breadcrumb(&collapsed, "write_file abandoned"),
+            "the breadcrumb must survive on the surviving assistant node"
+        );
+        let breadcrumb_on_assistant = collapsed.iter().any(|m| match m {
+            AgentMessage::Llm(lm) => {
+                matches!(&lm.message, Message::Assistant { .. })
+                    && lm
+                        .tags
+                        .iter()
+                        .any(|t| t.text.contains("write_file abandoned"))
+            }
+            _ => false,
+        });
+        assert!(
+            breadcrumb_on_assistant,
+            "the breadcrumb tag must live on the surviving assistant node"
+        );
+        // (d) no dangling tool-call AND no orphaned tool-result.
+        assert!(
+            !trunk_has_dangling_call(&collapsed),
+            "collapse must not leave a dangling tool-call"
+        );
+        // (e) self.messages byte-identical (collapse is render-only).
+        let after = serde_json::to_string(&ctx.messages).unwrap();
+        assert_eq!(before, after, "collapse must never mutate context.messages");
+    }
+
     #[test]
     fn pinned_class_keeps_cluster_whole_no_dangling_call() {
         let mut ctx = fixture_59_shape();
@@ -1541,23 +1703,114 @@ mod collapse_abandon_class_cluster_tests {
             !trunk_has_heavy_args(&collapsed, "LEXER-SRC"),
             "the abandoned lexer detour must be off-trunk"
         );
-        // The breadcrumb naming the abandoned work survives. The tip is a
-        // tool-result (not a call node), so the collapse pass is a no-op on the
-        // body — the parent-chain walk already reclaimed the tail.
+        // The breadcrumb naming the abandoned work survives. The tip n2 is a
+        // tool-result carrying an abandon-class breadcrumb → the c1 cluster
+        // (parent call n1 + result tip n2) collapses atomically.
         assert!(
             trunk_has_breadcrumb(&collapsed, "read_file, grep abandoned"),
             "the breadcrumb must name all abandoned tools across the span"
         );
-        // The kept parser read is intact.
+        // The c1 tool-result tip is removed (no orphaned result) and its tag
+        // moves onto the surviving assistant call node n1 (whose ToolCall body
+        // is stripped). The parser cluster collapses to a single clean node.
         assert!(
-            collapsed.iter().any(|m| matches!(
+            !trunk_has_tool_result(&collapsed, "c1"),
+            "the c1 tool-result tip must be removed — no orphaned result"
+        );
+        assert!(
+            !trunk_has_heavy_args(&collapsed, "PARSER-SRC"),
+            "the parent call's heavy body must be stripped"
+        );
+        assert!(
+            !trunk_has_dangling_call(&collapsed),
+            "the atomic collapse must leave no dangling tool-call"
+        );
+        let breadcrumb_on_assistant = collapsed.iter().any(|m| match m {
+            AgentMessage::Llm(lm) => {
+                matches!(&lm.message, Message::Assistant { .. })
+                    && lm
+                        .tags
+                        .iter()
+                        .any(|t| t.text.contains("read_file, grep abandoned"))
+            }
+            _ => false,
+        });
+        assert!(
+            breadcrumb_on_assistant,
+            "the breadcrumb tag must live on the surviving assistant node"
+        );
+    }
+
+    #[test]
+    fn end_to_end_collapse_then_weave_minimax_tool_result_tip() {
+        // The minimax shape end-to-end (collapse → weave): the model reverts
+        // onto a tool-RESULT tip carrying an abandon-class Lesson breadcrumb.
+        // After the atomic collapse + weave, the rendered output is a SINGLE
+        // assistant node carrying `[lesson: … write_file …]` + the folded
+        // `[continue forward: …]` directive — with NO `Message::ToolResult` and
+        // NO standalone `Message::User` braking note.
+        let mut ctx = fixture_59_tool_result_tip();
+        tag_message(
+            &mut ctx.messages,
+            2,
+            TagKind::Lesson,
+            "reverted past: plan-v1 abandoned (write_file abandoned)",
+        );
+        let policy = super::super::node_tag::RevertRenderPolicy::default();
+        let trunk = ctx.build_trunk_context_with_policy(&policy, 1);
+        let collapsed = ctx.collapse_abandon_class_cluster(trunk);
+        let woven = AgentContext::weave_braking_annotations(collapsed);
+
+        // No ToolResult anywhere — the cluster collapsed atomically.
+        assert!(
+            !woven.iter().any(|m| matches!(
                 m,
-                AgentMessage::Llm(lm) if matches!(
-                    &lm.message,
-                    Message::ToolResult { tool_call_id, .. } if tool_call_id == "c1"
-                )
+                AgentMessage::Llm(lm) if matches!(&lm.message, Message::ToolResult { .. })
             )),
-            "the kept parser-read result stays on the trunk"
+            "no Message::ToolResult must survive the atomic collapse"
+        );
+        // No standalone Message::User braking note (nodeless user entry).
+        assert!(
+            !woven.iter().any(|m| matches!(
+                m,
+                AgentMessage::Llm(lm) if lm.node_id.is_none()
+                    && matches!(&lm.message, Message::User { .. })
+            )),
+            "no standalone Message::User braking note must be present"
+        );
+        // The surviving assistant node carries the breadcrumb AND the folded
+        // continue-forward directive in its content.
+        fn assistant_text(m: &AgentMessage) -> Option<String> {
+            match m {
+                AgentMessage::Llm(lm) => match &lm.message {
+                    Message::Assistant { content, .. } => content.iter().find_map(|c| match c {
+                        Content::Text { text } => Some(text.clone()),
+                        _ => None,
+                    }),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+        let tip_text = woven
+            .iter()
+            .rev()
+            .find_map(assistant_text)
+            .expect("a surviving assistant node must carry woven content");
+        assert!(
+            tip_text.contains("[lesson:") && tip_text.contains("write_file abandoned"),
+            "the surviving assistant node must carry the lesson breadcrumb: {tip_text}"
+        );
+        assert!(
+            tip_text.contains("[continue forward:")
+                && tip_text.contains("next uncompleted step")
+                && tip_text.contains("do NOT stop"),
+            "the surviving assistant node must carry the folded continue-forward directive: {tip_text}"
+        );
+        // And the heavy body is gone.
+        assert!(
+            !tip_text.contains("PLAN-V1-HEAVY-BODY"),
+            "the heavy tool-call body must be gone: {tip_text}"
         );
     }
 }

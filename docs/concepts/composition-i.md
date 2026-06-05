@@ -1,4 +1,4 @@
-<!-- Last verified: 2026-06-05 by Claude Code (CC-17 render-time token reclamation: collapse_abandon_class_cluster strips the heavy ToolCall body of an abandon-class reverted-onto cluster into its one-line breadcrumb at render time (messages byte-identical); atomic-cluster invariant for all categories (abandon drops both, pinned keeps both); breadcrumb name-source widened to the target cluster's own tool-call; decay-window default lowered 5→3; revert description gains 4-category budget framing) -->
+<!-- Last verified: 2026-06-05 by Claude Code (CC-17 render-time token reclamation: collapse_abandon_class_cluster collapses an abandon-class reverted-onto cluster atomically for BOTH revert-target shapes (call-tip strips the tip; result-tip strips the parent call, moves the tag onto it, and removes the tool-result tip — no orphaned result) into its one-line breadcrumb at render time (messages byte-identical); atomic-cluster invariant for all categories (abandon drops the whole cluster, pinned keeps both); forward-progress directive folded into the tip node's annotation (no standalone Message::User braking note); breadcrumb excludes the revert tool's own name; decay-window default lowered 5→3; revert description gains 4-category budget framing) -->
 # Composition I — the braking layer
 
 Composition I is phi-core's **opt-in braking layer** [EXISTS]. It lets the
@@ -174,64 +174,78 @@ let woven = AgentContext::weave_braking_annotations(trunk);
   weaker models in a wall of duplicated noise.
 
 Then, when a revert just landed on the trunk tip (the reverted-to node carries a
-`Lesson` / `Finding` tag), the weave inserts a **standalone forward-progress
-meta-note** as a fresh nodeless entry right after the tip:
+`Lesson` / `Finding` tag), the weave **folds a forward-progress directive into
+that tip node's own annotation** — right after its `[lesson: …]` tag:
 
-- The note is its OWN entry — it is **not** prepended onto the tip message's
-  content. The tip can be a `ToolResult` node; gluing a "continue forward"
-  instruction onto a tool result risks a weaker model misreading it as "the tool
-  triggered a rewind". A standalone note keeps attribution unambiguous regardless
-  of what message-type the tip is.
-- The note carries a **rewind breadcrumb** of the abandoned branch — a one-line
-  `reverted past: <summary> (<tool-names> abandoned)` thread composed by
-  `apply_revert` (see below) — plus a concrete, directive continue-forward
-  instruction. This restores the model's progress thread after a rewind (a clean
-  rewind erases it, so a model may stop or loop), mirroring the `prun_with_memo`
-  "drop the content, leave a memo" pattern. Only the tool-call NAMES are carried;
-  the abandoned content itself is never re-introduced.
+- The directive `[continue forward: do the next uncompleted step; do NOT redo
+  completed steps; do NOT stop]` is part of the tip node's content marker. There
+  is **no** standalone `Message::User` braking note: a synthetic user-role entry
+  read as a phantom turn, and the directive belongs ON the node the model reverted
+  to. The directive is scoped to the abandon-class tip (where it fires); pinned
+  tips and untagged tips get no directive.
+- The reverted-to node also carries the **rewind breadcrumb** of the abandoned
+  branch — a one-line `reverted past: <summary> (<tool-names> abandoned)` thread
+  composed by `apply_revert` (see below) — which the weave renders as the node's
+  `[lesson: …]` tag. This restores the model's progress thread after a rewind (a
+  clean rewind erases it, so a model may stop or loop), mirroring the
+  `prun_with_memo` "drop the content, leave a memo" pattern. Only the tool-call
+  NAMES are carried; the abandoned content itself is never re-introduced.
 
 The breadcrumb is composed in `apply_revert` (`agent_loop/run.rs`): when a revert
 drops the post-target span, `compose_revert_breadcrumb` builds the one-liner from
 the agent's revert `summary` plus the tool-call names of the abandoned work, and
 rides it on the reverted-to node's summary tag for the weave to render. The
 name source-set is the **target cluster's own tool-call(s) PLUS the strictly-after
-span** (0.11): a revert whose `step` names a heavy `write_file` CALL node abandons
-the work that is ON the target node itself, not after it — so the breadcrumb names
-`write_file`, not the `revert_to_state` call that sits in the strictly-after span.
+span** (0.11), with the **revert tool's own name (`revert_to_state`) excluded** —
+it is the triggering action, not abandoned work. In the #59/minimax shape the
+model reverts onto the tool-RESULT node and its `revert_to_state` call sits in the
+strictly-after span; without the exclusion the breadcrumb would mislabel as
+`(write_file, revert_to_state abandoned)`. After the exclusion the breadcrumb
+names `write_file` only.
 
 The agent loop calls the weave on the revert-mode trunk path only
 (`active_node_id.is_some()`); non-revert consumers are byte-identical (their
-messages carry no `node_id`, so the weave is a pass-through and no note is
-inserted). The decay policy default window is 3 turns (lowered from 5 in 0.11).
+messages carry no `node_id`, so the weave is a pass-through and no directive is
+folded). The decay policy default window is 3 turns (lowered from 5 in 0.11).
 
 ## Render-time reclamation of the abandon-class tool-cluster (0.11)
 
 A revert reclaims context by dropping the abandoned tail (the off-trunk span the
 parent-chain walk excludes). But there is a shape where the dropped span is NOT
 enough: when the model reverts **ONTO** a heavy `(assistant-tool_call, tool_result)`
-cluster it got wrong — e.g. `revert_to_state(failure, step="<the 80-line write_file
-call node>")`. The kept tip then carries that heavy `ToolCall` body forward (context
-gets *larger*, not smaller) while its matching tool-result has been dropped off-trunk
-(a malformed **dangling call**: a tool-call with no result).
+cluster it got wrong — e.g. `revert_to_state(failure, …)` onto an 80-line
+`write_file` it abandoned. The kept tip then carries that heavy `ToolCall` body
+forward (context gets *larger*, not smaller).
 
 `AgentContext::collapse_abandon_class_cluster` (wired in `agent_loop/streaming.rs`
-between `build_trunk_context_with_policy` and `weave_braking_annotations`) fixes
-both at **render time**:
+between `build_trunk_context_with_policy` and `weave_braking_annotations`) collapses
+the WHOLE cluster atomically at **render time**, handling BOTH revert-target shapes
+so the rendered trunk carries a single clean assistant node with the breadcrumb,
+NO heavy `ToolCall`, and NO orphaned tool-result:
 
 - **Abandon-class tip** (the tip carries a decay-able `Lesson`/`Finding` tag — the
-  signal a `failure`/`tangent` revert landed there): the heavy `ToolCall` blocks are
-  stripped from the rendered tip. The one-line breadcrumb already lives on the tip's
-  tag, so the model reads the breadcrumb where the ~80-line body used to be — the
-  abandoned context is genuinely reclaimed. No `ToolCall` remains, so nothing dangles.
+  signal a `failure`/`tangent` revert landed there). Two shapes:
+  - **call-tip** (the tip IS the assistant tool-call node): strip the tip's heavy
+    `ToolCall` blocks. The breadcrumb already lives on the tip's tag; its matching
+    tool-result is off-trunk (a child the parent-chain walk excluded), so nothing
+    dangles.
+  - **result-tip** (the tip is the matching tool-result — the #59/minimax shape):
+    the heavy body lives in the parent assistant-call node. Strip THAT parent's
+    `ToolCall` blocks, MOVE the tip's breadcrumb tag onto the parent, and REMOVE
+    the tool-result tip from the rendered trunk — otherwise a `tool_call_id` with
+    no matching call survives (an **orphaned tool-result**, which OpenAI-compat
+    providers reject). The surviving parent assistant node becomes the tip and the
+    weave folds the breadcrumb + continue-forward directive onto it.
 - **Pinned tip** (`Outcome`/`Checkpoint`): the cluster is load-bearing (a sealed
   result the model may re-read), so it is kept **whole** — if the matching tool-result
   is off-trunk, it is re-appended right after the tip so the kept call never dangles.
 
 The **atomic-cluster invariant** therefore holds for ALL categories: the rendered
-trunk never carries a tool-call without its matching result. The collapse is
-**render-only** — it operates on the cloned trunk that `build_trunk_context` returns
-by value, so `context.messages` (the forensic log) stays byte-identical; replay,
-audit, and multi-pod see the full record.
+trunk never carries a tool-call without its matching result, nor a tool-result
+without its matching call. The collapse is **render-only** — it operates on the
+cloned trunk that `build_trunk_context` returns by value, so `context.messages`
+(the forensic log) stays byte-identical; replay, audit, and multi-pod see the full
+record.
 
 ## What 0.8.0 does NOT ship
 

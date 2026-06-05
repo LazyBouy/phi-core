@@ -40,45 +40,59 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with other tags (was: consecutive-only, so `[finding][lesson][lesson]`
   ordering still stacked the repeat). Repeated reverts to the same node could
   otherwise bury the model in a wall of duplicate lessons. (b) **Forward-progress
-  note off tool-result nodes** — the "continue forward" instruction is now
-  emitted as a standalone synthetic meta-note (a nodeless entry inserted right
-  after the reverted-to tip) instead of being prepended onto the tip message's
-  content. The tip can be a tool-result node; gluing the marker onto it risked a
-  weaker model misreading it as "the tool triggered a rewind". The standalone
-  note keeps attribution unambiguous regardless of the tip's message-type. (c)
-  **Rewind breadcrumb (progress thread)** — `apply_revert` (`agent_loop/run.rs`)
-  now composes a one-line breadcrumb of the abandoned branch from the agent's
-  revert `summary` plus the tool-call NAMES extracted from the abandoned span
-  (`compose_revert_breadcrumb`; shapes like `reverted past: wrote plan-v1.md
-  (write_file abandoned)`). The breadcrumb rides on the reverted-to node's
-  summary tag and the weave renders it in the standalone note, so the rebuilt
-  trunk keeps a one-line progress thread of what was tried-and-abandoned —
-  mirroring the `prun_with_memo` "drop the content, leave a memo" pattern. Only
-  tool-call names are carried; the abandoned content itself is never
-  re-introduced. The decay policy
-  (`build_trunk_context_with_policy`) is unchanged by THIS entry (its window
-  default is lowered separately below). (Braking machinery surfaced
-  during downstream consumer e2e testing: a clean rewind erased the model's
-  progress thread — a strong model reverted then stopped, a weak model looped.)
+  directive folded into the tip node's annotation** — the "continue forward"
+  instruction is rendered as a `[continue forward: do the next uncompleted step;
+  do NOT redo completed steps; do NOT stop]` annotation folded directly into the
+  reverted-to tip node's woven marker (right after its `[lesson: …]` tag). There
+  is NO standalone `Message::User` braking note — a synthetic user-role entry
+  read as a phantom turn and the directive belongs ON the node the model
+  reverted to, not in a separate message. (c) **Rewind breadcrumb (progress
+  thread)** — `apply_revert` (`agent_loop/run.rs`) now composes a one-line
+  breadcrumb of the abandoned branch from the agent's revert `summary` plus the
+  tool-call NAMES extracted from the abandoned span (`compose_revert_breadcrumb`;
+  shapes like `reverted past: wrote plan-v1.md (write_file abandoned)`). The
+  revert tool's OWN name (`revert_to_state`) is excluded from the breadcrumb —
+  it is the triggering action, not abandoned work — so a revert called from the
+  node after its target no longer mislabels as `(write_file, revert_to_state
+  abandoned)`. The breadcrumb rides on the reverted-to node's summary tag and the
+  weave renders it inline on that node, so the rebuilt trunk keeps a one-line
+  progress thread of what was tried-and-abandoned — mirroring the
+  `prun_with_memo` "drop the content, leave a memo" pattern. Only tool-call names
+  are carried; the abandoned content itself is never re-introduced. The decay
+  policy (`build_trunk_context_with_policy`) is unchanged by THIS entry (its
+  window default is lowered separately below). (Braking machinery surfaced during
+  downstream consumer e2e testing: a clean rewind erased the model's progress
+  thread — a strong model reverted then stopped, a weak model looped.)
 - **Render-time reclamation of the abandon-class tool-cluster** (`types/context.rs`
   `AgentContext::collapse_abandon_class_cluster`; wired in `agent_loop/streaming.rs`
   between `build_trunk_context_with_policy` and `weave_braking_annotations`).
   When a `failure`/`tangent` (abandon-class) revert targets a node that is a
   heavy `(assistant-tool_call, tool_result)` cluster — e.g. the model reverts
   ONTO an 80-line `write_file` call it got wrong — the kept tip otherwise carries
-  that heavy body forward (context gets LARGER, not smaller) while its matching
-  tool-result has been dropped off-trunk (a malformed dangling call). This new
-  render-time pass strips the heavy `ToolCall` blocks from the rendered tip, so
-  the model reads the one-line breadcrumb (already on the tip's tag) where the
-  ~80-line body used to be — the abandoned context is genuinely reclaimed.
+  that heavy body forward (context gets LARGER, not smaller). This render-time
+  pass collapses the WHOLE cluster atomically, handling BOTH revert-target shapes
+  so the rendered trunk carries a single clean assistant node with the breadcrumb,
+  NO heavy `ToolCall`, and NO orphaned tool-result:
+  - **call-tip** (revert lands on the assistant tool-call node): strip the tip's
+    heavy `ToolCall` blocks; its matching tool-result is off-trunk (a child the
+    parent-chain walk excluded), so nothing dangles.
+  - **result-tip** (revert lands on the matching tool-result — the #59/minimax
+    shape): the heavy body lives in the parent assistant-call node. Strip THAT
+    parent's `ToolCall` blocks, MOVE the tip's breadcrumb tag onto the parent, and
+    REMOVE the tool-result tip from the rendered trunk — so there is no orphaned
+    result (a `tool_call_id` with no matching call, which OpenAI-compat providers
+    reject). The surviving parent assistant node becomes the tip and the weave
+    folds the breadcrumb + continue-forward directive onto it.
   **Atomic-cluster invariant (ALL categories)**: the rendered trunk never carries
-  a tool-call without its matching result — abandon-class drops both (the call is
-  stripped), pinned (`completion`/`step-summary`) keeps both whole (re-including
-  the off-trunk result so the kept call never dangles). The collapse is **render-only**:
-  it operates on the cloned trunk that `build_trunk_context` returns by value, so
-  `context.messages` (the forensic log) stays byte-identical — replay/audit/multi-pod
-  see the full record. General braking-machinery merit: any consumer reverting
-  onto/across a heavy tool-cluster reclaims that context with no log mutation.
+  a tool-call without its matching result, nor a tool-result without its matching
+  call — abandon-class drops the whole cluster (call stripped, orphaned result
+  removed), pinned (`completion`/`step-summary`) keeps both whole (re-including
+  the off-trunk result so the kept call never dangles). The collapse is
+  **render-only**: it operates on the cloned trunk that `build_trunk_context`
+  returns by value, so `context.messages` (the forensic log) stays byte-identical
+  — replay/audit/multi-pod see the full record. General braking-machinery merit:
+  any consumer reverting onto/across a heavy tool-cluster reclaims that context
+  with no log mutation.
 - **`revert_to_state` description — 4-category budget framing** (`tools/revert.rs`
   `description()`). The description now frames `revert_to_state` as the model's
   CONTEXT-BUDGET tool and teaches the four categories as budget levers: `failure`

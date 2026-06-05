@@ -826,20 +826,28 @@ fn apply_revert(
     // then add the strictly-after span. Pure no-op when the target is a User /
     // text-only Assistant / tool-result (no ToolCall on the target).
     let abandoned_tool_names: Vec<String> = {
+        // The revert tool's own name is the TRIGGERING action, not abandoned
+        // work — exclude it from the breadcrumb. In the #59 shape the revert
+        // call sits in the strictly-after span (the model called
+        // `revert_to_state(step="n1")` from the node after its target), so
+        // without this guard the breadcrumb mislabels as
+        // `(write_file, revert_to_state abandoned)`; the model abandoned the
+        // `write_file`, not the revert. Matches `RevertTool::name()`.
+        const REVERT_TOOL_NAME: &str = "revert_to_state";
         let mut names: Vec<String> = Vec::new();
         let push_call_names =
             |lm: &crate::types::LlmMessage, names: &mut Vec<String>| match &lm.message {
                 Message::Assistant { content, .. } => {
                     for block in content {
                         if let crate::types::Content::ToolCall { name, .. } = block {
-                            if !names.contains(name) {
+                            if name != REVERT_TOOL_NAME && !names.contains(name) {
                                 names.push(name.clone());
                             }
                         }
                     }
                 }
                 Message::ToolResult { tool_name, .. } => {
-                    if !names.contains(tool_name) {
+                    if tool_name != REVERT_TOOL_NAME && !names.contains(tool_name) {
                         names.push(tool_name.clone());
                     }
                 }
@@ -1378,6 +1386,95 @@ mod apply_revert_tests {
         assert!(
             !tag_text.contains("revert_to_state"),
             "breadcrumb must NOT mislabel as revert_to_state: {tag_text}"
+        );
+    }
+
+    #[test]
+    fn breadcrumb_onto_tool_result_tip_excludes_revert_tool_name() {
+        // The #59-canonical (minimax) shape — the model reverts ONTO the
+        // tool-RESULT node (`step="n1"`), and its own `revert_to_state` call
+        // sits in the strictly-after span. Without the revert-tool exclusion
+        // the breadcrumb mislabels as `(write_file, revert_to_state abandoned)`.
+        // After Fix B the breadcrumb must name `write_file` only.
+        //
+        // Tree: n0 user → n1 write_file CALL → n2 write_file RESULT (target) →
+        //       n3 assistant carrying the `revert_to_state` ToolCall (the
+        //       triggering action, strictly-after the target).
+        let write_call = AgentMessage::Llm(
+            LlmMessage::new(Message::Assistant {
+                content: vec![Content::ToolCall {
+                    id: "call_abc".into(),
+                    name: "write_file".into(),
+                    arguments: serde_json::json!({ "path": "plan-v1.md", "content": "HEAVY" }),
+                }],
+                stop_reason: StopReason::ToolUse,
+                model: "test".into(),
+                provider: "test".into(),
+                usage: Usage::default(),
+                timestamp: 2,
+                error_message: None,
+            })
+            .with_node_identity(NodeId(1), Some(NodeId(0))),
+        );
+        let write_result = AgentMessage::Llm(
+            LlmMessage::new(Message::ToolResult {
+                tool_call_id: "call_abc".into(),
+                tool_name: "write_file".into(),
+                content: vec![Content::Text {
+                    text: "Wrote 333 bytes".into(),
+                }],
+                is_error: false,
+                timestamp: 3,
+            })
+            .with_node_identity(NodeId(2), Some(NodeId(1))),
+        );
+        let revert_call = AgentMessage::Llm(
+            LlmMessage::new(Message::Assistant {
+                content: vec![Content::ToolCall {
+                    id: "call_rev".into(),
+                    name: "revert_to_state".into(),
+                    arguments: serde_json::json!({ "category": "failure", "step": "n2" }),
+                }],
+                stop_reason: StopReason::ToolUse,
+                model: "test".into(),
+                provider: "test".into(),
+                usage: Usage::default(),
+                timestamp: 4,
+                error_message: None,
+            })
+            .with_node_identity(NodeId(3), Some(NodeId(2))),
+        );
+        let mut ctx = AgentContext {
+            messages: vec![
+                user_msg_node("write a plan", 1, NodeId(0), None),
+                write_call,
+                write_result,
+                revert_call,
+            ],
+            next_node_id: 4,
+            ..Default::default()
+        };
+        let (tx, _rx) = mpsc::unbounded_channel::<AgentEvent>();
+        let req = RevertRequest {
+            category: RevertCategory::Failure,
+            target: NodeId(2), // revert onto the tool-RESULT node
+            summary: Some("approach v1 was tangential".into()),
+        };
+
+        apply_revert(&mut ctx, &req, 5, &tx, "loop-1");
+
+        // The breadcrumb is attached to the target node (the tool-result, n2).
+        let tag_text = match &ctx.messages[2] {
+            AgentMessage::Llm(lm) => lm.tags[0].text.clone(),
+            _ => unreachable!(),
+        };
+        assert!(
+            tag_text.contains("write_file"),
+            "breadcrumb must name the abandoned write_file work: {tag_text}"
+        );
+        assert!(
+            !tag_text.contains("revert_to_state"),
+            "breadcrumb must NOT name the revert tool's own call: {tag_text}"
         );
     }
 }
