@@ -814,11 +814,21 @@ fn apply_revert(
     // model can pick up from. The abandoned content itself is NOT reintroduced;
     // only the tool-call names + the summary. General braking-machinery merit:
     // any consumer reverting repeatedly keeps a progress thread.
+    //
+    // Name SOURCE-SET (F-breadcrumb-tool-source REFINED, 0.11): the abandoned
+    // work is sometimes ON the TARGET node itself, not strictly after it. The
+    // #59 shape is a revert whose `step` names the heavy `write_file` CALL node:
+    // the abandoned `write_file` is the target node's OWN ToolCall, and the
+    // strictly-after span carries only the `revert_to_state` call — so the old
+    // strictly-after-only walk mislabels the breadcrumb `revert_to_state
+    // abandoned`. We therefore seed the name set with the TARGET cluster's own
+    // tool-call name(s) FIRST (the work the model reverted ONTO + abandoned),
+    // then add the strictly-after span. Pure no-op when the target is a User /
+    // text-only Assistant / tool-result (no ToolCall on the target).
     let abandoned_tool_names: Vec<String> = {
         let mut names: Vec<String> = Vec::new();
-        for m in &context.messages[target_idx + 1..] {
-            let AgentMessage::Llm(lm) = m else { continue };
-            match &lm.message {
+        let push_call_names =
+            |lm: &crate::types::LlmMessage, names: &mut Vec<String>| match &lm.message {
                 Message::Assistant { content, .. } => {
                     for block in content {
                         if let crate::types::Content::ToolCall { name, .. } = block {
@@ -834,7 +844,15 @@ fn apply_revert(
                     }
                 }
                 Message::User { .. } => {}
-            }
+            };
+        // (i) the TARGET cluster's own tool-call(s) — the #59 reverted-onto work.
+        if let AgentMessage::Llm(lm) = &context.messages[target_idx] {
+            push_call_names(lm, &mut names);
+        }
+        // (ii) the strictly-after abandoned span (the CC-16 walk).
+        for m in &context.messages[target_idx + 1..] {
+            let AgentMessage::Llm(lm) = m else { continue };
+            push_call_names(lm, &mut names);
         }
         names
     };
@@ -1309,6 +1327,57 @@ mod apply_revert_tests {
         assert!(
             all_text.contains("reverted past: wrote plan-v1.md"),
             "the one-line breadcrumb must survive into the trunk: {all_text}"
+        );
+    }
+
+    #[test]
+    fn apply_revert_onto_call_node_names_target_cluster_tool() {
+        // F-breadcrumb-tool-source REFINED (0.11): the #59 shape — the model
+        // reverts ONTO the heavy `write_file` CALL node itself (step names that
+        // node). The abandoned `write_file` is the TARGET node's own ToolCall,
+        // NOT in the strictly-after span (which holds only the revert call). The
+        // breadcrumb must name `write_file`, not `revert_to_state`.
+        let write_call = AgentMessage::Llm(
+            LlmMessage::new(Message::Assistant {
+                content: vec![Content::ToolCall {
+                    id: "call_abc".into(),
+                    name: "write_file".into(),
+                    arguments: serde_json::json!({ "path": "plan-v1.md", "content": "HEAVY" }),
+                }],
+                stop_reason: StopReason::ToolUse,
+                model: "test".into(),
+                provider: "test".into(),
+                usage: Usage::default(),
+                timestamp: 2,
+                error_message: None,
+            })
+            .with_node_identity(NodeId(0), None),
+        );
+        let mut ctx = AgentContext {
+            messages: vec![write_call],
+            next_node_id: 1,
+            ..Default::default()
+        };
+        let (tx, _rx) = mpsc::unbounded_channel::<AgentEvent>();
+        let req = RevertRequest {
+            category: RevertCategory::Failure,
+            target: NodeId(0),
+            summary: Some("approach v1 was tangential".into()),
+        };
+
+        apply_revert(&mut ctx, &req, 3, &tx, "loop-1");
+
+        let tag_text = match &ctx.messages[0] {
+            AgentMessage::Llm(lm) => lm.tags[0].text.clone(),
+            _ => unreachable!(),
+        };
+        assert!(
+            tag_text.contains("write_file"),
+            "breadcrumb must name the abandoned write_file work: {tag_text}"
+        );
+        assert!(
+            !tag_text.contains("revert_to_state"),
+            "breadcrumb must NOT mislabel as revert_to_state: {tag_text}"
         );
     }
 }

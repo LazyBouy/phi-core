@@ -172,11 +172,13 @@ impl NodeTag {
 /// log but stop being rendered into the LLM prompt. `Outcome` and `Checkpoint`
 /// tags stay pinned and always render while on-trunk.
 ///
-/// Defaults match the values in the Composition I plan (5 turns, 3 tags).
+/// Defaults: 3 turns (lowered from 5 in 0.11), 3 tags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RevertRenderPolicy {
     /// A decay-able tag is rendered if `current_turn - tag.created_at_turn <= lesson_window_turns`.
-    /// Default: `5`.
+    /// Default: `3` (lowered from `5` in 0.11 — breadcrumbs fade to log-only
+    /// sooner so the abandon-class context-budget reclamation lands faster;
+    /// operator-tunable via the consumer's render-policy wiring).
     pub lesson_window_turns: u32,
     /// In addition to the turn-distance gate, the most-recent
     /// `lesson_window_count` decay-able tags of each kind always render. So a
@@ -188,7 +190,7 @@ pub struct RevertRenderPolicy {
 impl Default for RevertRenderPolicy {
     fn default() -> Self {
         Self {
-            lesson_window_turns: 5,
+            lesson_window_turns: 3,
             lesson_window_count: 3,
         }
     }
@@ -300,11 +302,23 @@ mod tests {
 
     #[test]
     fn revert_render_policy_decayable_within_window() {
-        let policy = RevertRenderPolicy::default(); // 5 turns
+        let policy = RevertRenderPolicy::default(); // 3 turns (0.11 default)
         let tag = NodeTag::new(TagKind::Lesson, "x".into(), 10, vec![]);
         assert!(policy.renders_by_turn(&tag, 10));
-        assert!(policy.renders_by_turn(&tag, 15)); // exactly at window
-        assert!(!policy.renders_by_turn(&tag, 16)); // just past
+        assert!(policy.renders_by_turn(&tag, 13)); // exactly at window
+        assert!(!policy.renders_by_turn(&tag, 14)); // just past
+    }
+
+    #[test]
+    fn revert_render_policy_default_window_is_three() {
+        // 0.11 — the decay default dropped 5 → 3 so abandon-class breadcrumbs
+        // fade to log-only sooner. A decay-able tag created at turn 0 renders
+        // through turn-distance 3 and is log-only at turn-distance 4.
+        let policy = RevertRenderPolicy::default();
+        assert_eq!(policy.lesson_window_turns, 3);
+        let tag = NodeTag::new(TagKind::Finding, "x".into(), 0, vec![]);
+        assert!(policy.renders_by_turn(&tag, 3)); // distance 3 → renders
+        assert!(!policy.renders_by_turn(&tag, 4)); // distance 4 → log-only
     }
 
     #[test]

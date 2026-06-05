@@ -289,6 +289,127 @@ impl AgentContext {
         base
     }
 
+    /// Composition I — render-time reclamation of the abandon-class tool-cluster
+    /// a revert landed on.
+    ///
+    /// When a `failure`/`tangent` (abandon-class) revert targets a node that is
+    /// (or splits) a heavy `(assistant-tool_call, tool_result)` cluster, the
+    /// kept tip ends up carrying the abandoned tool-call's heavy `arguments`
+    /// (e.g. an 80-line `write_file` body) while its matching tool-result has
+    /// been dropped off-trunk by the parent-chain walk — leaving the rendered
+    /// trunk both **larger** (the abandoned body survives) and **malformed** (a
+    /// tool-call with no matching result). This pass fixes both, at render time
+    /// only:
+    ///
+    /// - **Abandon-class tip** (the tip carries a decay-able `Lesson`/`Finding`
+    ///   tag, the signal that a revert just landed there): the tip's heavy
+    ///   `ToolCall` blocks are stripped from the rendered message. The one-line
+    ///   breadcrumb already lives on the tip's tag (composed by `apply_revert`)
+    ///   and is woven into content by `weave_braking_annotations` downstream, so
+    ///   the model reads the breadcrumb where the ~80-line body used to be. No
+    ///   `ToolCall` remains, so nothing dangles.
+    /// - **Pinned tip** (`Outcome`/`Checkpoint`, NOT decay-able): the cluster is
+    ///   load-bearing (a sealed result the model may re-read), so it is kept
+    ///   WHOLE — if the tip is a tool-call whose matching tool-result is
+    ///   off-trunk, the result is re-appended right after the tip so the kept
+    ///   call is never left dangling.
+    ///
+    /// The **atomic-cluster invariant** therefore holds for ALL categories: the
+    /// rendered trunk never carries a tool-call without its matching result
+    /// (abandon-class drops both; pinned keeps both).
+    ///
+    /// Operates over the **cloned** trunk that `build_trunk_context` returns by
+    /// value; `self.messages` (the forensic log) is **never** mutated. Caller
+    /// contract: invoke ONLY on the revert-mode trunk path
+    /// (`active_node_id.is_some()`), after `build_trunk_context_with_policy` and
+    /// before `weave_braking_annotations`. General braking-machinery merit: any
+    /// consumer reverting onto/across a heavy tool-cluster reclaims that context
+    /// with no log mutation.
+    pub fn collapse_abandon_class_cluster(
+        &self,
+        mut trunk: Vec<AgentMessage>,
+    ) -> Vec<AgentMessage> {
+        use super::content::{Content, Message};
+
+        // Locate the trunk tip (the LAST node-bearing message) — the
+        // active / reverted-to node. A revert landed here iff the tip carries a
+        // NodeTag (abandon-class = decay-able Lesson/Finding; pinned =
+        // Outcome/Checkpoint). No tag → no revert landed on this tip → nothing
+        // to collapse.
+        let tip_idx = trunk.iter().enumerate().rev().find_map(|(i, m)| match m {
+            AgentMessage::Llm(lm) if lm.node_id.is_some() => Some(i),
+            _ => None,
+        });
+        let Some(tip_idx) = tip_idx else {
+            return trunk;
+        };
+
+        let AgentMessage::Llm(tip) = &trunk[tip_idx] else {
+            return trunk;
+        };
+        // Classify the tip's revert tag (if any). A node can carry tags of only
+        // one decay-class per revert; we read the first tag's kind as the gate.
+        let Some(tag) = tip.tags.first() else {
+            return trunk; // no revert tag on the tip → not a revert-landed cluster
+        };
+        let abandon_class = tag.kind.is_decayable();
+
+        // The tip must be an assistant message carrying ≥ 1 ToolCall for the
+        // cluster mechanics to apply; otherwise there is no heavy tool-body to
+        // reclaim and no dangling-call hazard.
+        let tip_call_id = match &tip.message {
+            Message::Assistant { content, .. } => content.iter().find_map(|b| match b {
+                Content::ToolCall { id, .. } => Some(id.clone()),
+                _ => None,
+            }),
+            _ => None,
+        };
+        let Some(tip_call_id) = tip_call_id else {
+            return trunk; // tip is not a tool-call node → no cluster to reclaim
+        };
+
+        if abandon_class {
+            // Abandon-class: strip the heavy ToolCall blocks from the tip so the
+            // rendered trunk carries the breadcrumb (woven from the tag) instead
+            // of the ~80-line abandoned body. Dropping the ToolCall also removes
+            // the dangling-call hazard (no call → nothing to dangle). Keep any
+            // non-ToolCall blocks (e.g. a leading Thinking/Text the assistant
+            // emitted alongside the call).
+            if let AgentMessage::Llm(lm) = &mut trunk[tip_idx] {
+                if let Message::Assistant { content, .. } = &mut lm.message {
+                    content.retain(|b| !matches!(b, Content::ToolCall { .. }));
+                }
+            }
+        } else {
+            // Pinned: keep the cluster WHOLE. If the matching tool-result is
+            // off-trunk (the #59 shape: revert targeted the call node, so its
+            // result child was excluded by the parent-chain walk), re-append it
+            // right after the tip so the kept call is never dangling. Read the
+            // off-trunk result from `self.messages` (the forensic log) by
+            // tool_call_id; clone it (render-only, log untouched).
+            let already_present = trunk.iter().any(|m| match m {
+                AgentMessage::Llm(lm) => matches!(
+                    &lm.message,
+                    Message::ToolResult { tool_call_id, .. } if *tool_call_id == tip_call_id
+                ),
+                _ => false,
+            });
+            if !already_present {
+                if let Some(result) = self.messages.iter().find(|m| match m {
+                    AgentMessage::Llm(lm) => matches!(
+                        &lm.message,
+                        Message::ToolResult { tool_call_id, .. } if *tool_call_id == tip_call_id
+                    ),
+                    _ => false,
+                }) {
+                    trunk.insert(tip_idx + 1, result.clone());
+                }
+            }
+        }
+
+        trunk
+    }
+
     /// Composition I — weave node markers + surviving tag annotations into the
     /// message **content** the model actually sees.
     ///
@@ -827,8 +948,11 @@ mod build_trunk_context_tests {
             (NodeId(2), tag(TagKind::Finding, 3, "F3")),
             (NodeId(3), tag(TagKind::Finding, 4, "F4")),
         ]);
-        let policy = RevertRenderPolicy::default(); // window 5
-        let built = ctx.build_trunk_context_with_policy(&policy, 5);
+        // Window 3 (0.11 default). Evaluate at current_turn=4 so all 4 findings
+        // (turns 1..4) fall within the 3-turn window (distances 3,2,1,0); the
+        // count cap is irrelevant while everything is in-window.
+        let policy = RevertRenderPolicy::default();
+        let built = ctx.build_trunk_context_with_policy(&policy, 4);
         let kept_count = built
             .iter()
             .filter_map(|m| match m {
@@ -840,12 +964,13 @@ mod build_trunk_context_tests {
     }
 
     #[test]
-    fn five_turn_decay_policy_unchanged_after_rework() {
+    fn decay_count_cap_retains_three_newest_out_of_window() {
         // Regression guard: the marker-rework + breadcrumb + all-identical
-        // dedup must NOT perturb the 5-turn decay window. Default policy = 5-turn window,
-        // count cap 3. 4 lessons at turns 0..3 evaluated at current_turn=10: all
-        // fall outside the window, the count cap retains the 3 newest (turns
-        // 1,2,3) — byte-identical to the pre-rework decay contract.
+        // dedup must NOT perturb the count-cap behaviour. Default policy =
+        // 3-turn window (0.11), count cap 3. 4 lessons at turns 0..3 evaluated
+        // at current_turn=10: all fall outside the window, the count cap retains
+        // the 3 newest (turns 1,2,3) — the count-cap contract is unchanged by
+        // the window default-change.
         let ctx = build_ctx_with_tags(vec![
             (NodeId(0), tag(TagKind::Lesson, 0, "L0")),
             (NodeId(1), tag(TagKind::Lesson, 1, "L1")),
@@ -853,7 +978,7 @@ mod build_trunk_context_tests {
             (NodeId(3), tag(TagKind::Lesson, 3, "L3")),
         ]);
         let policy = RevertRenderPolicy::default();
-        assert_eq!(policy.lesson_window_turns, 5);
+        assert_eq!(policy.lesson_window_turns, 3);
         let built = ctx.build_trunk_context_with_policy(&policy, 10);
         let mut kept_turns: Vec<u32> = built
             .iter()
@@ -868,7 +993,7 @@ mod build_trunk_context_tests {
         assert_eq!(
             kept_turns,
             vec![1, 2, 3],
-            "5-turn decay window must be unchanged"
+            "count cap must retain the 3 newest tags out of window"
         );
     }
 
@@ -1136,6 +1261,303 @@ mod build_trunk_context_tests {
         assert!(
             !text.contains("continue forward"),
             "untagged tip must not carry the forward marker: {text}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod collapse_abandon_class_cluster_tests {
+    //! 0.11 — render-time reclamation of the abandon-class tool-cluster a revert
+    //! lands on. Locks in: (a) abandon-class collapses the heavy ToolCall body
+    //! into the breadcrumb (the body is gone from the rendered trunk; the
+    //! breadcrumb tag survives); (b) pinned keeps the cluster WHOLE (re-includes
+    //! the matching tool-result so the kept call never dangles); (c)
+    //! `messages` is byte-identical before/after (forensic log immutable);
+    //! (d) multi-turn abandon-to-ancestor: the whole off-trunk tail is excluded
+    //! and the breadcrumb names the abandoned work.
+    use super::super::agent_message::LlmMessage;
+    use super::super::content::{Content, Message, StopReason};
+    use super::super::node_tag::{NodeTag, TagKind};
+    use super::super::usage::Usage;
+    use super::*;
+
+    /// An assistant node carrying a single heavy `write_file` ToolCall.
+    fn tool_call_node(
+        call_id: &str,
+        heavy_args: &str,
+        ts: u64,
+        node: NodeId,
+        parent: Option<NodeId>,
+    ) -> AgentMessage {
+        AgentMessage::Llm(
+            LlmMessage::new(Message::Assistant {
+                content: vec![Content::ToolCall {
+                    id: call_id.to_string(),
+                    name: "write_file".to_string(),
+                    arguments: serde_json::json!({ "path": "plan-v1.md", "content": heavy_args }),
+                }],
+                stop_reason: StopReason::ToolUse,
+                model: "test".into(),
+                provider: "test".into(),
+                usage: Usage::default(),
+                timestamp: ts,
+                error_message: None,
+            })
+            .with_node_identity(node, parent),
+        )
+    }
+
+    /// A tool-result node matching `call_id`.
+    fn result_node(call_id: &str, ts: u64, node: NodeId, parent: Option<NodeId>) -> AgentMessage {
+        AgentMessage::Llm(
+            LlmMessage::new(Message::ToolResult {
+                tool_call_id: call_id.to_string(),
+                tool_name: "write_file".to_string(),
+                content: vec![Content::Text {
+                    text: "Wrote 356 bytes".to_string(),
+                }],
+                is_error: false,
+                timestamp: ts,
+            })
+            .with_node_identity(node, parent),
+        )
+    }
+
+    fn user_node(text: &str, ts: u64, node: NodeId, parent: Option<NodeId>) -> AgentMessage {
+        AgentMessage::Llm(
+            LlmMessage::new(Message::User {
+                content: vec![Content::Text {
+                    text: text.to_string(),
+                }],
+                timestamp: ts,
+            })
+            .with_node_identity(node, parent),
+        )
+    }
+
+    /// Attach a NodeTag of `kind` carrying `breadcrumb` to the message at `idx`.
+    fn tag_message(msgs: &mut [AgentMessage], idx: usize, kind: TagKind, breadcrumb: &str) {
+        if let AgentMessage::Llm(lm) = &mut msgs[idx] {
+            lm.add_tag(NodeTag::new(kind, breadcrumb.to_string(), 1, vec![]));
+        }
+    }
+
+    /// Does the rendered trunk contain the heavy `write_file` arguments anywhere?
+    fn trunk_has_heavy_args(trunk: &[AgentMessage], needle: &str) -> bool {
+        trunk.iter().any(|m| match m {
+            AgentMessage::Llm(lm) => match &lm.message {
+                Message::Assistant { content, .. } => content.iter().any(|b| match b {
+                    Content::ToolCall { arguments, .. } => arguments.to_string().contains(needle),
+                    _ => false,
+                }),
+                _ => false,
+            },
+            _ => false,
+        })
+    }
+
+    fn trunk_has_breadcrumb(trunk: &[AgentMessage], needle: &str) -> bool {
+        trunk.iter().any(|m| match m {
+            AgentMessage::Llm(lm) => lm.tags.iter().any(|t| t.text.contains(needle)),
+            _ => false,
+        })
+    }
+
+    fn trunk_has_dangling_call(trunk: &[AgentMessage]) -> bool {
+        // A tool-call whose matching result is NOT present anywhere in the trunk.
+        let result_ids: std::collections::HashSet<&str> = trunk
+            .iter()
+            .filter_map(|m| match m {
+                AgentMessage::Llm(lm) => match &lm.message {
+                    Message::ToolResult { tool_call_id, .. } => Some(tool_call_id.as_str()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        trunk.iter().any(|m| match m {
+            AgentMessage::Llm(lm) => match &lm.message {
+                Message::Assistant { content, .. } => content.iter().any(|b| match b {
+                    Content::ToolCall { id, .. } => !result_ids.contains(id.as_str()),
+                    _ => false,
+                }),
+                _ => false,
+            },
+            _ => false,
+        })
+    }
+
+    /// The #59 shape: user task (n0) → assistant write_file call (n1) → result
+    /// (n2). `revert_to_state(failure, step="1")` targets the CALL node n1; the
+    /// result n2 is its child, dropped off-trunk by the parent-chain walk.
+    fn fixture_59_shape() -> AgentContext {
+        AgentContext {
+            messages: vec![
+                user_node("write a plan", 1, NodeId(0), None),
+                tool_call_node(
+                    "call_abc",
+                    "PLAN-V1-HEAVY-BODY",
+                    2,
+                    NodeId(1),
+                    Some(NodeId(0)),
+                ),
+                result_node("call_abc", 3, NodeId(2), Some(NodeId(1))),
+            ],
+            next_node_id: 3,
+            active_node_id: Some(NodeId(1)), // reverted onto the call node
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn abandon_class_collapses_heavy_cluster_to_breadcrumb() {
+        let mut ctx = fixture_59_shape();
+        // apply_revert would have attached an abandon-class (Lesson) breadcrumb
+        // on the target call node naming the abandoned work.
+        tag_message(
+            &mut ctx.messages,
+            1,
+            TagKind::Lesson,
+            "reverted past: plan-v1 abandoned (write_file abandoned)",
+        );
+        // Trunk = parent-chain from n1 = [n0, n1]; n2 (result) is off-trunk.
+        let trunk = ctx.build_trunk_context();
+        assert!(
+            trunk_has_heavy_args(&trunk, "PLAN-V1-HEAVY-BODY"),
+            "precondition: the kept tip still carries the heavy body before collapse"
+        );
+
+        let collapsed = ctx.collapse_abandon_class_cluster(trunk);
+
+        // (a) the heavy ToolCall body is GONE from the rendered trunk.
+        assert!(
+            !trunk_has_heavy_args(&collapsed, "PLAN-V1-HEAVY-BODY"),
+            "abandon-class collapse must strip the heavy tool-call body"
+        );
+        // (b) the breadcrumb tag survives (woven into content downstream).
+        assert!(
+            trunk_has_breadcrumb(&collapsed, "write_file abandoned"),
+            "the breadcrumb naming the abandoned work must survive"
+        );
+        // (c) no dangling tool-call (the call was stripped, not left orphaned).
+        assert!(
+            !trunk_has_dangling_call(&collapsed),
+            "abandon-class collapse must not leave a dangling tool-call"
+        );
+    }
+
+    #[test]
+    fn pinned_class_keeps_cluster_whole_no_dangling_call() {
+        let mut ctx = fixture_59_shape();
+        // A completion (pinned/Outcome) revert onto the same call node.
+        tag_message(
+            &mut ctx.messages,
+            1,
+            TagKind::Outcome,
+            "reverted past: sub-task sealed (write_file)",
+        );
+        let trunk = ctx.build_trunk_context(); // = [n0, n1]; result n2 off-trunk
+        assert!(
+            trunk_has_dangling_call(&trunk),
+            "precondition: before collapse the kept call dangles (its result is off-trunk)"
+        );
+
+        let collapsed = ctx.collapse_abandon_class_cluster(trunk);
+
+        // Pinned keeps the heavy body whole...
+        assert!(
+            trunk_has_heavy_args(&collapsed, "PLAN-V1-HEAVY-BODY"),
+            "pinned category keeps the sealed tool-call body whole"
+        );
+        // ...AND re-includes the matching result so the call never dangles.
+        assert!(
+            !trunk_has_dangling_call(&collapsed),
+            "pinned keep-whole must re-include the matching tool-result"
+        );
+        let has_result = collapsed.iter().any(|m| {
+            matches!(
+                m,
+                AgentMessage::Llm(lm) if matches!(
+                    &lm.message,
+                    Message::ToolResult { tool_call_id, .. } if tool_call_id == "call_abc"
+                )
+            )
+        });
+        assert!(
+            has_result,
+            "the matching tool-result must be present on the trunk"
+        );
+    }
+
+    #[test]
+    fn collapse_keeps_messages_byte_identical() {
+        let mut ctx = fixture_59_shape();
+        tag_message(
+            &mut ctx.messages,
+            1,
+            TagKind::Lesson,
+            "reverted past: plan-v1 abandoned (write_file abandoned)",
+        );
+        // Snapshot the forensic log via its serialized form (the canonical
+        // byte-identity check — collapse is render-only over the cloned trunk).
+        let before = serde_json::to_string(&ctx.messages).unwrap();
+        let trunk = ctx.build_trunk_context();
+        let _collapsed = ctx.collapse_abandon_class_cluster(trunk);
+        let after = serde_json::to_string(&ctx.messages).unwrap();
+        assert_eq!(before, after, "collapse must never mutate context.messages");
+    }
+
+    #[test]
+    fn multi_turn_abandon_to_ancestor_excludes_tail_and_names_work() {
+        // n0 user → n1 read_file CALL → n2 read result → n3 grep CALL →
+        // n4 grep result, all on one chain; revert (tangent) to n1's RESULT
+        // (n2) drops the n3/n4 lexer detour. The parent-chain walk excludes the
+        // whole tail; the breadcrumb (composed by apply_revert from the
+        // strictly-after span) names read_file/grep.
+        let mut ctx = AgentContext {
+            messages: vec![
+                user_node("fix the parser", 1, NodeId(0), None),
+                tool_call_node("c1", "PARSER-SRC", 2, NodeId(1), Some(NodeId(0))),
+                result_node("c1", 3, NodeId(2), Some(NodeId(1))),
+                tool_call_node("c2", "LEXER-SRC", 4, NodeId(3), Some(NodeId(2))),
+                result_node("c2", 5, NodeId(4), Some(NodeId(3))),
+            ],
+            next_node_id: 5,
+            active_node_id: Some(NodeId(2)), // reverted to the parser READ result
+            ..Default::default()
+        };
+        // The tip n2 is a tool-result (not a call node) carrying the breadcrumb.
+        tag_message(
+            &mut ctx.messages,
+            2,
+            TagKind::Finding,
+            "reverted past: bug is in parser (read_file, grep abandoned)",
+        );
+        let trunk = ctx.build_trunk_context();
+        let collapsed = ctx.collapse_abandon_class_cluster(trunk);
+
+        // The whole off-trunk tail (lexer detour) is absent.
+        assert!(
+            !trunk_has_heavy_args(&collapsed, "LEXER-SRC"),
+            "the abandoned lexer detour must be off-trunk"
+        );
+        // The breadcrumb naming the abandoned work survives. The tip is a
+        // tool-result (not a call node), so the collapse pass is a no-op on the
+        // body — the parent-chain walk already reclaimed the tail.
+        assert!(
+            trunk_has_breadcrumb(&collapsed, "read_file, grep abandoned"),
+            "the breadcrumb must name all abandoned tools across the span"
+        );
+        // The kept parser read is intact.
+        assert!(
+            collapsed.iter().any(|m| matches!(
+                m,
+                AgentMessage::Llm(lm) if matches!(
+                    &lm.message,
+                    Message::ToolResult { tool_call_id, .. } if tool_call_id == "c1"
+                )
+            )),
+            "the kept parser-read result stays on the trunk"
         );
     }
 }

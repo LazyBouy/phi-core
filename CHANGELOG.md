@@ -55,10 +55,44 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   trunk keeps a one-line progress thread of what was tried-and-abandoned —
   mirroring the `prun_with_memo` "drop the content, leave a memo" pattern. Only
   tool-call names are carried; the abandoned content itself is never
-  re-introduced. The 5-turn-window decay policy
-  (`build_trunk_context_with_policy`) is unchanged. (Braking machinery surfaced
+  re-introduced. The decay policy
+  (`build_trunk_context_with_policy`) is unchanged by THIS entry (its window
+  default is lowered separately below). (Braking machinery surfaced
   during downstream consumer e2e testing: a clean rewind erased the model's
   progress thread — a strong model reverted then stopped, a weak model looped.)
+- **Render-time reclamation of the abandon-class tool-cluster** (`types/context.rs`
+  `AgentContext::collapse_abandon_class_cluster`; wired in `agent_loop/streaming.rs`
+  between `build_trunk_context_with_policy` and `weave_braking_annotations`).
+  When a `failure`/`tangent` (abandon-class) revert targets a node that is a
+  heavy `(assistant-tool_call, tool_result)` cluster — e.g. the model reverts
+  ONTO an 80-line `write_file` call it got wrong — the kept tip otherwise carries
+  that heavy body forward (context gets LARGER, not smaller) while its matching
+  tool-result has been dropped off-trunk (a malformed dangling call). This new
+  render-time pass strips the heavy `ToolCall` blocks from the rendered tip, so
+  the model reads the one-line breadcrumb (already on the tip's tag) where the
+  ~80-line body used to be — the abandoned context is genuinely reclaimed.
+  **Atomic-cluster invariant (ALL categories)**: the rendered trunk never carries
+  a tool-call without its matching result — abandon-class drops both (the call is
+  stripped), pinned (`completion`/`step-summary`) keeps both whole (re-including
+  the off-trunk result so the kept call never dangles). The collapse is **render-only**:
+  it operates on the cloned trunk that `build_trunk_context` returns by value, so
+  `context.messages` (the forensic log) stays byte-identical — replay/audit/multi-pod
+  see the full record. General braking-machinery merit: any consumer reverting
+  onto/across a heavy tool-cluster reclaims that context with no log mutation.
+- **`revert_to_state` description — 4-category budget framing** (`tools/revert.rs`
+  `description()`). The description now frames `revert_to_state` as the model's
+  CONTEXT-BUDGET tool and teaches the four categories as budget levers: `failure`
+  (a branch failed; lesson fades) / `tangent` (an exploration is finished; finding
+  fades) / `completion` (a sub-task is sealed; outcome pinned) / `step-summary`
+  (a long trunk needs a checkpoint; checkpoint pinned). It is honest that
+  completion/step-summary still drop the abandoned tail + keep a durable marker
+  but do NOT shrink the kept span the model reverted to.
+- **Decay-window default lowered 5 → 3 turns** (`types/node_tag.rs`
+  `RevertRenderPolicy::default`). Abandon-class breadcrumbs (`Lesson`/`Finding`)
+  now fade to log-only after 3 turns instead of 5, so the render-time reclamation
+  lands faster; the window remains operator-tunable via the consumer's
+  render-policy wiring (`lesson_window_turns`). Tests that set the window
+  explicitly are unaffected; default-relying tests are updated to the new value.
 
 ---
 

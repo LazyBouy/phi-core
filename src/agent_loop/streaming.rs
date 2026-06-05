@@ -153,6 +153,13 @@ pub(super) async fn stream_assistant_response(
         // convert_to_llm; this bakes them into content first.
         let trunk =
             context.build_trunk_context_with_policy(&config.revert_render_policy, turn_index);
+        // 0.11: render-time reclamation — when an abandon-class (failure/tangent)
+        // revert landed on a heavy `(tool_call, tool_result)` cluster, collapse
+        // the kept tip's heavy ToolCall body into its one-line breadcrumb;
+        // pinned categories keep the cluster whole (re-including the matching
+        // result so the kept call never dangles). `context.messages` stays
+        // byte-identical — this operates on the cloned trunk only.
+        let trunk = context.collapse_abandon_class_cluster(trunk);
         AgentContext::weave_braking_annotations(trunk)
     } else {
         context.build_working_context()
