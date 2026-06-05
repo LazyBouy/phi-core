@@ -39,14 +39,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   identical `(kind, text)` tag on a node now renders ONCE even when interleaved
   with other tags (was: consecutive-only, so `[finding][lesson][lesson]`
   ordering still stacked the repeat). Repeated reverts to the same node could
-  otherwise bury the model in a wall of duplicate lessons. (b) **Forward-progress
-  directive folded into the tip node's annotation** — the "continue forward"
-  instruction is rendered as a `[continue forward: do the next uncompleted step;
-  do NOT redo completed steps; do NOT stop]` annotation folded directly into the
-  reverted-to tip node's woven marker (right after its `[lesson: …]` tag). There
-  is NO standalone `Message::User` braking note — a synthetic user-role entry
-  read as a phantom turn and the directive belongs ON the node the model
-  reverted to, not in a separate message. (c) **Rewind breadcrumb (progress
+  otherwise bury the model in a wall of duplicate lessons. (b) **Post-revert
+  continue-forward steering — a decaying, tagged, all-category
+  `[continue_after_revert]` synthetic user message**
+  (`AgentContext::inject_continue_after_revert`, wired in
+  `agent_loop/streaming.rs` after `weave_braking_annotations`). After a revert
+  the surviving tip carries the breadcrumb, but a weaker model can still loop on
+  the re-presented task (re-doing already-completed steps). The continue-forward
+  directive is emitted as a SEPARATE synthetic `Message::User` placed immediately
+  after the reverted-to tip node (NOT folded into the tip's annotation, which an
+  earlier iteration tried but did not reliably steer the weak model). Properties:
+  the text begins with the literal marker
+  `pub const CONTINUE_AFTER_REVERT_MARKER = "[continue_after_revert]"` so these
+  model-steering messages are identifiable + filterable from channels (they are
+  NOT real user input); it echoes the tip breadcrumb then carries the directive
+  (`[continue_after_revert] <breadcrumb>. You just reverted to this node.
+  Continue forward: do the next uncompleted step; do NOT redo completed steps; do
+  NOT stop.`); it is emitted for ALL revert categories (failure→Lesson,
+  tangent→Finding, completion→Outcome, step-summary→Checkpoint), not just the
+  abandon class; and it **decays** — rendered ONLY while the tip's most-recent
+  revert tag is within the decay window (`current_turn - tag.created_at_turn <=
+  lesson_window_turns`). Past the window the steering message is suppressed for
+  any category — INCLUDING pinned `Outcome`/`Checkpoint` whose TAG itself
+  persists on the trunk (the nudge is transient even when the pinned tag is not).
+  `weave_braking_annotations` itself is now markers + tags only. (c) **Rewind
+  breadcrumb (progress
   thread)** — `apply_revert` (`agent_loop/run.rs`) now composes a one-line
   breadcrumb of the abandoned branch from the agent's revert `summary` plus the
   tool-call NAMES extracted from the abandoned span (`compose_revert_breadcrumb`;
@@ -81,8 +98,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     parent's `ToolCall` blocks, MOVE the tip's breadcrumb tag onto the parent, and
     REMOVE the tool-result tip from the rendered trunk — so there is no orphaned
     result (a `tool_call_id` with no matching call, which OpenAI-compat providers
-    reject). The surviving parent assistant node becomes the tip and the weave
-    folds the breadcrumb + continue-forward directive onto it.
+    reject). The surviving parent assistant node becomes the tip, the weave renders
+    the breadcrumb on it, and `inject_continue_after_revert` places the decaying
+    `[continue_after_revert]` steering message right after it.
   **Atomic-cluster invariant (ALL categories)**: the rendered trunk never carries
   a tool-call without its matching result, nor a tool-result without its matching
   call — abandon-class drops the whole cluster (call stripped, orphaned result

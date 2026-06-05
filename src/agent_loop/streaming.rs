@@ -160,7 +160,17 @@ pub(super) async fn stream_assistant_response(
         // result so the kept call never dangles). `context.messages` stays
         // byte-identical — this operates on the cloned trunk only.
         let trunk = context.collapse_abandon_class_cluster(trunk);
-        AgentContext::weave_braking_annotations(trunk)
+        let woven = AgentContext::weave_braking_annotations(trunk);
+        // CC-17: emit the decaying, tagged, all-category `[continue_after_revert]`
+        // synthetic steering message right after the surviving tip — but only
+        // while the tip's newest revert tag is within the decay window. Past the
+        // window (for any category, incl. pinned outcome/checkpoint) it is
+        // suppressed. The marker lets channels filter it from real user input.
+        AgentContext::inject_continue_after_revert(
+            woven,
+            turn_index,
+            config.revert_render_policy.lesson_window_turns,
+        )
     } else {
         context.build_working_context()
     };

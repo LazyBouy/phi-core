@@ -1,4 +1,4 @@
-<!-- Last verified: 2026-06-05 by Claude Code (CC-17 render-time token reclamation: collapse_abandon_class_cluster collapses an abandon-class reverted-onto cluster atomically for BOTH revert-target shapes (call-tip strips the tip; result-tip strips the parent call, moves the tag onto it, and removes the tool-result tip — no orphaned result) into its one-line breadcrumb at render time (messages byte-identical); atomic-cluster invariant for all categories (abandon drops the whole cluster, pinned keeps both); forward-progress directive folded into the tip node's annotation (no standalone Message::User braking note); breadcrumb excludes the revert tool's own name; decay-window default lowered 5→3; revert description gains 4-category budget framing) -->
+<!-- Last verified: 2026-06-05 by Claude Code (CC-17 render-time token reclamation: collapse_abandon_class_cluster collapses an abandon-class reverted-onto cluster atomically for BOTH revert-target shapes (call-tip strips the tip; result-tip strips the parent call, moves the tag onto it, and removes the tool-result tip — no orphaned result) into its one-line breadcrumb at render time (messages byte-identical); atomic-cluster invariant for all categories (abandon drops the whole cluster, pinned keeps both); post-revert continue-forward steering is now a SEPARATE decaying, tagged, all-category [continue_after_revert] synthetic Message::User (CONTINUE_AFTER_REVERT_MARKER) inserted after the tip by inject_continue_after_revert — emitted for all four categories while within lesson_window_turns, suppressed past the window incl. pinned outcome/checkpoint; the iter-2 inline annotation fold is removed; weave is markers+tags only; breadcrumb excludes the revert tool's own name; decay-window default lowered 5→3; revert description gains 4-category budget framing) -->
 # Composition I — the braking layer
 
 Composition I is phi-core's **opt-in braking layer** [EXISTS]. It lets the
@@ -173,16 +173,30 @@ let woven = AgentContext::weave_braking_annotations(trunk);
   stacks the duplicate. Repeated reverts to the same node could otherwise bury
   weaker models in a wall of duplicated noise.
 
-Then, when a revert just landed on the trunk tip (the reverted-to node carries a
-`Lesson` / `Finding` tag), the weave **folds a forward-progress directive into
-that tip node's own annotation** — right after its `[lesson: …]` tag:
+The weave itself renders **markers + tags only**. The post-revert
+continue-forward steering is a SEPARATE step,
+`AgentContext::inject_continue_after_revert`, wired in `agent_loop/streaming.rs`
+right after the weave:
 
-- The directive `[continue forward: do the next uncompleted step; do NOT redo
-  completed steps; do NOT stop]` is part of the tip node's content marker. There
-  is **no** standalone `Message::User` braking note: a synthetic user-role entry
-  read as a phantom turn, and the directive belongs ON the node the model reverted
-  to. The directive is scoped to the abandon-class tip (where it fires); pinned
-  tips and untagged tips get no directive.
+- When a revert landed on the trunk tip (the reverted-to node carries any revert
+  tag), a **decaying, tagged, all-category `[continue_after_revert]` synthetic
+  `Message::User`** is inserted immediately AFTER the tip. The text begins with
+  the literal marker `pub const CONTINUE_AFTER_REVERT_MARKER = "[continue_after_revert]"`
+  so consumers (channels, UIs, transcript renderers) can identify + filter it out
+  of the real conversation stream — these are model-steering signals, NOT real
+  user input. It echoes the tip breadcrumb then carries the directive:
+  `[continue_after_revert] <breadcrumb>. You just reverted to this node. Continue
+  forward: do the next uncompleted step; do NOT redo completed steps; do NOT stop.`
+- It fires for **ALL revert categories** — failure→`Lesson`, tangent→`Finding`,
+  completion→`Outcome`, step-summary→`Checkpoint` — not just the abandon class.
+- It **decays**: emitted ONLY while the tip's most-recent revert tag is within the
+  decay window (`current_turn - tag.created_at_turn <= lesson_window_turns`). Past
+  the window the steering message is suppressed for **any** category — INCLUDING
+  pinned `Outcome`/`Checkpoint` whose TAG itself persists on the trunk (the nudge
+  is transient even when the pinned tag is not). The earlier 0.11 iteration folded
+  the directive into the tip node's annotation; it did not reliably steer a weaker
+  model (which still looped re-doing completed steps), so the steering moved to
+  this separate, marked, decaying message.
 - The reverted-to node also carries the **rewind breadcrumb** of the abandoned
   branch — a one-line `reverted past: <summary> (<tool-names> abandoned)` thread
   composed by `apply_revert` (see below) — which the weave renders as the node's
@@ -203,10 +217,12 @@ strictly-after span; without the exclusion the breadcrumb would mislabel as
 `(write_file, revert_to_state abandoned)`. After the exclusion the breadcrumb
 names `write_file` only.
 
-The agent loop calls the weave on the revert-mode trunk path only
-(`active_node_id.is_some()`); non-revert consumers are byte-identical (their
-messages carry no `node_id`, so the weave is a pass-through and no directive is
-folded). The decay policy default window is 3 turns (lowered from 5 in 0.11).
+The agent loop calls the weave + `inject_continue_after_revert` on the revert-mode
+trunk path only (`active_node_id.is_some()`); non-revert consumers are
+byte-identical (their messages carry no `node_id`, so the weave is a pass-through
+and no steering message is inserted). The decay policy default window is 3 turns
+(lowered from 5 in 0.11), and the same window gates the `[continue_after_revert]`
+steering message.
 
 ## Render-time reclamation of the abandon-class tool-cluster (0.11)
 
@@ -234,8 +250,9 @@ NO heavy `ToolCall`, and NO orphaned tool-result:
     `ToolCall` blocks, MOVE the tip's breadcrumb tag onto the parent, and REMOVE
     the tool-result tip from the rendered trunk — otherwise a `tool_call_id` with
     no matching call survives (an **orphaned tool-result**, which OpenAI-compat
-    providers reject). The surviving parent assistant node becomes the tip and the
-    weave folds the breadcrumb + continue-forward directive onto it.
+    providers reject). The surviving parent assistant node becomes the tip, the
+    weave renders the breadcrumb on it, and `inject_continue_after_revert` places
+    the decaying `[continue_after_revert]` steering message right after it.
 - **Pinned tip** (`Outcome`/`Checkpoint`): the cluster is load-bearing (a sealed
   result the model may re-read), so it is kept **whole** — if the matching tool-result
   is off-trunk, it is re-appended right after the tip so the kept call never dangles.

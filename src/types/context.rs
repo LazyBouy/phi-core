@@ -27,6 +27,18 @@ fn prepend_marker_to_message(message: &mut super::content::Message, marker: &str
     }
 }
 
+/// Literal marker that prefixes every synthetic post-revert continue-forward
+/// steering message ([`AgentContext::inject_continue_after_revert`]).
+///
+/// These messages are **model-steering signals**, NOT real user input: after a
+/// revert, the surviving tip carries the revert breadcrumb but a weaker model
+/// can loop on the re-presented task (re-doing already-completed steps). A
+/// separate synthetic `Message::User` placed right after the tip steers it
+/// onward. The `[continue_after_revert]` prefix lets consumers (channels, UIs,
+/// transcript renderers) identify + filter these synthetic steering messages
+/// out of the real conversation stream.
+pub const CONTINUE_AFTER_REVERT_MARKER: &str = "[continue_after_revert]";
+
 // ---------------------------------------------------------------------------
 // In-run context entry (2-stream architecture)
 // ---------------------------------------------------------------------------
@@ -478,35 +490,15 @@ impl AgentContext {
         use super::node_tag::TagKind;
         use std::collections::HashSet;
 
-        // Locate the trunk tip (the LAST node-bearing message), which is the
-        // active / reverted-to node. When that node carries ≥ 1 decay-able
-        // lesson/finding tag — the signal that a revert just landed there
-        // (apply_revert attaches the summary tag to the target node, which
-        // becomes the active node) — we fold a forward-progress directive
-        // DIRECTLY into the tip node's woven annotation (right after its
-        // `[lesson: …]` tag) so a weaker model is steered onward instead of
-        // looping on the re-presented task. The directive is part of the tip
-        // node's content marker — there is NO standalone `Message::User` note.
-        // General braking-machinery merit: any consumer reverting repeatedly
-        // benefits from an attribution-clean continue-forward signal that does
-        // not introduce a phantom user-role message.
-        let tip_idx = messages
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(i, m)| match m {
-                AgentMessage::Llm(lm) if lm.node_id.is_some() => Some(i),
-                _ => None,
-            });
-
         // Single pass: weave the per-node `[n<id>]` markers + surviving
-        // lesson/finding tags into each node's content. On the abandon-class
-        // tip (a tip carrying a lesson/finding tag), the continue-forward
-        // directive is appended onto that node's marker right after its tags.
+        // lesson/finding tags into each node's content. The continue-forward
+        // steering is NOT folded here — it is emitted as a separate, decaying,
+        // tagged synthetic `Message::User` by
+        // [`inject_continue_after_revert`](Self::inject_continue_after_revert),
+        // wired in downstream (after this weave) at the streaming call site.
         let woven: Vec<AgentMessage> = messages
             .into_iter()
-            .enumerate()
-            .map(|(idx, m)| match m {
+            .map(|m| match m {
                 AgentMessage::Llm(mut lm) => {
                     let Some(node_id) = lm.node_id else {
                         return AgentMessage::Llm(lm);
@@ -520,17 +512,9 @@ impl AgentContext {
                     // ordering, removing the wall of noise that can confuse
                     // weaker models into looping.
                     let mut seen: HashSet<(TagKind, &str)> = HashSet::new();
-                    let mut tip_has_lesson = false;
                     for tag in &lm.tags {
-                        let is_lesson = matches!(tag.kind, TagKind::Lesson | TagKind::Finding);
                         if !seen.insert((tag.kind, tag.text.as_str())) {
                             continue; // identical tag already rendered on this node
-                        }
-                        // The tip carrying a lesson/finding tag is the
-                        // reverted-to node → fold the continue-forward directive
-                        // onto it below.
-                        if Some(idx) == tip_idx && is_lesson {
-                            tip_has_lesson = true;
                         }
                         let kind = match tag.kind {
                             TagKind::Lesson => "lesson",
@@ -540,15 +524,6 @@ impl AgentContext {
                         };
                         marker.push_str(&format!(" [{}: {}]", kind, tag.text));
                     }
-                    // Fold the forward-progress directive into the tip node's
-                    // annotation (right after its lesson tag), scoped to the
-                    // abandon-class tip where the standalone note fired before.
-                    if tip_has_lesson {
-                        marker.push_str(
-                            " [continue forward: do the next uncompleted step; \
-                             do NOT redo completed steps; do NOT stop]",
-                        );
-                    }
                     prepend_marker_to_message(&mut lm.message, &marker);
                     AgentMessage::Llm(lm)
                 }
@@ -557,6 +532,104 @@ impl AgentContext {
             .collect();
 
         woven
+    }
+
+    /// Composition I — emit a decaying, tagged, all-category post-revert
+    /// continue-forward steering message.
+    ///
+    /// After a revert, the surviving trunk tip carries the revert breadcrumb tag
+    /// (composed by `apply_revert`), but a weaker model can loop on the
+    /// re-presented task — re-doing already-completed steps instead of advancing.
+    /// This inserts a **separate synthetic `Message::User`** right after the tip,
+    /// prefixed with [`CONTINUE_AFTER_REVERT_MARKER`] so consumers can identify +
+    /// filter it out of the real conversation stream (it is a model-steering
+    /// signal, NOT real user input).
+    ///
+    /// Properties:
+    /// - **All categories** — emitted irrespective of the revert tag kind
+    ///   (failure→`Lesson`, tangent→`Finding`, completion→`Outcome`,
+    ///   step-summary→`Checkpoint`). Any revert tag on the tip triggers it.
+    /// - **Decays** — emitted ONLY while the tip's most-recent revert tag is
+    ///   within the decay window, i.e. iff
+    ///   `current_turn - tag.created_at_turn <= decay_window`. Past the window
+    ///   the message is NOT emitted — even for pinned (`Outcome`/`Checkpoint`)
+    ///   tags whose TAG itself persists on the trunk. The steering is a
+    ///   transient nudge, not a permanent fixture.
+    /// - **Breadcrumb echo** — the most-recent tag's text is echoed into the
+    ///   message (as the old standalone note did) so the model concretely knows
+    ///   what was just reverted from.
+    ///
+    /// Caller contract: invoke ONLY on the revert-mode trunk path
+    /// (`active_node_id.is_some()`), AFTER `collapse_abandon_class_cluster` (so
+    /// the tip is the surviving node carrying the moved tag) and AFTER
+    /// `weave_braking_annotations`. `current_turn` is the agent-loop turn index;
+    /// `decay_window` is the consumer's `lesson_window_turns`. Messages with no
+    /// node-bearing tip, or a tip whose newest revert tag is past the window,
+    /// pass through untouched — so non-revert / decayed consumers are
+    /// byte-identical.
+    pub fn inject_continue_after_revert(
+        messages: Vec<AgentMessage>,
+        current_turn: u32,
+        decay_window: u32,
+    ) -> Vec<AgentMessage> {
+        use super::content::{Content, Message};
+
+        // Locate the trunk tip (the LAST node-bearing message) — the active /
+        // reverted-to node. After the collapse this is the surviving node
+        // carrying the (possibly moved) revert tag.
+        let Some(tip_idx) = messages
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(i, m)| match m {
+                AgentMessage::Llm(lm) if lm.node_id.is_some() => Some(i),
+                _ => None,
+            })
+        else {
+            return messages; // no node-bearing tip → not a revert-landed trunk
+        };
+
+        // Read the tip's MOST-RECENT revert tag (highest `created_at_turn`).
+        // A node can accrue multiple tags across repeated reverts; the newest
+        // governs the decay gate + supplies the breadcrumb echo. No tag → no
+        // revert landed here → nothing to steer.
+        let AgentMessage::Llm(tip) = &messages[tip_idx] else {
+            return messages;
+        };
+        let Some(newest) = tip.tags.iter().max_by_key(|t| t.created_at_turn) else {
+            return messages; // no revert tag on the tip → no steering
+        };
+
+        // Decay gate — emit iff the newest tag is within the decay window. This
+        // fires for ALL categories (decay-able Lesson/Finding AND pinned
+        // Outcome/Checkpoint) while in window; past the window it is suppressed
+        // even though a pinned tag's TAG persists on the trunk.
+        if current_turn.saturating_sub(newest.created_at_turn) > decay_window {
+            return messages;
+        }
+
+        // Compose the steering text: `[continue_after_revert]` marker + an
+        // optional breadcrumb echo (the newest tag's text) + the concrete
+        // continue-forward directive.
+        let trimmed = newest.text.trim();
+        let crumb = if trimmed.is_empty() {
+            String::new()
+        } else {
+            format!(" {trimmed}.")
+        };
+        let text = format!(
+            "{CONTINUE_AFTER_REVERT_MARKER}{crumb} You just reverted to this \
+             node. Continue forward: do the next uncompleted step; do NOT redo \
+             completed steps; do NOT stop."
+        );
+        let note = AgentMessage::Llm(super::agent_message::LlmMessage::new(Message::User {
+            content: vec![Content::Text { text }],
+            timestamp: 0,
+        }));
+
+        let mut out = messages;
+        out.insert(tip_idx + 1, note);
+        out
     }
 
     /// Composition I — parent-chain assembly.
@@ -1188,11 +1261,12 @@ mod build_trunk_context_tests {
     }
 
     #[test]
-    fn weave_braking_annotations_weaves_forward_progress_marker_at_tip() {
-        // The trunk tip (last node-bearing message) carrying a lesson tag is
-        // the reverted-to node → the continue-forward directive must be FOLDED
-        // INTO that tip node's woven annotation (right after its `[lesson: …]`
-        // tag). There is NO standalone `Message::User` braking note.
+    fn weave_braking_annotations_renders_tags_without_steering_message() {
+        // The weave step renders markers + tags ONLY — it no longer folds the
+        // continue-forward directive (that is now a separate, decaying synthetic
+        // `[continue_after_revert]` user message emitted by
+        // `inject_continue_after_revert`). The weave output length is unchanged
+        // and carries no steering text.
         let root = user("write a plan", 1, NodeId(0), None);
         let mut tip = assistant("reverted here", 2, NodeId(1), Some(NodeId(0)));
         if let AgentMessage::Llm(lm) = &mut tip {
@@ -1200,20 +1274,13 @@ mod build_trunk_context_tests {
                 .push(tag(TagKind::Lesson, 1, "v1 was tangential, restarting"));
         }
         let woven = AgentContext::weave_braking_annotations(vec![root, tip]);
-        // No standalone note is inserted — the output length is unchanged.
+        // No standalone note is inserted by the weave — length is unchanged.
         assert_eq!(
             woven.len(),
             2,
-            "no standalone braking note must be inserted (directive is folded into the tip)"
+            "weave must not insert any standalone message"
         );
-        // The root node does NOT carry the forward directive.
-        assert!(
-            !first_text(&woven[0]).contains("continue forward"),
-            "root node must not carry the forward directive: {}",
-            first_text(&woven[0])
-        );
-        // The tip node's OWN annotation carries the lesson tag AND the folded
-        // continue-forward directive.
+        // The tip keeps its marker + lesson tag, but carries NO steering text.
         let tip_text = first_text(&woven[1]);
         assert!(
             tip_text.starts_with("[n1]")
@@ -1221,100 +1288,190 @@ mod build_trunk_context_tests {
             "tip keeps its marker + lesson tag: {tip_text}"
         );
         assert!(
-            tip_text.contains("[continue forward:")
-                && tip_text.contains("next uncompleted step")
-                && tip_text.contains("do NOT stop"),
-            "tip annotation must carry the folded continue-forward directive: {tip_text}"
+            !tip_text.contains("continue forward")
+                && !tip_text.contains(CONTINUE_AFTER_REVERT_MARKER),
+            "weave must NOT fold any continue-forward steering into the tip: {tip_text}"
         );
-        // No phantom `Message::User` braking-note entry exists in the output.
+        // No `[continue_after_revert]` user message exists after the weave alone.
         assert!(
-            !woven.iter().any(|m| matches!(
-                m,
-                AgentMessage::Llm(lm) if lm.node_id.is_none()
-                    && matches!(&lm.message, Message::User { .. })
-            )),
-            "no standalone Message::User braking note must be present"
+            !woven
+                .iter()
+                .any(|m| first_text(m).contains(CONTINUE_AFTER_REVERT_MARKER)),
+            "weave alone emits no [continue_after_revert] message"
         );
     }
 
     #[test]
-    fn forward_directive_folded_onto_tool_result_tip_annotation() {
-        // When the trunk tip is a `Message::ToolResult` carrying a lesson tag,
-        // the continue-forward directive is folded into the tip's OWN
-        // annotation (right after its lesson tag) — there is no separate entry.
+    fn continue_after_revert_emitted_for_all_categories_within_window() {
+        // The decaying `[continue_after_revert]` synthetic user message is
+        // emitted after the tip for ALL FOUR revert categories — failure→Lesson,
+        // tangent→Finding, completion→Outcome, step-summary→Checkpoint — while
+        // the tip's newest tag is within the decay window.
+        for kind in [
+            TagKind::Lesson,
+            TagKind::Finding,
+            TagKind::Outcome,
+            TagKind::Checkpoint,
+        ] {
+            let root = user("write a plan", 1, NodeId(0), None);
+            let mut tip = assistant("reverted here", 2, NodeId(1), Some(NodeId(0)));
+            if let AgentMessage::Llm(lm) = &mut tip {
+                lm.tags.push(tag(kind, 5, "v1 abandoned"));
+            }
+            let woven = AgentContext::weave_braking_annotations(vec![root, tip]);
+            // current_turn = 5, created_at_turn = 5, window = 3 → distance 0 ≤ 3.
+            let out = AgentContext::inject_continue_after_revert(woven, 5, 3);
+            // A new entry was inserted right after the tip.
+            assert_eq!(
+                out.len(),
+                3,
+                "{kind:?}: the steering message must be inserted after the tip"
+            );
+            // The inserted message is a nodeless Message::User immediately after
+            // the tip (index 2 — root at 0, tip at 1, steering at 2).
+            let note = &out[2];
+            assert!(
+                matches!(
+                    note,
+                    AgentMessage::Llm(lm) if lm.node_id.is_none()
+                        && matches!(&lm.message, Message::User { .. })
+                ),
+                "{kind:?}: the steering message must be a nodeless Message::User"
+            );
+            // Its text starts with the marker, echoes the breadcrumb, and carries
+            // the continue-forward directive.
+            let text = first_text(note);
+            assert!(
+                text.starts_with(CONTINUE_AFTER_REVERT_MARKER),
+                "{kind:?}: text must start with the marker: {text}"
+            );
+            assert!(
+                text.contains("v1 abandoned")
+                    && text.contains("Continue forward")
+                    && text.contains("next uncompleted step")
+                    && text.contains("do NOT redo completed steps")
+                    && text.contains("do NOT stop"),
+                "{kind:?}: text must echo the breadcrumb + carry the directive: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn continue_after_revert_suppressed_past_decay_window_all_categories() {
+        // Past the decay window the `[continue_after_revert]` message is NOT
+        // emitted — for ANY category, INCLUDING pinned Outcome/Checkpoint whose
+        // TAG itself persists on the trunk (the steering nudge is transient even
+        // though the pinned tag is not).
+        for kind in [
+            TagKind::Lesson,
+            TagKind::Finding,
+            TagKind::Outcome,
+            TagKind::Checkpoint,
+        ] {
+            let root = user("write a plan", 1, NodeId(0), None);
+            let mut tip = assistant("reverted here", 2, NodeId(1), Some(NodeId(0)));
+            if let AgentMessage::Llm(lm) = &mut tip {
+                lm.tags.push(tag(kind, 5, "v1 abandoned"));
+            }
+            let woven = AgentContext::weave_braking_annotations(vec![root, tip]);
+            // current_turn = 9, created_at_turn = 5, window = 3 → distance 4 > 3.
+            let out = AgentContext::inject_continue_after_revert(woven, 9, 3);
+            assert_eq!(
+                out.len(),
+                2,
+                "{kind:?}: no steering message past the decay window"
+            );
+            assert!(
+                !out.iter()
+                    .any(|m| first_text(m).contains(CONTINUE_AFTER_REVERT_MARKER)),
+                "{kind:?}: no [continue_after_revert] message past the window"
+            );
+        }
+    }
+
+    #[test]
+    fn continue_after_revert_decays_at_exact_window_boundary() {
+        // Boundary: distance == window renders (within); distance == window + 1
+        // does not. Mirrors `renders_by_turn`'s `<=` semantics.
+        let make = || {
+            let mut tip = assistant("reverted here", 2, NodeId(1), None);
+            if let AgentMessage::Llm(lm) = &mut tip {
+                lm.tags.push(tag(TagKind::Lesson, 10, "abandoned"));
+            }
+            AgentContext::weave_braking_annotations(vec![tip])
+        };
+        // distance 3 == window 3 → emitted.
+        let at = AgentContext::inject_continue_after_revert(make(), 13, 3);
+        assert_eq!(at.len(), 2, "exactly at window must still emit");
+        // distance 4 > window 3 → suppressed.
+        let past = AgentContext::inject_continue_after_revert(make(), 14, 3);
+        assert_eq!(past.len(), 1, "just past window must suppress");
+    }
+
+    #[test]
+    fn continue_after_revert_newest_tag_governs_decay_and_breadcrumb() {
+        // A node accruing multiple revert tags uses the NEWEST (highest
+        // created_at_turn) to gate decay AND to supply the breadcrumb echo.
+        let mut tip = assistant("reverted here", 2, NodeId(1), None);
+        if let AgentMessage::Llm(lm) = &mut tip {
+            lm.tags.push(tag(TagKind::Lesson, 2, "old breadcrumb"));
+            lm.tags.push(tag(TagKind::Lesson, 8, "newest breadcrumb"));
+        }
+        let woven = AgentContext::weave_braking_annotations(vec![tip]);
+        // current_turn = 9, newest created_at_turn = 8, window = 3 → distance 1.
+        let out = AgentContext::inject_continue_after_revert(woven, 9, 3);
+        assert_eq!(out.len(), 2, "in-window via the newest tag → emit");
+        let text = first_text(&out[1]);
+        assert!(
+            text.contains("newest breadcrumb") && !text.contains("old breadcrumb"),
+            "the breadcrumb echo must use the newest tag: {text}"
+        );
+    }
+
+    #[test]
+    fn continue_after_revert_emitted_after_tool_result_tip() {
+        // When the trunk tip is a `Message::ToolResult` carrying a revert tag,
+        // the steering message is still emitted immediately after it.
         let root = user("write a plan", 1, NodeId(0), None);
         let mut tip = tool_result("file written", 2, NodeId(1), Some(NodeId(0)));
         if let AgentMessage::Llm(lm) = &mut tip {
             lm.tags
-                .push(tag(TagKind::Lesson, 1, "v1 was tangential, restarting"));
+                .push(tag(TagKind::Lesson, 2, "v1 was tangential, restarting"));
         }
         let woven = AgentContext::weave_braking_annotations(vec![root, tip]);
-        // No standalone entry is appended.
-        assert_eq!(woven.len(), 2, "no standalone note entry must be inserted");
-        let tip_text = first_text(&woven[1]);
+        let out = AgentContext::inject_continue_after_revert(woven, 2, 3);
+        assert_eq!(
+            out.len(),
+            3,
+            "steering message inserted after the tool-result tip"
+        );
+        // Steering message is at index 2 (right after the tip at index 1).
+        let text = first_text(&out[2]);
+        assert!(
+            text.starts_with(CONTINUE_AFTER_REVERT_MARKER)
+                && text.contains("v1 was tangential, restarting"),
+            "the steering message follows the tool-result tip: {text}"
+        );
+        // The tool-result tip itself keeps its woven marker + content untouched.
+        let tip_text = first_text(&out[1]);
         assert!(
             tip_text.starts_with("[n1]") && tip_text.contains("file written"),
             "tool-result tip keeps its marker + content: {tip_text}"
         );
-        assert!(
-            tip_text.contains("[lesson: v1 was tangential, restarting]")
-                && tip_text.contains("[continue forward:"),
-            "the directive is folded into the tool-result tip's annotation: {tip_text}"
-        );
     }
 
     #[test]
-    fn forward_directive_folds_into_tip_annotation() {
-        // The continue-forward directive renders folded into the tip node's
-        // annotation with concrete, directive phrasing (do the next uncompleted
-        // step, do not redo completed steps, do not stop). No standalone note.
-        let mut tip = assistant("reverted here", 1, NodeId(0), None);
-        if let AgentMessage::Llm(lm) = &mut tip {
-            lm.tags
-                .push(tag(TagKind::Lesson, 0, "approach v1 abandoned"));
-        }
-        let woven = AgentContext::weave_braking_annotations(vec![tip]);
-        // Only the tip entry — no separate note.
-        assert_eq!(woven.len(), 1, "no standalone note must follow the tip");
-        let tip_text = first_text(&woven[0]);
-        // The lesson breadcrumb renders on the tip's annotation.
-        assert!(
-            tip_text.contains("[lesson: approach v1 abandoned]"),
-            "the lesson breadcrumb must render on the tip: {tip_text}"
-        );
-        // The folded continue-forward directive carries the concrete phrasing.
-        assert!(tip_text.contains("[continue forward:"), "{tip_text}");
-        assert!(tip_text.contains("next uncompleted step"), "{tip_text}");
-        assert!(
-            tip_text.contains("do NOT redo completed steps"),
-            "{tip_text}"
-        );
-        assert!(tip_text.contains("do NOT stop"), "{tip_text}");
-        // No `[braking note]` standalone-note phrasing remains anywhere.
-        assert!(
-            !woven
-                .iter()
-                .any(|m| first_text(m).contains("[braking note]")),
-            "no standalone [braking note] entry must exist"
-        );
-    }
-
-    #[test]
-    fn weave_braking_annotations_no_forward_marker_without_lesson() {
-        // A tip node with NO lesson/finding tag is not a fresh-revert tip →
-        // no forward-progress directive (avoids spamming every trunk build).
+    fn continue_after_revert_no_message_without_revert_tag() {
+        // A tip node with NO revert tag is not a fresh-revert tip → no steering
+        // message (avoids spamming every trunk build).
         let am = assistant("ordinary tip", 1, NodeId(5), None);
         let woven = AgentContext::weave_braking_annotations(vec![am]);
-        // No lesson/finding tag on the tip → no directive folded, no note added.
-        assert_eq!(
-            woven.len(),
-            1,
-            "no note must be inserted without a lesson tag"
-        );
-        let text = first_text(&woven[0]);
+        let out = AgentContext::inject_continue_after_revert(woven, 1, 3);
+        assert_eq!(out.len(), 1, "no steering without a revert tag on the tip");
         assert!(
-            !text.contains("continue forward"),
-            "untagged tip must not carry the forward directive: {text}"
+            !out.iter()
+                .any(|m| first_text(m).contains(CONTINUE_AFTER_REVERT_MARKER)),
+            "no [continue_after_revert] message without a revert tag"
         );
     }
 }
@@ -1393,6 +1550,24 @@ mod collapse_abandon_class_cluster_tests {
     fn tag_message(msgs: &mut [AgentMessage], idx: usize, kind: TagKind, breadcrumb: &str) {
         if let AgentMessage::Llm(lm) = &mut msgs[idx] {
             lm.add_tag(NodeTag::new(kind, breadcrumb.to_string(), 1, vec![]));
+        }
+    }
+
+    /// First text block of a message (empty string if none).
+    fn first_text(m: &AgentMessage) -> String {
+        match m {
+            AgentMessage::Llm(lm) => match &lm.message {
+                Message::User { content, .. }
+                | Message::Assistant { content, .. }
+                | Message::ToolResult { content, .. } => content
+                    .iter()
+                    .find_map(|c| match c {
+                        Content::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default(),
+            },
+            _ => String::new(),
         }
     }
 
@@ -1743,12 +1918,12 @@ mod collapse_abandon_class_cluster_tests {
 
     #[test]
     fn end_to_end_collapse_then_weave_minimax_tool_result_tip() {
-        // The minimax shape end-to-end (collapse → weave): the model reverts
-        // onto a tool-RESULT tip carrying an abandon-class Lesson breadcrumb.
-        // After the atomic collapse + weave, the rendered output is a SINGLE
-        // assistant node carrying `[lesson: … write_file …]` + the folded
-        // `[continue forward: …]` directive — with NO `Message::ToolResult` and
-        // NO standalone `Message::User` braking note.
+        // The minimax shape end-to-end (collapse → weave → inject): the model
+        // reverts onto a tool-RESULT tip carrying an abandon-class Lesson
+        // breadcrumb. After the atomic collapse + weave + inject, the rendered
+        // output is a single surviving assistant node carrying `[lesson: …
+        // write_file …]` (NO `Message::ToolResult`) FOLLOWED BY a separate
+        // decaying `[continue_after_revert]` synthetic user message.
         let mut ctx = fixture_59_tool_result_tip();
         tag_message(
             &mut ctx.messages,
@@ -1760,26 +1935,19 @@ mod collapse_abandon_class_cluster_tests {
         let trunk = ctx.build_trunk_context_with_policy(&policy, 1);
         let collapsed = ctx.collapse_abandon_class_cluster(trunk);
         let woven = AgentContext::weave_braking_annotations(collapsed);
+        // current_turn = 1, tag created_at_turn = 1, window = 3 → within window.
+        let out = AgentContext::inject_continue_after_revert(woven, 1, policy.lesson_window_turns);
 
         // No ToolResult anywhere — the cluster collapsed atomically.
         assert!(
-            !woven.iter().any(|m| matches!(
+            !out.iter().any(|m| matches!(
                 m,
                 AgentMessage::Llm(lm) if matches!(&lm.message, Message::ToolResult { .. })
             )),
             "no Message::ToolResult must survive the atomic collapse"
         );
-        // No standalone Message::User braking note (nodeless user entry).
-        assert!(
-            !woven.iter().any(|m| matches!(
-                m,
-                AgentMessage::Llm(lm) if lm.node_id.is_none()
-                    && matches!(&lm.message, Message::User { .. })
-            )),
-            "no standalone Message::User braking note must be present"
-        );
-        // The surviving assistant node carries the breadcrumb AND the folded
-        // continue-forward directive in its content.
+        // The surviving assistant node carries the breadcrumb in its content but
+        // NOT the steering directive (that is now a separate message).
         fn assistant_text(m: &AgentMessage) -> Option<String> {
             match m {
                 AgentMessage::Llm(lm) => match &lm.message {
@@ -1792,9 +1960,8 @@ mod collapse_abandon_class_cluster_tests {
                 _ => None,
             }
         }
-        let tip_text = woven
+        let tip_text = out
             .iter()
-            .rev()
             .find_map(assistant_text)
             .expect("a surviving assistant node must carry woven content");
         assert!(
@@ -1802,15 +1969,36 @@ mod collapse_abandon_class_cluster_tests {
             "the surviving assistant node must carry the lesson breadcrumb: {tip_text}"
         );
         assert!(
-            tip_text.contains("[continue forward:")
-                && tip_text.contains("next uncompleted step")
-                && tip_text.contains("do NOT stop"),
-            "the surviving assistant node must carry the folded continue-forward directive: {tip_text}"
+            !tip_text.contains("continue forward")
+                && !tip_text.contains(CONTINUE_AFTER_REVERT_MARKER),
+            "the steering directive must NOT be folded into the assistant node: {tip_text}"
         );
         // And the heavy body is gone.
         assert!(
             !tip_text.contains("PLAN-V1-HEAVY-BODY"),
             "the heavy tool-call body must be gone: {tip_text}"
+        );
+        // A separate `[continue_after_revert]` synthetic user message follows the
+        // tip, echoing the breadcrumb + carrying the continue-forward directive.
+        let steer = out
+            .iter()
+            .find(|m| first_text(m).contains(CONTINUE_AFTER_REVERT_MARKER))
+            .expect("a [continue_after_revert] steering message must be emitted");
+        assert!(
+            matches!(
+                steer,
+                AgentMessage::Llm(lm) if lm.node_id.is_none()
+                    && matches!(&lm.message, Message::User { .. })
+            ),
+            "the steering message must be a nodeless Message::User"
+        );
+        let steer_text = first_text(steer);
+        assert!(
+            steer_text.starts_with(CONTINUE_AFTER_REVERT_MARKER)
+                && steer_text.contains("write_file abandoned")
+                && steer_text.contains("next uncompleted step")
+                && steer_text.contains("do NOT stop"),
+            "the steering message must carry the marker + breadcrumb + directive: {steer_text}"
         );
     }
 }
