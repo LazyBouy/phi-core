@@ -105,7 +105,7 @@ impl AgentTool for RevertTool {
     }
 
     fn description(&self) -> &str {
-        "Rewind the conversation to an earlier point and resume from there. The conversation is a TREE of nodes: each assistant/tool step is a node, tagged inline in the messages as [n0], [n1], [n2], … in order — those tags ARE the nodes, and the `step` arg names one of them. Naming a node in `step` makes it the new tip: every node AFTER it is dropped from your active context (the dropped messages stay in the forensic session log; only your working context changes). After reverting, CONTINUE FORWARD with your new approach from that node — do NOT repeat the steps you just abandoned (the `summary` you supply is pinned to the target node to remind you what was tried). This is your CONTEXT-BUDGET tool: every revert drops the abandoned tail (reclaiming that context) and pins a one-line summary in its place — and when you revert past a heavy tool exchange you abandoned (e.g. a big write_file you got wrong), its body is replaced by that one line, so your context gets SMALLER. The four categories are budget levers that differ in how the pinned summary persists: `failure` — a branch failed (learn the lesson; fades after a few turns); `tangent` — an exploration is finished (fold the finding back; fades after a few turns); `completion` — a sub-task is sealed (keep the outcome pinned); `step-summary` — a long trunk needs a checkpoint (keep the checkpoint pinned). completion/step-summary still drop the abandoned tail and keep a durable marker; they do NOT shrink the kept span you reverted to. For the full tree model and worked examples, call tool_help(\"revert_to_state\")."
+        "Rewind the conversation to an earlier point and resume from there. The conversation is a TREE of nodes: each assistant/tool step is a node, tagged inline in the messages as [n0], [n1], [n2], … in order — those tags ARE the nodes, and the `step` arg names one of them. Naming a node in `step` makes it the new tip: every node AFTER it is dropped from your active context (the dropped messages stay in the forensic session log; only your working context changes). After reverting, CONTINUE FORWARD with your new approach from that node — do NOT repeat the steps you just abandoned (the `summary` you supply is pinned to the target node to remind you what was tried). This is your CONTEXT-BUDGET tool: every revert drops the abandoned tail (reclaiming that context) and pins a one-line summary in its place — and when you revert past a heavy tool exchange you abandoned (e.g. a big write_file you got wrong), its body is replaced by that one line, so your context gets SMALLER. The four categories are budget levers that differ in how the pinned summary persists: `failure` — a branch failed (learn the lesson; fades after a few turns); `tangent` — an exploration is finished (fold the finding back; fades after a few turns); `completion` — a sub-task is sealed (keep the outcome pinned); `step-summary` — a long trunk needs a checkpoint (keep the checkpoint pinned). completion/step-summary still drop the abandoned tail and keep a durable marker; they do NOT shrink the kept span you reverted to. completion/step-summary reclaim the abandoned tail; if there's no tail (you're sealing the step you just finished), nothing shrinks — just continue. For the full tree model and worked examples, call tool_help(\"revert_to_state\")."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -261,6 +261,16 @@ mod tests {
         assert!(
             desc.contains("do NOT shrink the kept span"),
             "description must be honest that completion/step-summary keep the head: {desc}"
+        );
+        // CC-18 / GitHub #72 v2 (user-ratified 2026-06-05) — the description
+        // MUST steer the model away from the degenerate empty-tail summary no-op
+        // and clarify that completion/step-summary reclaim only the tail.
+        assert!(
+            desc.contains(
+                "completion/step-summary reclaim the abandoned tail; if there's no tail \
+                 (you're sealing the step you just finished), nothing shrinks — just continue."
+            ),
+            "description must carry the CC-18 tail-reclamation sentence verbatim: {desc}"
         );
     }
 

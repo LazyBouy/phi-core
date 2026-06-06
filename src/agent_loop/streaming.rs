@@ -151,15 +151,30 @@ pub(super) async fn stream_assistant_response(
         // the content so the model can actually SEE them (and thus supply a valid
         // `revert_to_state(step=…)`). Metadata-only node_id/tags are stripped at
         // convert_to_llm; this bakes them into content first.
+        // CC-18 iter-2 (#73 / D-TEST-0068) — PERSISTENT render-path order
+        // (F-persist-order.a). The collapse must run FIRST, on the RAW trunk, so
+        // it sees the heavy `(tool_call, tool_result)` content it must clear; the
+        // tag-decay rebuild then runs on the already-collapsed trunk (it only
+        // decays out-of-window *tags*, since the content-drop + the reachable
+        // lone-breadcrumb node-drop are owned by collapse). This makes the
+        // abandon-class reclamation PERSIST across every post-revert turn (not
+        // just the one render right after the revert — the #73 gap) and makes the
+        // decay-drop reachable in production.
+        //
+        // 1. Raw parent-chain trunk (heavy content intact).
+        let raw_trunk = context.build_trunk_context();
+        // 2. Persistent, policy-aware collapse: every live abandon-class cluster
+        //    on the trunk is collapsed to its breadcrumb (in-window) or dropped
+        //    (out-of-window); pinned clusters are kept whole. `context.messages`
+        //    stays byte-identical — this operates on the cloned trunk only.
+        let collapsed = context.collapse_abandon_class_cluster(
+            raw_trunk,
+            &config.revert_render_policy,
+            turn_index,
+        );
+        // 3. Tag-decay rebuild on the already-collapsed trunk (pure tag-decay).
         let trunk =
-            context.build_trunk_context_with_policy(&config.revert_render_policy, turn_index);
-        // 0.11: render-time reclamation — when an abandon-class (failure/tangent)
-        // revert landed on a heavy `(tool_call, tool_result)` cluster, collapse
-        // the kept tip's heavy ToolCall body into its one-line breadcrumb;
-        // pinned categories keep the cluster whole (re-including the matching
-        // result so the kept call never dangles). `context.messages` stays
-        // byte-identical — this operates on the cloned trunk only.
-        let trunk = context.collapse_abandon_class_cluster(trunk);
+            AgentContext::decay_tags_by_policy(collapsed, &config.revert_render_policy, turn_index);
         let woven = AgentContext::weave_braking_annotations(trunk);
         // CC-17: emit the decaying, tagged, all-category `[continue_after_revert]`
         // synthetic steering message right after the surviving tip — but only

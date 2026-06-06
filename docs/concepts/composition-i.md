@@ -1,3 +1,5 @@
+<!-- Last verified: 2026-06-06 by Claude Code (0.11.6 PERSISTENT collapse + render-path order: collapse_abandon_class_cluster reworked from a single-tip act into a policy-aware PERSISTENT SCAN over ALL node-bearing trunk messages (gains &policy, current_turn) — every live abandon-class cluster is collapsed on every render, not just the tip, so reclamation persists across all post-revert turns (was tip-only/single-turn — GitHub #73 / D-TEST-0068). The collapsed-node decay-drop MOVES from build_trunk_context_with_policy INTO the policy-aware collapse (the tag-decay second pass is extracted to pub(crate) decay_tags_by_policy) — making it reachable in production (it previously ran before the collapse + read immutable heavy messages, so it never fired). Render path reordered in agent_loop/streaming.rs: collapse FIRST on the raw build_trunk_context() output, then decay_tags_by_policy on the already-collapsed trunk, then weave, then inject. messages stays the immutable forensic log (byte-identical after a MULTI-TURN scan). Pinned clusters kept verbatim everywhere — never collapsed/dropped.) -->
+<!-- Last verified: 2026-06-06 by Claude Code (0.11.5 single-axis category render rule: collapse_abandon_class_cluster now replaces the surviving assistant node's ENTIRE content — text AND tool_call — with the breadcrumb on decayable categories (was a ToolCall-only strip that left reasoning text behind, driving weak-model looping); branch purely on is_decayable(category) (no tail-emptiness / own-action discriminator); apply_revert gates the pinned Outcome/Checkpoint tag on a non-empty abandoned tail (empty-tail summary = no-op no-tag; decayable always attaches); build_trunk_context_with_policy drops a collapsed node whose lone breadcrumb has fully decayed; revert_to_state description gains the tail-reclamation sentence; messages-byte-identical invariant preserved) -->
 <!-- Last verified: 2026-06-05 by Claude Code (CC-17 render-time token reclamation: collapse_abandon_class_cluster collapses an abandon-class reverted-onto cluster atomically for BOTH revert-target shapes (call-tip strips the tip; result-tip strips the parent call, moves the tag onto it, and removes the tool-result tip — no orphaned result) into its one-line breadcrumb at render time (messages byte-identical); atomic-cluster invariant for all categories (abandon drops the whole cluster, pinned keeps both); post-revert continue-forward steering is now a SEPARATE decaying, tagged, all-category [continue_after_revert] synthetic Message::User (CONTINUE_AFTER_REVERT_MARKER) inserted after the tip by inject_continue_after_revert — emitted for all four categories while within lesson_window_turns, suppressed past the window incl. pinned outcome/checkpoint; the iter-2 inline annotation fold is removed; weave is markers+tags only; breadcrumb excludes the revert tool's own name; decay-window default lowered 5→3; revert description gains 4-category budget framing) -->
 # Composition I — the braking layer
 
@@ -233,36 +235,82 @@ cluster it got wrong — e.g. `revert_to_state(failure, …)` onto an 80-line
 `write_file` it abandoned. The kept tip then carries that heavy `ToolCall` body
 forward (context gets *larger*, not smaller).
 
-`AgentContext::collapse_abandon_class_cluster` (wired in `agent_loop/streaming.rs`
-between `build_trunk_context_with_policy` and `weave_braking_annotations`) collapses
-the WHOLE cluster atomically at **render time**, handling BOTH revert-target shapes
-so the rendered trunk carries a single clean assistant node with the breadcrumb,
-NO heavy `ToolCall`, and NO orphaned tool-result:
+`AgentContext::collapse_abandon_class_cluster` (wired in `agent_loop/streaming.rs`)
+collapses the WHOLE cluster atomically at **render time**, handling BOTH revert-target
+shapes so the rendered trunk carries a single clean assistant node with the breadcrumb,
+NO heavy `ToolCall`, and NO orphaned tool-result. **(0.11.6 PERSISTENT scan)** — it
+scans **every** node-bearing trunk message and collapses **every** cluster carrying a
+live abandon-class tag, not just the trunk tip (see "Persistent reclamation" below):
 
-- **Abandon-class tip** (the tip carries a decay-able `Lesson`/`Finding` tag — the
-  signal a `failure`/`tangent` revert landed there). Two shapes:
-  - **call-tip** (the tip IS the assistant tool-call node): strip the tip's heavy
-    `ToolCall` blocks. The breadcrumb already lives on the tip's tag; its matching
-    tool-result is off-trunk (a child the parent-chain walk excluded), so nothing
-    dangles.
-  - **result-tip** (the tip is the matching tool-result — the #59/minimax shape):
-    the heavy body lives in the parent assistant-call node. Strip THAT parent's
-    `ToolCall` blocks, MOVE the tip's breadcrumb tag onto the parent, and REMOVE
-    the tool-result tip from the rendered trunk — otherwise a `tool_call_id` with
-    no matching call survives (an **orphaned tool-result**, which OpenAI-compat
-    providers reject). The surviving parent assistant node becomes the tip, the
-    weave renders the breadcrumb on it, and `inject_continue_after_revert` places
-    the decaying `[continue_after_revert]` steering message right after it.
-- **Pinned tip** (`Outcome`/`Checkpoint`): the cluster is load-bearing (a sealed
-  result the model may re-read), so it is kept **whole** — if the matching tool-result
-  is off-trunk, it is re-appended right after the tip so the kept call never dangles.
+- **Abandon-class cluster** (the node carries a decay-able `Lesson`/`Finding` tag — the
+  signal a `failure`/`tangent` revert landed there). The surviving assistant node's
+  **ENTIRE content is replaced** by the breadcrumb — both the heavy `ToolCall` AND
+  any accompanying reasoning `Text` are dropped (`content.clear()`), leaving only
+  the woven breadcrumb. **(0.11.5 single-axis rule)** — the earlier 0.11 mechanism
+  stripped only the `ToolCall` and left the reasoning text behind; a weak model
+  re-read its own "Starting with Step 1…" and re-executed the abandoned work. The
+  whole abandoned turn is scrapped, so nothing survives for the model to redo.
+  Two shapes:
+  - **call-node** (the node IS the assistant tool-call node): clear its content.
+    The breadcrumb already lives on the node's tag; its matching tool-result is
+    off-trunk (a child the parent-chain walk excluded), so nothing dangles.
+  - **result-node** (the node is the matching tool-result — the #59/minimax shape):
+    the heavy body lives in the parent assistant-call node. Clear THAT parent's
+    content, MOVE the node's breadcrumb tag onto the parent, and REMOVE the
+    tool-result node from the rendered trunk — otherwise a `tool_call_id` with no
+    matching call survives (an **orphaned tool-result**, which OpenAI-compat
+    providers reject). The surviving parent assistant node carries the breadcrumb,
+    the weave renders it, and `inject_continue_after_revert` places the decaying
+    `[continue_after_revert]` steering message right after the surviving tip.
+- **Pinned cluster** (`Outcome`/`Checkpoint`): the cluster is load-bearing (a sealed
+  result the model may re-read), so it is kept **whole** everywhere on the trunk — if
+  the matching tool-result is off-trunk, it is re-appended right after the call so the
+  kept call never dangles. Pinned clusters are never collapsed and never dropped.
+
+**Single-axis rule (0.11.5)** — the branch is purely `TagKind::is_decayable()`. There
+is no tail-emptiness discriminator and no own-action heuristic. Naming `step="n0"`
+(the assistant call) vs `step="n1"` (its result) points at the same indivisible
+`{n0,n1}` cluster (**atomicity**), so the disposition is identical either way.
+
+**Reclamation model + empty-tail no-op** — token reclamation has two sources:
+(1) collapse the cluster (decayable only) + (2) drop the abandoned tail (both
+categories). Pinned categories keep the cluster, so their only saving is the tail.
+`apply_revert` therefore gates the pinned (`Outcome`/`Checkpoint`) tag on a
+non-empty `abandoned_node_ids`: a `completion`/`step-summary` revert with **no
+tail** attaches NO tag (it would merely restate still-visible content), though the
+active-pointer move + `RevertApplied` event still fire. Decayable (`Lesson`/
+`Finding`) tags **always** attach — the lesson *replaces* removed content, so it is
+meaningful even with an empty tail (the #59 shape).
+
+**Persistent reclamation + render-path order (0.11.6)** — the collapse acts on EVERY
+live abandon-class cluster on the trunk, on every render, not just the tip. The earlier
+mechanism collapsed only the tip cluster, so reclamation lasted exactly the single turn
+right after the revert; once the model continued forward, the reverted cluster slid
+mid-trunk, the collapse walked past it, and the abandoned heavy body re-rendered every
+subsequent turn (GitHub #73). To make this persistent the render path is reordered: the
+policy-aware `collapse_abandon_class_cluster(&policy, current_turn)` runs **FIRST** on
+the raw `build_trunk_context()` output (it needs the raw heavy content to know what to
+clear), then `decay_tags_by_policy` decays out-of-window *tags* on the already-collapsed
+trunk, then weave, then inject. The revert tag persists on the target node in
+`messages` (`apply_revert`'s `add_tag`), so every tagged cluster is re-discoverable on
+every render.
+
+**Reachable collapsed-node decay-drop (0.11.6)** — the collapse is policy-aware: a
+cluster whose decayable tag is IN-window collapses to the breadcrumb; a cluster whose
+tag is OUT-of-window has its now-content-less node **dropped from the trunk entirely**
+(the breadcrumb is reclaimed once its lesson no longer renders). This decay-drop USED to
+live in `build_trunk_context_with_policy` — but it ran *before* the collapse and read
+the immutable heavy `messages`, so it never saw a lone breadcrumb to drop in production
+(it only passed a synthetic unit fixture). Moving it INTO the policy-aware collapse — the
+only pass that both knows the per-cluster tag-window state AND owns the content — makes
+it fire. Nodes with real surviving content are never dropped.
 
 The **atomic-cluster invariant** therefore holds for ALL categories: the rendered
 trunk never carries a tool-call without its matching result, nor a tool-result
 without its matching call. The collapse is **render-only** — it operates on the
 cloned trunk that `build_trunk_context` returns by value, so `context.messages`
-(the forensic log) stays byte-identical; replay, audit, and multi-pod see the full
-record.
+(the forensic log) stays byte-identical (verified after a MULTI-TURN persistent scan);
+replay, audit, and multi-pod see the full record.
 
 ## What 0.8.0 does NOT ship
 

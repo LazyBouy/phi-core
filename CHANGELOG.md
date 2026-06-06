@@ -10,6 +10,67 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 **Braking UX + on-demand tool documentation (general-merit; surfaced by i-phi e2e testing).**
 
+- **PERSISTENT collapse + render-path order — reclamation that persists across turns;
+  reachable breadcrumb decay-drop** (`types/context.rs` + `agent_loop/streaming.rs`).
+  The render-time collapse below was **tip-only**, so reclamation lasted exactly the
+  single turn right after a revert; once the model continued forward, the reverted
+  cluster slid mid-trunk, the collapse walked past it, and the abandoned heavy body
+  re-rendered on every subsequent turn (GitHub #73 / D-TEST-0068). Now
+  `collapse_abandon_class_cluster` is a **policy-aware PERSISTENT SCAN** over ALL
+  node-bearing trunk messages (signature gains `policy: &RevertRenderPolicy,
+  current_turn: u32`) — every live abandon-class cluster is collapsed on every render,
+  so the abandoned body stays reclaimed across all post-revert turns. The
+  **collapsed-node decay-drop moves INTO this policy-aware collapse** (a cluster whose
+  decayable tag is out-of-window has its now-content-less node dropped) — making it
+  reachable in production: in the prior design it lived in
+  `build_trunk_context_with_policy`, ran *before* the collapse, and read the immutable
+  heavy `messages`, so it never saw a lone breadcrumb to drop. The tag-decay second
+  pass is extracted to `pub(crate) decay_tags_by_policy`, and the
+  `agent_loop/streaming.rs` render path is reordered: `build_trunk_context()` →
+  `collapse_abandon_class_cluster(&policy, turn)` → `decay_tags_by_policy(&policy,
+  turn)` → weave → inject. The collapse runs FIRST (it needs the raw heavy content to
+  know what to clear); `messages` stays the immutable forensic log (byte-identical
+  verified after a MULTI-TURN scan); pinned clusters are kept verbatim everywhere.
+  General braking-machinery merit: any consumer that reverts and continues forward
+  keeps the abandoned cluster reclaimed persistently with no log mutation.
+- **Single-axis category render rule — full-node collapse on decayable; empty-tail
+  pinned no-op; collapsed-node decay-drop** (`types/context.rs` +
+  `agent_loop/run.rs`). **Supersedes the partial-strip collapse mechanism** below.
+  The render rule now branches purely on `TagKind::is_decayable(category)` — no
+  tail-emptiness discriminator, no own-action heuristic. The atomic unit is the
+  whole `{n0,n1}` cluster; naming `step="n0"` (the assistant call) vs `step="n1"`
+  (its result) points at the same cluster, so the disposition is identical.
+  - **Full-node collapse on decayable** (`collapse_abandon_class_cluster`) — on a
+    `failure`/`tangent` revert the surviving assistant node's **ENTIRE content is
+    cleared** (drop the reasoning `Text` AND the `ToolCall`), leaving only the woven
+    breadcrumb. The earlier mechanism stripped only the `ToolCall` and left the
+    reasoning text behind; a weak model re-read its own "Starting with Step 1…" and
+    re-executed the abandoned work. Both tip shapes (call-tip + result-tip) clear the
+    surviving node's content; the result-tip path still moves the tag onto the parent
+    and removes the orphaned tool-result. Pinned (`completion`/`step-summary`) keeps
+    the cluster verbatim (unchanged).
+  - **Empty-tail pinned no-op** (`apply_revert`) — the pinned `Outcome`/`Checkpoint`
+    tag is attached ONLY when a tail was dropped (`abandoned_node_ids` non-empty).
+    Reclamation has two sources — collapse the cluster (decayable only) + drop the
+    tail (both) — so a pinned revert with no tail reclaims nothing and adds no tag
+    (it would merely restate still-visible content); the active-pointer move +
+    `RevertApplied` event still fire. Decayable tags always attach (the lesson
+    replaces removed content, meaningful even with an empty tail).
+  - **Collapsed-node decay-drop** — once a collapsed node's lone breadcrumb fully
+    decays (outside the turn-window), the now-content-less node is dropped from the
+    rendered trunk rather than left as an empty `[nN]` stub. Nodes with real surviving
+    content are never dropped. *(Relocated into the policy-aware
+    `collapse_abandon_class_cluster` by the PERSISTENT-collapse rework above — it was
+    originally authored in `build_trunk_context_with_policy` but was unreachable there.)*
+  - **`revert_to_state` description — tail-reclamation sentence** (`tools/revert.rs`).
+    Appends: *"completion/step-summary reclaim the abandoned tail; if there's no tail
+    (you're sealing the step you just finished), nothing shrinks — just continue."* —
+    steering the model away from the degenerate empty-tail summary no-op.
+  The byte-shrink goal, the atomic-cluster (no-dangling-call) invariant, and the
+  `messages`-byte-identical invariant (the collapse stays render-only over the cloned
+  trunk) all carry forward unchanged. General braking-machinery merit: any consumer
+  reverting onto/across a heavy tool-cluster fully reclaims that context with no log
+  mutation.
 - **`tool_help` built-in tool** (`tools/tool_help.rs`; `ToolHelpTool`). A
   permission-safe, on-demand documentation channel: `tool_help(tool_name)`
   returns a named tool's full manual (mental model + worked examples + failure

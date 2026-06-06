@@ -225,7 +225,28 @@ impl AgentContext {
         policy: &super::node_tag::RevertRenderPolicy,
         current_turn: u32,
     ) -> Vec<AgentMessage> {
-        let mut base = self.build_trunk_context();
+        let base = self.build_trunk_context();
+        Self::decay_tags_by_policy(base, policy, current_turn)
+    }
+
+    /// Composition I — apply the [`RevertRenderPolicy`] tag-decay to an already-
+    /// assembled trunk (CC-18 iter-2 extraction).
+    ///
+    /// This is the pure tag-decay second pass that
+    /// [`build_trunk_context_with_policy`](Self::build_trunk_context_with_policy)
+    /// historically inlined. It is now a free helper so the streaming render path
+    /// can apply tag-decay to the **already-collapsed** trunk (collapse runs
+    /// FIRST per #73 / F-persist-order.a, so the heavy content it must clear is
+    /// visible). Decay-able tags (`Lesson`/`Finding`) outside the policy window
+    /// are stripped from each message; the `lesson_window_count` cap is enforced
+    /// globally per `TagKind`. Pinned tags always render. The lone-breadcrumb
+    /// NODE-drop is NOT here — it is owned by `collapse_abandon_class_cluster`
+    /// (the only pass that knows per-cluster tag-window state AND owns content).
+    pub(crate) fn decay_tags_by_policy(
+        mut base: Vec<AgentMessage>,
+        policy: &super::node_tag::RevertRenderPolicy,
+        current_turn: u32,
+    ) -> Vec<AgentMessage> {
         // First pass: collect (kind, created_at_turn, msg_index, tag_index) for
         // every decay-able tag on the trunk so we can apply the count cap.
         use super::node_tag::TagKind;
@@ -253,6 +274,16 @@ impl AgentContext {
         }
         // Second pass: rebuild each Llm message's tags vector, dropping
         // decay-able tags outside the window AND not in the force-keep set.
+        //
+        // CC-18 iter-2 (#73): the lone-breadcrumb NODE-drop (F-collapsed-node-
+        // decay.a) has MOVED OUT of this pass into the policy-aware
+        // `collapse_abandon_class_cluster` scan. In iter-1 the node-drop lived
+        // here, ran BEFORE collapse, and read the immutable heavy `messages`, so
+        // it never saw a lone breadcrumb to drop in production (#73 §2.3). This
+        // pass now ONLY decays out-of-window *tags* (its original pre-iter-1
+        // contract) — it runs on the already-collapsed trunk, and the
+        // content-less node drop is owned by collapse, which is the only pass
+        // that both knows the per-cluster tag-window state AND owns the content.
         for (mi, m) in base.iter_mut().enumerate() {
             if let AgentMessage::Llm(lm) = m {
                 let mut kept_tags = Vec::with_capacity(lm.tags.len());
@@ -269,199 +300,299 @@ impl AgentContext {
         base
     }
 
-    /// Composition I — render-time reclamation of the abandon-class tool-cluster
-    /// a revert landed on.
+    /// Composition I — render-time reclamation of EVERY abandon-class
+    /// tool-cluster a revert landed on, **persistently across turns**.
     ///
     /// When a `failure`/`tangent` (abandon-class) revert targets a node that is
     /// (or splits) a heavy `(assistant-tool_call, tool_result)` cluster, the
-    /// kept tip ends up carrying the abandoned tool-call's heavy `arguments`
+    /// kept node ends up carrying the abandoned tool-call's heavy `arguments`
     /// (e.g. an 80-line `write_file` body) while its matching tool-result has
     /// been dropped off-trunk by the parent-chain walk — leaving the rendered
     /// trunk both **larger** (the abandoned body survives) and **malformed** (a
     /// tool-call with no matching result). This pass fixes both, at render time
-    /// only:
+    /// only.
     ///
-    /// - **Abandon-class tip** (the tip carries a decay-able `Lesson`/`Finding`
-    ///   tag, the signal that a revert just landed there): the whole cluster is
-    ///   collapsed atomically to a single clean assistant node carrying the
-    ///   breadcrumb, with NO heavy `ToolCall` and NO orphaned tool-result. The
-    ///   one-line breadcrumb (composed by `apply_revert`) is woven into content
-    ///   by `weave_braking_annotations` downstream, so the model reads the
-    ///   breadcrumb where the ~80-line body used to be. Two tip shapes are
-    ///   handled: a **call-tip** (the tip IS the assistant tool-call node) strips
-    ///   the tip's heavy `ToolCall` blocks — its matching tool-result is off-trunk
-    ///   (a child excluded by the parent-chain walk), so nothing dangles; a
-    ///   **result-tip** (the tip is the matching tool-result, the #59 shape) finds
-    ///   the parent assistant-call node on the trunk, strips ITS `ToolCall` blocks,
-    ///   MOVES the tip's `NodeTag`(s) onto that parent, and REMOVES the tool-result
-    ///   tip from the trunk Vec — so there is no orphaned result (a `tool_call_id`
-    ///   with no matching call would be rejected by OpenAI-compat providers).
-    /// - **Pinned tip** (`Outcome`/`Checkpoint`, NOT decay-able): the cluster is
-    ///   load-bearing (a sealed result the model may re-read), so it is kept
-    ///   WHOLE — if the tip is a tool-call whose matching tool-result is
-    ///   off-trunk, the result is re-appended right after the tip so the kept
-    ///   call is never left dangling.
+    /// **CC-18 iter-2 — PERSISTENT scan (GitHub #73 / D-TEST-0068).** The iter-1
+    /// version acted ONLY on the trunk tip, so the reclamation evaporated the
+    /// moment the model continued forward (the reverted cluster slid mid-trunk
+    /// and its heavy body re-rendered every subsequent turn). This version scans
+    /// **every** node-bearing trunk message and collapses **every** cluster
+    /// carrying a live abandon-class (decay-able `Lesson`/`Finding`) revert tag —
+    /// so the abandoned body stays reclaimed on EVERY render, not just the one
+    /// right after the revert. The tag persists on the target node in
+    /// `self.messages` (`apply_revert`'s `add_tag`), so each tagged cluster is
+    /// re-discoverable on every render.
+    ///
+    /// Per tagged cluster the disposition is identical to iter-1:
+    ///
+    /// - **Abandon-class, IN-window** (the cluster's decay-able tag still renders
+    ///   per `policy.renders_by_turn(tag, current_turn)`): the whole cluster is
+    ///   collapsed atomically to a single clean assistant node carrying ONLY the
+    ///   breadcrumb — its ENTIRE content (the heavy `ToolCall` AND any
+    ///   accompanying reasoning `Text`) is replaced. The single-axis rule (CC-18,
+    ///   GitHub #72 v2) branches purely on `is_decayable(category)`: a
+    ///   `failure`/`tangent` revert scraps the abandoned work, so the surviving
+    ///   node must carry nothing the model can re-execute. The CC-17 predecessor
+    ///   stripped only the `ToolCall`, leaving the misleading "Starting with Step
+    ///   1…" text that drove weak-model looping (CC-17 close-gate-results.md:29);
+    ///   CC-18 replaces the whole content. The one-line breadcrumb (composed by
+    ///   `apply_revert`) is woven into content by `weave_braking_annotations`
+    ///   downstream, so the model reads the breadcrumb where the ~80-line body
+    ///   used to be. Two cluster shapes are handled: a **call-node** (the tagged
+    ///   node IS the assistant tool-call node) clears that node's content — its
+    ///   matching tool-result is off-trunk (a child excluded by the parent-chain
+    ///   walk), so nothing dangles; a **result-node** (the tagged node is the
+    ///   matching tool-result, the #59 shape) finds the parent assistant-call
+    ///   node on the trunk, clears ITS content, MOVES the tagged node's
+    ///   `NodeTag`(s) onto that parent, and REMOVES the tool-result node from the
+    ///   trunk Vec — so there is no orphaned result (a `tool_call_id` with no
+    ///   matching call would be rejected by OpenAI-compat providers).
+    /// - **Abandon-class, OUT-of-window** (the cluster's decay-able tag has
+    ///   decayed past `policy.renders_by_turn`): the cluster is collapsed exactly
+    ///   as above AND then the now-content-less node is **DROPPED** from the
+    ///   trunk entirely — the breadcrumb itself is reclaimed once its lesson is no
+    ///   longer rendered (GitHub #72 v2 principle 4: "eventually reclaim even the
+    ///   breadcrumb"). This is the **reachable decay-drop** (F-collapsed-node-
+    ///   decay.a): in iter-1 the drop lived in `build_trunk_context_with_policy`,
+    ///   ran BEFORE the collapse, and read the immutable heavy `messages`, so it
+    ///   never saw a lone breadcrumb to drop (#73 §2.3). Moving it INTO this
+    ///   policy-aware collapse — the only pass that both knows the per-cluster
+    ///   tag-window state AND owns the content — makes it fire in production.
+    /// - **Pinned cluster** (`Outcome`/`Checkpoint`, NOT decay-able): the cluster
+    ///   is load-bearing (a sealed result the model may re-read), so it is kept
+    ///   WHOLE everywhere on the trunk — if the node is a tool-call whose matching
+    ///   tool-result is off-trunk, the result is re-appended right after it so the
+    ///   kept call is never left dangling. Pinned clusters are never collapsed and
+    ///   never dropped.
     ///
     /// The **atomic-cluster invariant** therefore holds for ALL categories: the
     /// rendered trunk never carries a tool-call without its matching result
     /// (abandon-class drops both; pinned keeps both).
     ///
     /// Operates over the **cloned** trunk that `build_trunk_context` returns by
-    /// value; `self.messages` (the forensic log) is **never** mutated. Caller
-    /// contract: invoke ONLY on the revert-mode trunk path
-    /// (`active_node_id.is_some()`), after `build_trunk_context_with_policy` and
-    /// before `weave_braking_annotations`. General braking-machinery merit: any
-    /// consumer reverting onto/across a heavy tool-cluster reclaims that context
-    /// with no log mutation.
+    /// value; `self.messages` (the forensic log) is **never** mutated — the
+    /// persistent scan still operates only on the cloned trunk. Caller contract:
+    /// invoke ONLY on the revert-mode trunk path (`active_node_id.is_some()`),
+    /// FIRST in the render path (on the raw `build_trunk_context()` output, so it
+    /// sees the raw heavy content it must clear), with the tag-decay rebuild
+    /// (`build_trunk_context_with_policy`) applied to the already-collapsed trunk
+    /// afterwards, and before `weave_braking_annotations`. General braking-
+    /// machinery merit: any consumer reverting onto/across a heavy tool-cluster
+    /// reclaims that context persistently with no log mutation.
     pub fn collapse_abandon_class_cluster(
         &self,
         mut trunk: Vec<AgentMessage>,
+        policy: &super::node_tag::RevertRenderPolicy,
+        current_turn: u32,
     ) -> Vec<AgentMessage> {
         use super::content::{Content, Message};
 
-        // Locate the trunk tip (the LAST node-bearing message) — the
-        // active / reverted-to node. A revert landed here iff the tip carries a
-        // NodeTag (abandon-class = decay-able Lesson/Finding; pinned =
-        // Outcome/Checkpoint). No tag → no revert landed on this tip → nothing
-        // to collapse.
-        let tip_idx = trunk.iter().enumerate().rev().find_map(|(i, m)| match m {
-            AgentMessage::Llm(lm) if lm.node_id.is_some() => Some(i),
-            _ => None,
-        });
-        let Some(tip_idx) = tip_idx else {
-            return trunk;
-        };
-
-        let AgentMessage::Llm(tip) = &trunk[tip_idx] else {
-            return trunk;
-        };
-        // Classify the tip's revert tag (if any). A node can carry tags of only
-        // one decay-class per revert; we read the first tag's kind as the gate.
-        let Some(tag) = tip.tags.first() else {
-            return trunk; // no revert tag on the tip → not a revert-landed cluster
-        };
-        let abandon_class = tag.kind.is_decayable();
-
-        // Classify the tip's message shape. The cluster mechanics apply to two
-        // shapes the revert can land on:
+        // PERSISTENT SCAN (CC-18 iter-2 / #73). Walk EVERY node-bearing trunk
+        // message — not just the tip — and act on each cluster whose first tag
+        // is a revert tag. A node carries tags of one decay-class per revert; we
+        // read the first tag's `kind` as the gate (abandon-class = decay-able
+        // Lesson/Finding; pinned = Outcome/Checkpoint). Nodes without a tag are
+        // skipped (no revert landed on them).
         //
-        //  (1) the tip is the assistant TOOL-CALL node itself — its `Content::
-        //      ToolCall` carries the heavy `arguments`. (`deepseek` reverted
-        //      `step="n0"` onto this shape.)
-        //  (2) the tip is the matching TOOL-RESULT node — the heavy `arguments`
-        //      live in the tip's PARENT assistant-call node, which stays
-        //      on-trunk (the tip's `tool_call_id` names it). This is the
-        //      #59-canonical shape: `minimax` reverted `step="n1"` onto the
-        //      tool-result of the abandoned `write_file`, leaving the heavy
-        //      plan-v1 in the parent call node `n0`.
-        //
-        // For shape (1) `tip_call_id` is the tip's own ToolCall id; for shape
-        // (2) it is the tip's `tool_call_id` linking back to the parent call.
-        // Either way, `tip_call_id` identifies the cluster's tool invocation.
-        let tip_is_call = matches!(tip.message, Message::Assistant { .. });
-        let tip_call_id = match &tip.message {
-            Message::Assistant { content, .. } => content.iter().find_map(|b| match b {
-                Content::ToolCall { id, .. } => Some(id.clone()),
-                _ => None,
-            }),
-            Message::ToolResult { tool_call_id, .. } => Some(tool_call_id.clone()),
-            _ => None,
-        };
-        let Some(tip_call_id) = tip_call_id else {
-            return trunk; // tip is neither a tool-call node nor a tool-result → no cluster
-        };
+        // We process node-by-node. Because abandon-class collapse on a
+        // result-node REMOVES that node from the Vec (shifting later indices), we
+        // re-scan from a running cursor rather than caching indices: each
+        // iteration locates the NEXT unprocessed tagged node at-or-after the
+        // cursor, acts on its cluster, then advances the cursor past the node
+        // that now occupies the surviving slot. `processed` tracks node_ids we
+        // have already collapsed/kept so a tag moved onto a parent (result-node
+        // shape) is not re-collapsed when the scan reaches that parent.
+        use std::collections::HashSet;
+        let mut processed: HashSet<NodeId> = HashSet::new();
+        let mut cursor = 0usize;
 
-        if abandon_class {
-            if tip_is_call {
-                // Shape (1): the tip is the abandoned assistant tool-call node.
-                // Strip the heavy ToolCall blocks from the tip so the rendered
-                // trunk carries the breadcrumb (woven from the tag) instead of
-                // the ~80-line abandoned body. Dropping the ToolCall also
-                // removes the dangling-call hazard (no call → nothing to
-                // dangle). Keep any non-ToolCall blocks (e.g. a leading
-                // Thinking/Text the assistant emitted alongside the call).
-                if let AgentMessage::Llm(lm) = &mut trunk[tip_idx] {
-                    if let Message::Assistant { content, .. } = &mut lm.message {
-                        content.retain(|b| !matches!(b, Content::ToolCall { .. }));
+        while cursor < trunk.len() {
+            // Locate the next node-bearing message at-or-after `cursor` that
+            // carries a revert tag and has not been processed yet.
+            let found = trunk[cursor..].iter().enumerate().find_map(|(off, m)| {
+                if let AgentMessage::Llm(lm) = m {
+                    if let Some(node_id) = lm.node_id {
+                        if !lm.tags.is_empty() && !processed.contains(&node_id) {
+                            return Some((cursor + off, node_id));
+                        }
                     }
                 }
+                None
+            });
+            let Some((idx, node_id)) = found else {
+                break; // no further tagged clusters
+            };
+
+            let AgentMessage::Llm(node) = &trunk[idx] else {
+                cursor = idx + 1;
+                continue;
+            };
+            let Some(tag) = node.tags.first() else {
+                cursor = idx + 1;
+                continue;
+            };
+            let abandon_class = tag.kind.is_decayable();
+            // For abandon-class clusters: is the (newest) tag still in the decay
+            // window? In-window → collapse to breadcrumb; out-of-window → collapse
+            // AND drop the now-content-less node (the reachable decay-drop).
+            let in_window = node
+                .tags
+                .iter()
+                .max_by_key(|t| t.created_at_turn)
+                .map(|t| policy.renders_by_turn(t, current_turn))
+                .unwrap_or(true);
+
+            // Classify the node's message shape (call-node vs result-node) and
+            // recover the cluster's tool_call_id (see iter-1 doc-comment).
+            let node_is_call = matches!(node.message, Message::Assistant { .. });
+            let node_call_id = match &node.message {
+                Message::Assistant { content, .. } => content.iter().find_map(|b| match b {
+                    Content::ToolCall { id, .. } => Some(id.clone()),
+                    _ => None,
+                }),
+                Message::ToolResult { tool_call_id, .. } => Some(tool_call_id.clone()),
+                _ => None,
+            };
+            let Some(node_call_id) = node_call_id else {
+                // Tagged node that is neither a tool-call nor a tool-result (e.g.
+                // a tagged assistant text node). Mark processed; if it is an
+                // abandon-class lone node out of window, drop it.
+                processed.insert(node_id);
+                if abandon_class && !in_window {
+                    let only_breadcrumb = matches!(&node.message, Message::Assistant { content, .. }
+                    if !content.iter().any(|b| match b {
+                        Content::ToolCall { .. } => true,
+                        Content::Text { text } => !text.trim().is_empty(),
+                        _ => true,
+                    }));
+                    if only_breadcrumb {
+                        trunk.remove(idx);
+                        continue; // keep cursor — the next node shifted into `idx`
+                    }
+                }
+                cursor = idx + 1;
+                continue;
+            };
+
+            if abandon_class {
+                // The surviving/collapsed node's slot (so the decay-drop can
+                // target it). For a call-node it is `idx`; for a result-node it
+                // is the parent call's index (after the result node is removed).
+                let surviving_idx: Option<usize>;
+
+                if node_is_call {
+                    // Call-node shape: replace its ENTIRE content with the
+                    // breadcrumb (drop the heavy ToolCall AND any reasoning Text).
+                    if let AgentMessage::Llm(lm) = &mut trunk[idx] {
+                        if let Message::Assistant { content, .. } = &mut lm.message {
+                            content.clear();
+                        }
+                    }
+                    processed.insert(node_id);
+                    surviving_idx = Some(idx);
+                } else {
+                    // Result-node shape (#59-canonical): the heavy body lives in
+                    // the PARENT assistant-call node. Find it, clear its content,
+                    // MOVE this node's tags onto it, and REMOVE this result node
+                    // from the trunk so no orphaned result survives.
+                    if let Some(parent_idx) = trunk.iter().position(|m| match m {
+                        AgentMessage::Llm(lm) => match &lm.message {
+                            Message::Assistant { content, .. } => content.iter().any(
+                                |b| matches!(b, Content::ToolCall { id, .. } if *id == node_call_id),
+                            ),
+                            _ => false,
+                        },
+                        _ => false,
+                    }) {
+                        let moved_tags = match &trunk[idx] {
+                            AgentMessage::Llm(lm) => lm.tags.clone(),
+                            _ => Vec::new(),
+                        };
+                        let parent_node_id = match &trunk[parent_idx] {
+                            AgentMessage::Llm(lm) => lm.node_id,
+                            _ => None,
+                        };
+                        if let AgentMessage::Llm(lm) = &mut trunk[parent_idx] {
+                            if let Message::Assistant { content, .. } = &mut lm.message {
+                                content.clear();
+                            }
+                            lm.tags.extend(moved_tags);
+                        }
+                        // Mark BOTH the result node and the parent as processed so
+                        // the scan does not re-collapse the parent when it reaches
+                        // it (it now carries the moved tag).
+                        processed.insert(node_id);
+                        if let Some(pid) = parent_node_id {
+                            processed.insert(pid);
+                        }
+                        // Remove the result node; the parent's index shifts if it
+                        // was after the result (it is always before, so it does
+                        // not — but compute the surviving index defensively).
+                        trunk.remove(idx);
+                        surviving_idx = Some(if parent_idx > idx {
+                            parent_idx - 1
+                        } else {
+                            parent_idx
+                        });
+                    } else {
+                        // No parent on-trunk (degenerate) — just drop the orphan
+                        // result tag node from consideration.
+                        processed.insert(node_id);
+                        surviving_idx = None;
+                    }
+                }
+
+                // Reachable decay-drop: if the cluster's tag is OUT of the decay
+                // window, the surviving node is now a lone content-less breadcrumb
+                // → DROP it entirely (the breadcrumb is reclaimed once its lesson
+                // no longer renders). In-window → keep the collapsed node; the tag
+                // is woven into content downstream.
+                if !in_window {
+                    if let Some(s) = surviving_idx {
+                        trunk.remove(s);
+                        // Do NOT advance the cursor — the next node shifted into
+                        // the freed slot (which is <= idx, so re-scan from cursor
+                        // is still correct).
+                        continue;
+                    }
+                }
+                // In-window collapse keeps the node in place; advance the cursor
+                // past it (or, for the removed result-node, the freed slot now
+                // holds the next message — but the parent we collapsed sits
+                // BEFORE idx and is already `processed`, so advancing past `idx`
+                // is correct only when the surviving node is at/after idx).
+                cursor = idx; // re-scan from idx; `processed` prevents re-work
             } else {
-                // Shape (2) — the #59-canonical tool-RESULT tip. The heavy body
-                // lives in the tip's PARENT assistant-call node (the on-trunk
-                // node whose `Content::ToolCall.id` == the tip's `tool_call_id`).
-                // Collapse the WHOLE cluster atomically so the rendered trunk
-                // carries a single clean assistant node with the breadcrumb tag,
-                // NO heavy ToolCall, and NO orphaned tool-result:
-                //
-                //  (a) find the parent assistant-call node on the trunk;
-                //  (b) strip its ToolCall blocks (reclaim the heavy plan-v1 body);
-                //  (c) MOVE the tip's NodeTag(s) onto the parent node so the
-                //      breadcrumb renders on the surviving assistant node;
-                //  (d) REMOVE the tool-result tip from the trunk Vec so there is
-                //      no orphaned result (a tool_call_id with no matching call
-                //      → OpenAI-compat providers reject it).
-                //
-                // The parent assistant node becomes the last node-bearing
-                // message, carrying the moved tag — so the downstream weave's
-                // tip detection finds it and folds the continue-forward directive
-                // onto it.
-                if let Some(parent_idx) = trunk.iter().position(|m| match m {
-                    AgentMessage::Llm(lm) => match &lm.message {
-                        Message::Assistant { content, .. } => content.iter().any(
-                            |b| matches!(b, Content::ToolCall { id, .. } if *id == tip_call_id),
+                // Pinned cluster (Outcome/Checkpoint): keep WHOLE. If the node is
+                // a tool-call whose matching tool-result is off-trunk, re-append
+                // the result (read from the forensic log) right after it so the
+                // kept call never dangles. Never collapsed, never dropped.
+                if node_is_call {
+                    let already_present = trunk.iter().any(|m| match m {
+                        AgentMessage::Llm(lm) => matches!(
+                            &lm.message,
+                            Message::ToolResult { tool_call_id, .. } if *tool_call_id == node_call_id
                         ),
                         _ => false,
-                    },
-                    _ => false,
-                }) {
-                    // (c) lift the tip's tags out before we remove it.
-                    let moved_tags = match &trunk[tip_idx] {
-                        AgentMessage::Llm(lm) => lm.tags.clone(),
-                        _ => Vec::new(),
-                    };
-                    // (b) strip the parent call's heavy ToolCall blocks and (c)
-                    // append the moved tags onto the parent node.
-                    if let AgentMessage::Llm(lm) = &mut trunk[parent_idx] {
-                        if let Message::Assistant { content, .. } = &mut lm.message {
-                            content.retain(|b| !matches!(b, Content::ToolCall { .. }));
+                    });
+                    if !already_present {
+                        if let Some(result) = self.messages.iter().find(|m| match m {
+                            AgentMessage::Llm(lm) => matches!(
+                                &lm.message,
+                                Message::ToolResult { tool_call_id, .. } if *tool_call_id == node_call_id
+                            ),
+                            _ => false,
+                        }) {
+                            trunk.insert(idx + 1, result.clone());
                         }
-                        lm.tags.extend(moved_tags);
                     }
-                    // (d) remove the tool-result tip from the trunk so no
-                    // orphaned result survives.
-                    trunk.remove(tip_idx);
                 }
-            }
-        } else if tip_is_call {
-            // Pinned: keep the cluster WHOLE. If the matching tool-result is
-            // off-trunk (the #59 shape: revert targeted the call node, so its
-            // result child was excluded by the parent-chain walk), re-append it
-            // right after the tip so the kept call is never dangling. Read the
-            // off-trunk result from `self.messages` (the forensic log) by
-            // tool_call_id; clone it (render-only, log untouched).
-            let already_present = trunk.iter().any(|m| match m {
-                AgentMessage::Llm(lm) => matches!(
-                    &lm.message,
-                    Message::ToolResult { tool_call_id, .. } if *tool_call_id == tip_call_id
-                ),
-                _ => false,
-            });
-            if !already_present {
-                if let Some(result) = self.messages.iter().find(|m| match m {
-                    AgentMessage::Llm(lm) => matches!(
-                        &lm.message,
-                        Message::ToolResult { tool_call_id, .. } if *tool_call_id == tip_call_id
-                    ),
-                    _ => false,
-                }) {
-                    trunk.insert(tip_idx + 1, result.clone());
-                }
+                // Pinned + result-node: the cluster (parent call + result) is
+                // already whole on-trunk — no action.
+                processed.insert(node_id);
+                cursor = idx + 1;
             }
         }
-        // Pinned + tool-result tip: the cluster (parent call + result) is
-        // already whole on-trunk (the parent-chain walk keeps the call as the
-        // tip's parent), so nothing dangles and there is no action — the
-        // `else if tip_is_call` guard above falls through to here as a no-op.
 
         trunk
     }
@@ -1492,7 +1623,12 @@ mod collapse_abandon_class_cluster_tests {
     use super::super::usage::Usage;
     use super::*;
 
-    /// An assistant node carrying a single heavy `write_file` ToolCall.
+    /// An assistant node carrying a leading reasoning `Text` block PLUS a single
+    /// heavy `write_file` ToolCall. The reasoning text models the CC-17 bug
+    /// shape: the live wire carried "I'll follow your plan sequentially.
+    /// Starting with Step 1…" alongside the call, and the CC-17 partial-strip
+    /// (ToolCall-only) left that text behind, driving weak-model looping
+    /// (CC-17 close-gate-results.md:29). CC-18 replaces the WHOLE content.
     fn tool_call_node(
         call_id: &str,
         heavy_args: &str,
@@ -1502,11 +1638,17 @@ mod collapse_abandon_class_cluster_tests {
     ) -> AgentMessage {
         AgentMessage::Llm(
             LlmMessage::new(Message::Assistant {
-                content: vec![Content::ToolCall {
-                    id: call_id.to_string(),
-                    name: "write_file".to_string(),
-                    arguments: serde_json::json!({ "path": "plan-v1.md", "content": heavy_args }),
-                }],
+                content: vec![
+                    Content::Text {
+                        text: "I'll follow your plan sequentially. Starting with Step 1…"
+                            .to_string(),
+                    },
+                    Content::ToolCall {
+                        id: call_id.to_string(),
+                        name: "write_file".to_string(),
+                        arguments: serde_json::json!({ "path": "plan-v1.md", "content": heavy_args }),
+                    },
+                ],
                 stop_reason: StopReason::ToolUse,
                 model: "test".into(),
                 provider: "test".into(),
@@ -1553,6 +1695,17 @@ mod collapse_abandon_class_cluster_tests {
         }
     }
 
+    use super::super::node_tag::RevertRenderPolicy;
+
+    /// The default render policy, evaluated at a turn where the fixtures' tags
+    /// (`created_at_turn = 1`) are still IN the decay window — so the collapse
+    /// produces the breadcrumb (not the out-of-window decay-drop). CC-18 iter-2
+    /// signature: `collapse_abandon_class_cluster(trunk, policy, current_turn)`.
+    const IN_WINDOW_TURN: u32 = 1;
+    fn in_window_policy() -> RevertRenderPolicy {
+        RevertRenderPolicy::default()
+    }
+
     /// First text block of a message (empty string if none).
     fn first_text(m: &AgentMessage) -> String {
         match m {
@@ -1588,6 +1741,35 @@ mod collapse_abandon_class_cluster_tests {
     fn trunk_has_breadcrumb(trunk: &[AgentMessage], needle: &str) -> bool {
         trunk.iter().any(|m| match m {
             AgentMessage::Llm(lm) => lm.tags.iter().any(|t| t.text.contains(needle)),
+            _ => false,
+        })
+    }
+
+    /// Does ANY assistant node in the trunk still carry a non-blank `Content::
+    /// Text` block? CC-18: after a `failure`/`tangent` collapse the surviving
+    /// n0 must carry NO reasoning text — only the breadcrumb (woven downstream).
+    fn trunk_has_surviving_assistant_text(trunk: &[AgentMessage], needle: &str) -> bool {
+        trunk.iter().any(|m| match m {
+            AgentMessage::Llm(lm) => match &lm.message {
+                Message::Assistant { content, .. } => content.iter().any(|b| match b {
+                    Content::Text { text } => text.contains(needle),
+                    _ => false,
+                }),
+                _ => false,
+            },
+            _ => false,
+        })
+    }
+
+    /// Does the trunk carry ANY assistant `Content::ToolCall` at all?
+    fn trunk_has_any_tool_call(trunk: &[AgentMessage]) -> bool {
+        trunk.iter().any(|m| match m {
+            AgentMessage::Llm(lm) => match &lm.message {
+                Message::Assistant { content, .. } => content
+                    .iter()
+                    .any(|b| matches!(b, Content::ToolCall { .. })),
+                _ => false,
+            },
             _ => false,
         })
     }
@@ -1656,12 +1838,32 @@ mod collapse_abandon_class_cluster_tests {
             "precondition: the kept tip still carries the heavy body before collapse"
         );
 
-        let collapsed = ctx.collapse_abandon_class_cluster(trunk);
+        // Precondition: the kept tip ALSO carries the misleading reasoning text
+        // before collapse (the CC-17 bug shape).
+        assert!(
+            trunk_has_surviving_assistant_text(&trunk, "Starting with Step 1"),
+            "precondition: the kept tip carries the reasoning text before collapse"
+        );
+
+        let collapsed =
+            ctx.collapse_abandon_class_cluster(trunk, &in_window_policy(), IN_WINDOW_TURN);
 
         // (a) the heavy ToolCall body is GONE from the rendered trunk.
         assert!(
             !trunk_has_heavy_args(&collapsed, "PLAN-V1-HEAVY-BODY"),
             "abandon-class collapse must strip the heavy tool-call body"
+        );
+        // (a') CC-18 — the surviving n0 carries NO reasoning text either. The
+        // CC-17 partial-strip left "Starting with Step 1…" behind, driving the
+        // weak-model loop; CC-18 replaces the ENTIRE content.
+        assert!(
+            !trunk_has_surviving_assistant_text(&collapsed, "Starting with Step 1"),
+            "abandon-class collapse must strip the surviving n0 reasoning text (CC-18)"
+        );
+        // (a'') no tool_call args of any kind survive on the trunk.
+        assert!(
+            !trunk_has_any_tool_call(&collapsed),
+            "abandon-class collapse must leave no tool_call on the trunk"
         );
         // (b) the breadcrumb tag survives (woven into content downstream).
         assert!(
@@ -1740,12 +1942,23 @@ mod collapse_abandon_class_cluster_tests {
         );
 
         let before = serde_json::to_string(&ctx.messages).unwrap();
-        let collapsed = ctx.collapse_abandon_class_cluster(trunk);
+        let collapsed =
+            ctx.collapse_abandon_class_cluster(trunk, &in_window_policy(), IN_WINDOW_TURN);
 
         // (a) the parent call's heavy ToolCall args are GONE.
         assert!(
             !trunk_has_heavy_args(&collapsed, "PLAN-V1-HEAVY-BODY"),
             "tool-result-tip collapse must strip the parent call's heavy body"
+        );
+        // (a') CC-18 — the surviving parent assistant node carries NO reasoning
+        // text either (the whole {n0,n1} cluster content is reclaimed).
+        assert!(
+            !trunk_has_surviving_assistant_text(&collapsed, "Starting with Step 1"),
+            "tool-result-tip collapse must strip the parent's reasoning text (CC-18)"
+        );
+        assert!(
+            !trunk_has_any_tool_call(&collapsed),
+            "tool-result-tip collapse must leave no tool_call on the trunk"
         );
         // (b) there is NO Message::ToolResult left for this cluster — the
         // tool-result tip is removed, so no orphaned result survives.
@@ -1799,7 +2012,8 @@ mod collapse_abandon_class_cluster_tests {
             "precondition: before collapse the kept call dangles (its result is off-trunk)"
         );
 
-        let collapsed = ctx.collapse_abandon_class_cluster(trunk);
+        let collapsed =
+            ctx.collapse_abandon_class_cluster(trunk, &in_window_policy(), IN_WINDOW_TURN);
 
         // Pinned keeps the heavy body whole...
         assert!(
@@ -1839,7 +2053,8 @@ mod collapse_abandon_class_cluster_tests {
         // byte-identity check — collapse is render-only over the cloned trunk).
         let before = serde_json::to_string(&ctx.messages).unwrap();
         let trunk = ctx.build_trunk_context();
-        let _collapsed = ctx.collapse_abandon_class_cluster(trunk);
+        let _collapsed =
+            ctx.collapse_abandon_class_cluster(trunk, &in_window_policy(), IN_WINDOW_TURN);
         let after = serde_json::to_string(&ctx.messages).unwrap();
         assert_eq!(before, after, "collapse must never mutate context.messages");
     }
@@ -1871,7 +2086,8 @@ mod collapse_abandon_class_cluster_tests {
             "reverted past: bug is in parser (read_file, grep abandoned)",
         );
         let trunk = ctx.build_trunk_context();
-        let collapsed = ctx.collapse_abandon_class_cluster(trunk);
+        let collapsed =
+            ctx.collapse_abandon_class_cluster(trunk, &in_window_policy(), IN_WINDOW_TURN);
 
         // The whole off-trunk tail (lexer detour) is absent.
         assert!(
@@ -1932,9 +2148,12 @@ mod collapse_abandon_class_cluster_tests {
             "reverted past: plan-v1 abandoned (write_file abandoned)",
         );
         let policy = super::super::node_tag::RevertRenderPolicy::default();
-        let trunk = ctx.build_trunk_context_with_policy(&policy, 1);
-        let collapsed = ctx.collapse_abandon_class_cluster(trunk);
-        let woven = AgentContext::weave_braking_annotations(collapsed);
+        // CC-18 iter-2 render-path order (mirrors streaming.rs): collapse FIRST
+        // on the raw trunk, then decay tags on the already-collapsed trunk.
+        let raw = ctx.build_trunk_context();
+        let collapsed = ctx.collapse_abandon_class_cluster(raw, &policy, 1);
+        let trunk = AgentContext::decay_tags_by_policy(collapsed, &policy, 1);
+        let woven = AgentContext::weave_braking_annotations(trunk);
         // current_turn = 1, tag created_at_turn = 1, window = 3 → within window.
         let out = AgentContext::inject_continue_after_revert(woven, 1, policy.lesson_window_turns);
 
@@ -1978,6 +2197,13 @@ mod collapse_abandon_class_cluster_tests {
             !tip_text.contains("PLAN-V1-HEAVY-BODY"),
             "the heavy tool-call body must be gone: {tip_text}"
         );
+        // CC-18 — and the misleading reasoning text is gone too (this is the
+        // residual the CC-17 close-gate flagged at :29; the weak model re-read
+        // "Starting with Step 1…" and re-executed it).
+        assert!(
+            !tip_text.contains("Starting with Step 1"),
+            "the surviving n0 must carry NO reasoning text (CC-18): {tip_text}"
+        );
         // A separate `[continue_after_revert]` synthetic user message follows the
         // tip, echoing the breadcrumb + carrying the continue-forward directive.
         let steer = out
@@ -1999,6 +2225,479 @@ mod collapse_abandon_class_cluster_tests {
                 && steer_text.contains("next uncompleted step")
                 && steer_text.contains("do NOT stop"),
             "the steering message must carry the marker + breadcrumb + directive: {steer_text}"
+        );
+    }
+
+    /// CC-18 §6 Tier A (e) — ATOMICITY: naming `step="n0"` (the assistant CALL
+    /// node) vs `step="n1"` (its tool-RESULT node) points at the SAME indivisible
+    /// {n0,n1} cluster, so the collapse disposition is identical. Both yield a
+    /// single surviving clean assistant node carrying the breadcrumb, with NO
+    /// tool_call, NO surviving reasoning text, and NO tool_result.
+    #[test]
+    fn collapse_atomicity_step_n0_and_n1_same_cluster_disposition() {
+        // A reusable summariser of "what the collapsed trunk looks like" as a
+        // disposition tuple: (has_tool_call, has_surviving_text, has_result,
+        // has_breadcrumb).
+        fn disposition(collapsed: &[AgentMessage]) -> (bool, bool, bool, bool) {
+            (
+                trunk_has_any_tool_call(collapsed),
+                trunk_has_surviving_assistant_text(collapsed, "Starting with Step 1"),
+                trunk_has_tool_result(collapsed, "call_abc"),
+                trunk_has_breadcrumb(collapsed, "write_file abandoned"),
+            )
+        }
+
+        // step="n0": revert onto the CALL node (call-tip shape).
+        let mut ctx_n0 = fixture_59_shape();
+        tag_message(
+            &mut ctx_n0.messages,
+            1,
+            TagKind::Lesson,
+            "reverted past: plan-v1 abandoned (write_file abandoned)",
+        );
+        let trunk_n0 = ctx_n0.build_trunk_context();
+        let collapsed_n0 =
+            ctx_n0.collapse_abandon_class_cluster(trunk_n0, &in_window_policy(), IN_WINDOW_TURN);
+
+        // step="n1": revert onto the tool-RESULT node (result-tip shape).
+        let mut ctx_n1 = fixture_59_tool_result_tip();
+        tag_message(
+            &mut ctx_n1.messages,
+            2,
+            TagKind::Lesson,
+            "reverted past: plan-v1 abandoned (write_file abandoned)",
+        );
+        let trunk_n1 = ctx_n1.build_trunk_context();
+        let collapsed_n1 =
+            ctx_n1.collapse_abandon_class_cluster(trunk_n1, &in_window_policy(), IN_WINDOW_TURN);
+
+        // Both dispositions are identical: no tool_call, no surviving text, no
+        // tool_result, breadcrumb present.
+        let d0 = disposition(&collapsed_n0);
+        let d1 = disposition(&collapsed_n1);
+        assert_eq!(
+            d0, d1,
+            "step=n0 and step=n1 must yield the SAME cluster disposition (atomicity)"
+        );
+        assert_eq!(
+            d0,
+            (false, false, false, true),
+            "the atomic collapse must leave only the breadcrumb"
+        );
+        // And neither leaves a dangling tool-call.
+        assert!(!trunk_has_dangling_call(&collapsed_n0));
+        assert!(!trunk_has_dangling_call(&collapsed_n1));
+    }
+
+    /// The full production render path used by `streaming.rs`: collapse FIRST on
+    /// the raw trunk (policy-aware), THEN decay tags. Mirrors
+    /// `streaming.rs:build_trunk_context → collapse_abandon_class_cluster →
+    /// decay_tags_by_policy`. This is the REAL pipeline the close-gate exercises.
+    fn render_pipeline(
+        ctx: &AgentContext,
+        policy: &super::super::node_tag::RevertRenderPolicy,
+        current_turn: u32,
+    ) -> Vec<AgentMessage> {
+        let raw = ctx.build_trunk_context();
+        let collapsed = ctx.collapse_abandon_class_cluster(raw, policy, current_turn);
+        AgentContext::decay_tags_by_policy(collapsed, policy, current_turn)
+    }
+
+    /// CC-18 iter-2 F-collapsed-node-decay.a — REACHABLE decay-drop (REAL, not a
+    /// hand-built lone-breadcrumb fixture). A real heavy `(call, result)` cluster
+    /// is reverted (abandon-class tag) and the model continues forward; the
+    /// PRODUCTION render pipeline (collapse-first, policy-aware) collapses the
+    /// heavy body to the breadcrumb WHILE the lesson is in-window, and DROPS the
+    /// now-content-less node entirely once the lesson is out-of-window (GitHub
+    /// #72 v2 principle 4 + #73 §2.3 — the iter-1 decay-drop was unreachable
+    /// because it ran before the collapse and read the immutable heavy
+    /// `messages`; moving it INTO the policy-aware collapse makes it fire).
+    #[test]
+    fn reachable_decay_drop_via_real_collapse_pipeline() {
+        use super::super::node_tag::RevertRenderPolicy;
+        // A real #59-shape heavy cluster: user → write_file CALL (heavy) → result.
+        // The tag is attached to the CALL node (n1) at turn 1, exactly as
+        // apply_revert would after a `failure` revert onto the abandoned write.
+        let mut ctx = AgentContext {
+            messages: vec![
+                user_node("write a plan", 1, NodeId(0), None),
+                tool_call_node(
+                    "call_x",
+                    "PLAN-V1-HEAVY-BODY",
+                    2,
+                    NodeId(1),
+                    Some(NodeId(0)),
+                ),
+                result_node("call_x", 3, NodeId(2), Some(NodeId(1))),
+            ],
+            next_node_id: 3,
+            active_node_id: Some(NodeId(1)), // reverted onto the call node
+            ..Default::default()
+        };
+        tag_message(
+            &mut ctx.messages,
+            1,
+            TagKind::Lesson,
+            "reverted past: plan-v1 abandoned (write_file abandoned)",
+        );
+
+        // Window 3, count-cap 0 so the lone lesson genuinely decays out past the
+        // turn window (the default count-cap of 3 would force-keep it forever).
+        let policy = RevertRenderPolicy {
+            lesson_window_turns: 3,
+            lesson_window_count: 0,
+        };
+
+        // (a) IN-window (turn 1, distance 0 ≤ 3): the heavy body is collapsed to
+        // the breadcrumb, the node STAYS, and the heavy args are GONE.
+        let in_window = render_pipeline(&ctx, &policy, 1);
+        let has_n1_in_window = in_window
+            .iter()
+            .any(|m| matches!(m, AgentMessage::Llm(lm) if lm.node_id == Some(NodeId(1))));
+        assert!(
+            has_n1_in_window,
+            "in-window: the collapsed node renders (breadcrumb live)"
+        );
+        assert!(
+            !trunk_has_heavy_args(&in_window, "PLAN-V1-HEAVY-BODY"),
+            "in-window: the heavy body is reclaimed (collapsed to breadcrumb)"
+        );
+
+        // (b) OUT-of-window (turn 10, distance 9 > 3): the cluster is collapsed
+        // AND the now-content-less node is DROPPED from the trunk entirely. The
+        // user root (real content) survives. NO heavy body anywhere.
+        let decayed = render_pipeline(&ctx, &policy, 10);
+        let has_n1_decayed = decayed
+            .iter()
+            .any(|m| matches!(m, AgentMessage::Llm(lm) if lm.node_id == Some(NodeId(1))));
+        assert!(
+            !has_n1_decayed,
+            "out-of-window: the collapsed lone-breadcrumb node is dropped (reachable decay-drop)"
+        );
+        assert!(
+            !trunk_has_heavy_args(&decayed, "PLAN-V1-HEAVY-BODY"),
+            "out-of-window: the heavy body never re-appears"
+        );
+        let has_root = decayed
+            .iter()
+            .any(|m| matches!(m, AgentMessage::Llm(lm) if lm.node_id == Some(NodeId(0))));
+        assert!(has_root, "the user root (real content) is never dropped");
+        // The reverted cluster's tool-result was removed by the result-tip
+        // collapse path? Here the tag is on the CALL node so the result n2 is
+        // off-trunk anyway (parent-chain from n1 = [n0, n1]); no orphan.
+        assert!(
+            !trunk_has_dangling_call(&decayed),
+            "no dangling call survives the decay-drop"
+        );
+    }
+
+    /// CC-18 iter-2 #73 CORE ASSERTION — PERSISTENT masking across turns. After a
+    /// revert the model continues forward for several more turns; the abandoned
+    /// heavy body must be GONE from the collapsed trunk on EVERY render, not just
+    /// the one turn right after the revert (the iter-1 tip-only gap). The reverted
+    /// cluster slides mid-trunk as new nodes are appended — the persistent scan
+    /// must still find + mask it.
+    #[test]
+    fn persistent_masking_across_turns_mid_trunk_cluster() {
+        use super::super::node_tag::RevertRenderPolicy;
+        // Turn 1-2: user → heavy write_file CALL (n1) → result (n2), reverted
+        // (failure) onto n2. Turns 3-5 (continue forward): the model writes
+        // plan-v2 (n3 call + n4 result) then a notes file (n5 call + n6 result).
+        // The active tip is n6, so the reverted n1/n2 cluster is now MID-trunk.
+        let mut ctx = AgentContext {
+            messages: vec![
+                user_node("write a plan", 1, NodeId(0), None),
+                tool_call_node("c1", "PLAN-V1-HEAVY-BODY", 2, NodeId(1), Some(NodeId(0))),
+                result_node("c1", 3, NodeId(2), Some(NodeId(1))),
+                tool_call_node("c2", "PLAN-V2-BODY", 4, NodeId(3), Some(NodeId(2))),
+                result_node("c2", 5, NodeId(4), Some(NodeId(3))),
+                tool_call_node("c3", "NOTES-BODY", 6, NodeId(5), Some(NodeId(4))),
+                result_node("c3", 7, NodeId(6), Some(NodeId(5))),
+            ],
+            next_node_id: 7,
+            active_node_id: Some(NodeId(6)), // tip is the LATEST node — cluster mid-trunk
+            ..Default::default()
+        };
+        // The abandon-class (Lesson) tag landed on the RESULT node n2 at turn 1
+        // (the #59 result-tip shape), exactly as apply_revert attaches it.
+        tag_message(
+            &mut ctx.messages,
+            2,
+            TagKind::Lesson,
+            "reverted past: plan-v1 abandoned (write_file abandoned)",
+        );
+
+        let policy = RevertRenderPolicy::default();
+
+        // Render at SEVERAL subsequent turns (the model kept going). On EVERY one
+        // the abandoned plan-v1 heavy body must be absent — this is the #73 core
+        // assertion (iter-1 only masked on turn 1, the tip-render).
+        for turn in [1u32, 2, 3] {
+            let rendered = render_pipeline(&ctx, &policy, turn);
+            assert!(
+                !trunk_has_heavy_args(&rendered, "PLAN-V1-HEAVY-BODY"),
+                "turn {turn}: the abandoned plan-v1 heavy body must stay masked (mid-trunk, persistent)"
+            );
+            // The non-reverted plan-v2 + notes bodies are NOT abandon-class →
+            // they stay verbatim (the model is actively building on them).
+            assert!(
+                trunk_has_heavy_args(&rendered, "PLAN-V2-BODY"),
+                "turn {turn}: the live plan-v2 body is untouched (not reverted)"
+            );
+            assert!(
+                trunk_has_heavy_args(&rendered, "NOTES-BODY"),
+                "turn {turn}: the live notes body is untouched (not reverted)"
+            );
+            // The breadcrumb naming the abandoned work survives in-window.
+            assert!(
+                trunk_has_breadcrumb(&rendered, "write_file abandoned"),
+                "turn {turn}: the breadcrumb survives in-window"
+            );
+            // No orphaned tool-result for the collapsed c1 cluster.
+            assert!(
+                !trunk_has_tool_result(&rendered, "c1"),
+                "turn {turn}: the collapsed c1 result is removed — no orphan"
+            );
+            assert!(
+                !trunk_has_dangling_call(&rendered),
+                "turn {turn}: no dangling call anywhere"
+            );
+        }
+    }
+
+    /// CC-18 iter-2 — MULTI-REVERT: two abandon-class reverts on DIFFERENT
+    /// clusters; BOTH masked persistently on every render, and each drops on its
+    /// own decay window (one earlier, one later).
+    #[test]
+    fn multi_revert_both_masked_each_drops_on_own_window() {
+        use super::super::node_tag::RevertRenderPolicy;
+        // user → c1 CALL (n1, heavy A) → c1 result (n2) → c2 CALL (n3, heavy B)
+        // → c2 result (n4) → c3 CALL (n5, live) → c3 result (n6). Revert #1
+        // (failure) onto n2 at turn 1; revert #2 (failure) onto n4 at turn 5.
+        let mut ctx = AgentContext {
+            messages: vec![
+                user_node("do the task", 1, NodeId(0), None),
+                tool_call_node("c1", "ABANDONED-A-BODY", 2, NodeId(1), Some(NodeId(0))),
+                result_node("c1", 3, NodeId(2), Some(NodeId(1))),
+                tool_call_node("c2", "ABANDONED-B-BODY", 4, NodeId(3), Some(NodeId(2))),
+                result_node("c2", 5, NodeId(4), Some(NodeId(3))),
+                tool_call_node("c3", "LIVE-C-BODY", 6, NodeId(5), Some(NodeId(4))),
+                result_node("c3", 7, NodeId(6), Some(NodeId(5))),
+            ],
+            next_node_id: 7,
+            active_node_id: Some(NodeId(6)),
+            ..Default::default()
+        };
+        // Revert #1: tag on n2, created at turn 1.
+        if let AgentMessage::Llm(lm) = &mut ctx.messages[2] {
+            lm.add_tag(NodeTag::new(
+                TagKind::Lesson,
+                "reverted past: A abandoned (write_file abandoned)".to_string(),
+                1,
+                vec![],
+            ));
+        }
+        // Revert #2: tag on n4, created at turn 5.
+        if let AgentMessage::Llm(lm) = &mut ctx.messages[4] {
+            lm.add_tag(NodeTag::new(
+                TagKind::Finding,
+                "reverted past: B abandoned (write_file abandoned)".to_string(),
+                5,
+                vec![],
+            ));
+        }
+
+        let policy = RevertRenderPolicy {
+            lesson_window_turns: 3,
+            lesson_window_count: 0,
+        };
+
+        // At turn 5: revert #1 (turn 1, distance 4 > 3) is OUT-of-window → its
+        // node drops; revert #2 (turn 5, distance 0 ≤ 3) is IN-window → masked +
+        // node kept. The live C body is untouched.
+        let rendered = render_pipeline(&ctx, &policy, 5);
+        assert!(
+            !trunk_has_heavy_args(&rendered, "ABANDONED-A-BODY"),
+            "A: masked (and decay-dropped) on every render"
+        );
+        assert!(
+            !trunk_has_heavy_args(&rendered, "ABANDONED-B-BODY"),
+            "B: masked (in-window collapse) on every render"
+        );
+        assert!(
+            trunk_has_heavy_args(&rendered, "LIVE-C-BODY"),
+            "C: the live (non-reverted) body is untouched"
+        );
+        // A is out-of-window → its collapsed node is dropped entirely.
+        let has_n1 = rendered
+            .iter()
+            .any(|m| matches!(m, AgentMessage::Llm(lm) if lm.node_id == Some(NodeId(1))));
+        assert!(
+            !has_n1,
+            "A's collapsed node drops once its lesson is out-of-window"
+        );
+        // B is in-window → its collapsed node (the parent call n3) survives with
+        // the breadcrumb, no orphaned result.
+        assert!(
+            trunk_has_breadcrumb(&rendered, "B abandoned"),
+            "B's breadcrumb survives in-window"
+        );
+        assert!(
+            !trunk_has_tool_result(&rendered, "c2"),
+            "B's collapsed result is removed — no orphan"
+        );
+        assert!(
+            !trunk_has_dangling_call(&rendered),
+            "no dangling call anywhere"
+        );
+    }
+
+    /// CC-18 iter-2 — PINNED cluster mid-trunk is kept verbatim even when the
+    /// model has continued past it (it is never collapsed nor dropped — only
+    /// abandon-class clusters are).
+    #[test]
+    fn pinned_cluster_mid_trunk_kept_verbatim() {
+        use super::super::node_tag::RevertRenderPolicy;
+        // user → c1 CALL (n1, sealed result, heavy) → c1 result (n2) → c2 CALL
+        // (n3, live) → c2 result (n4). A `completion` (Outcome, pinned) revert
+        // landed on n1 at turn 1; the model continued forward (tip n4), so the
+        // pinned cluster is mid-trunk.
+        let mut ctx = AgentContext {
+            messages: vec![
+                user_node("seal the milestone", 1, NodeId(0), None),
+                tool_call_node("c1", "SEALED-RESULT-BODY", 2, NodeId(1), Some(NodeId(0))),
+                result_node("c1", 3, NodeId(2), Some(NodeId(1))),
+                tool_call_node("c2", "LIVE-BODY", 4, NodeId(3), Some(NodeId(2))),
+                result_node("c2", 5, NodeId(4), Some(NodeId(3))),
+            ],
+            next_node_id: 5,
+            active_node_id: Some(NodeId(4)),
+            ..Default::default()
+        };
+        tag_message(
+            &mut ctx.messages,
+            1,
+            TagKind::Outcome,
+            "milestone sealed (write_file)",
+        );
+
+        let policy = RevertRenderPolicy::default();
+        // Even far past any decay window, a pinned cluster is kept verbatim.
+        for turn in [1u32, 100] {
+            let rendered = render_pipeline(&ctx, &policy, turn);
+            assert!(
+                trunk_has_heavy_args(&rendered, "SEALED-RESULT-BODY"),
+                "turn {turn}: the pinned sealed body is kept verbatim (never collapsed)"
+            );
+            assert!(
+                trunk_has_heavy_args(&rendered, "LIVE-BODY"),
+                "turn {turn}: the live body is untouched"
+            );
+            let has_n1 = rendered
+                .iter()
+                .any(|m| matches!(m, AgentMessage::Llm(lm) if lm.node_id == Some(NodeId(1))));
+            assert!(has_n1, "turn {turn}: the pinned node is never dropped");
+        }
+    }
+
+    /// CC-18 iter-2 — IMMUTABLE-LOG after a MULTI-TURN persistent scan. The
+    /// forensic `self.messages` must stay byte-identical after the persistent
+    /// collapse runs over a multi-node, multi-revert trunk (the most load-bearing
+    /// carry-forward invariant — the render is a mask, never a mutation).
+    #[test]
+    fn collapse_keeps_messages_byte_identical_after_multi_turn_scan() {
+        use super::super::node_tag::RevertRenderPolicy;
+        let mut ctx = AgentContext {
+            messages: vec![
+                user_node("do the task", 1, NodeId(0), None),
+                tool_call_node("c1", "A-BODY", 2, NodeId(1), Some(NodeId(0))),
+                result_node("c1", 3, NodeId(2), Some(NodeId(1))),
+                tool_call_node("c2", "B-BODY", 4, NodeId(3), Some(NodeId(2))),
+                result_node("c2", 5, NodeId(4), Some(NodeId(3))),
+            ],
+            next_node_id: 5,
+            active_node_id: Some(NodeId(4)),
+            ..Default::default()
+        };
+        tag_message(
+            &mut ctx.messages,
+            2,
+            TagKind::Lesson,
+            "reverted past: A abandoned (write_file abandoned)",
+        );
+
+        let before = serde_json::to_string(&ctx.messages).unwrap();
+        let policy = RevertRenderPolicy::default();
+        // Run the full pipeline at several turns (incl. past-window so the
+        // decay-drop fires on the cloned trunk) — none may mutate self.messages.
+        for turn in [1u32, 5, 50] {
+            let _ = render_pipeline(&ctx, &policy, turn);
+        }
+        let after = serde_json::to_string(&ctx.messages).unwrap();
+        assert_eq!(
+            before, after,
+            "the persistent multi-turn scan must NEVER mutate context.messages"
+        );
+    }
+
+    /// CC-18 F-collapsed-node-decay.a guard — a node with REAL surviving content
+    /// is NEVER dropped, even when its decayable lesson fully decays. This is the
+    /// "nodes with real surviving content are never dropped" half of the rule.
+    #[test]
+    fn real_content_node_never_dropped_on_lesson_decay() {
+        use super::super::node_tag::RevertRenderPolicy;
+        let mut real = AgentMessage::Llm(
+            LlmMessage::new(Message::Assistant {
+                content: vec![Content::Text {
+                    text: "substantive reasoning output".to_string(),
+                }],
+                stop_reason: StopReason::Stop,
+                model: "test".into(),
+                provider: "test".into(),
+                usage: Usage::default(),
+                timestamp: 2,
+                error_message: None,
+            })
+            .with_node_identity(NodeId(1), Some(NodeId(0))),
+        );
+        if let AgentMessage::Llm(lm) = &mut real {
+            lm.add_tag(NodeTag::new(
+                TagKind::Lesson,
+                "a decayable lesson".to_string(),
+                1,
+                vec![],
+            ));
+        }
+        let ctx = AgentContext {
+            messages: vec![user_node("task", 1, NodeId(0), None), real],
+            next_node_id: 2,
+            active_node_id: Some(NodeId(1)),
+            ..Default::default()
+        };
+        // Count-cap 0 so the lone lesson genuinely decays out past the window —
+        // proving the node survives because of its REAL content, not because the
+        // tag was force-kept.
+        let policy = RevertRenderPolicy {
+            lesson_window_turns: 3,
+            lesson_window_count: 0,
+        };
+        // Past the window, through the FULL production pipeline (collapse-first):
+        // the lesson decays but the node carries real text content, so collapse's
+        // decay-drop guard never fires — the node is kept.
+        let decayed = render_pipeline(&ctx, &policy, 10);
+        let kept = decayed.iter().any(|m| {
+            matches!(
+                m,
+                AgentMessage::Llm(lm) if lm.node_id == Some(NodeId(1))
+            )
+        });
+        assert!(
+            kept,
+            "a node with real surviving content must NEVER be dropped on lesson decay"
+        );
+        assert!(
+            trunk_has_surviving_assistant_text(&decayed, "substantive reasoning output"),
+            "the real content survives (the node is not a lone breadcrumb)"
         );
     }
 }

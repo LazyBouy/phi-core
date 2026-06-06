@@ -690,9 +690,13 @@ fn compose_revert_breadcrumb(summary: &str, tool_names: &[String]) -> String {
 /// 1. `context.active_node_id` becomes `Some(request.target)`.
 /// 2. A `NodeTag` is attached to the target [`LlmMessage`] carrying the
 ///    composed breadcrumb (empty `text` if `summary` was `None` AND the
-///    abandoned span had no tool calls).
+///    abandoned span had no tool calls) — EXCEPT for the empty-tail pinned
+///    no-op (F-empty-tail-summary.a, CC-18): a `completion`/`step-summary`
+///    revert with an empty abandoned tail attaches NO tag, because the pinned
+///    tag would merely restate still-visible content. Decayable categories
+///    (`failure`/`tangent`) always attach (the lesson replaces removed content).
 /// 3. `RevertApplied { applied: true, .. }` is emitted with the list of
-///    `abandoned_node_ids`.
+///    `abandoned_node_ids` (fires even on the empty-tail pinned no-op path).
 ///
 /// Rejection rules (each emits `RevertApplied { applied: false, reason, .. }`
 /// with no mutation):
@@ -867,19 +871,41 @@ fn apply_revert(
     let summary_text = request.summary.clone().unwrap_or_default();
     let breadcrumb = compose_revert_breadcrumb(&summary_text, &abandoned_tool_names);
 
-    // (6) Attach the breadcrumb as the summary tag on the target node. Empty
-    // text only when the agent omitted `summary` AND the abandoned span had no
-    // tool calls — Phase 5's render policy can still classify (kind is
-    // well-defined) and a future fallback generator slots into the empty-text
-    // branch.
-    let tag = NodeTag::new(
-        request.category.tag_kind(),
-        breadcrumb,
-        current_turn as u32,
-        abandoned_node_ids.clone(),
-    );
-    if let AgentMessage::Llm(lm) = &mut context.messages[target_idx] {
-        lm.add_tag(tag);
+    // (6) Attach the breadcrumb as the summary tag on the target node.
+    //
+    // F-empty-tail-summary.a (CC-18, GitHub #72 v2): the single-axis rule gates
+    // tag attachment by `is_decayable(category)` crossed with whether a tail was
+    // actually dropped:
+    //
+    //  - **Decayable** (`failure`→`Lesson` / `tangent`→`Finding`): ALWAYS
+    //    attach. The lesson *replaces* removed cluster content (the collapse
+    //    drops the whole {n0,n1} body), so it is always meaningful — even with
+    //    an empty tail (the #59 shape: the abandoned work is the target's own
+    //    just-completed action).
+    //  - **Pinned** (`completion`→`Outcome` / `step-summary`→`Checkpoint`):
+    //    attach ONLY when a tail was dropped (`abandoned_node_ids` non-empty).
+    //    Pinned categories KEEP the cluster verbatim, so their only reclamation
+    //    is the dropped tail; with no tail the pinned tag would merely restate
+    //    content still fully visible on the kept cluster — pure overhead. An
+    //    empty-tail pinned revert is a clean no-op: the active-pointer move +
+    //    `RevertApplied` event still fire (recordkeeping unchanged), but no tag
+    //    is attached.
+    //
+    // Empty `breadcrumb` text only when the agent omitted `summary` AND the
+    // abandoned span had no tool calls — Phase 5's render policy can still
+    // classify (kind is well-defined) and a future fallback generator slots into
+    // the empty-text branch.
+    let category_decayable = request.category.tag_kind().is_decayable();
+    if category_decayable || !abandoned_node_ids.is_empty() {
+        let tag = NodeTag::new(
+            request.category.tag_kind(),
+            breadcrumb,
+            current_turn as u32,
+            abandoned_node_ids.clone(),
+        );
+        if let AgentMessage::Llm(lm) = &mut context.messages[target_idx] {
+            lm.add_tag(tag);
+        }
     }
 
     // (7) Emit success event.
@@ -1025,6 +1051,140 @@ mod apply_revert_tests {
             Some("bubble sort timed out — try a faster algorithm")
         );
         assert!(revert_event.4.is_none());
+    }
+
+    #[test]
+    fn apply_revert_pinned_with_dropped_tail_attaches_tag() {
+        // CC-18 F-empty-tail-summary.a (c): a `completion` (pinned/Outcome)
+        // revert that DROPS a tail (target is an earlier node) attaches the
+        // pinned tag — the tag summarizes the reclaimed tail.
+        let mut ctx = AgentContext {
+            messages: vec![
+                user_msg_node("seal the sub-task", 1, NodeId(10), None),
+                assistant_msg_node("sub-task done", 2, NodeId(11), Some(NodeId(10))),
+                assistant_msg_node("a follow-on detour", 3, NodeId(12), Some(NodeId(11))),
+            ],
+            next_node_id: 13,
+            ..Default::default()
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
+        let req = RevertRequest {
+            category: RevertCategory::Completion,
+            target: NodeId(11), // tail = n12 is dropped
+            summary: Some("sub-task sealed".into()),
+        };
+
+        apply_revert(&mut ctx, &req, 5, &tx, "loop-1");
+
+        // The pinned tag IS attached (a tail was dropped).
+        let target_msg = match &ctx.messages[1] {
+            AgentMessage::Llm(lm) => lm,
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            target_msg.tags.len(),
+            1,
+            "pinned revert WITH a dropped tail must attach the outcome tag"
+        );
+        assert_eq!(target_msg.tags[0].kind, TagKind::Outcome);
+        // Active pointer moved + success event fired with the abandoned tail.
+        assert_eq!(ctx.active_node_id, Some(NodeId(11)));
+        let events = drain_events(&mut rx);
+        let applied = events.iter().any(|e| {
+            matches!(
+                e,
+                AgentEvent::RevertApplied { applied: true, abandoned_node_ids, .. }
+                    if abandoned_node_ids == &vec![NodeId(12)]
+            )
+        });
+        assert!(
+            applied,
+            "RevertApplied{{applied:true}} with the dropped tail"
+        );
+    }
+
+    #[test]
+    fn apply_revert_pinned_empty_tail_is_noop_no_tag() {
+        // CC-18 F-empty-tail-summary.a (d): a `step-summary` (pinned/Checkpoint)
+        // revert that targets the LAST node (no tail to drop) is a clean no-op:
+        // NO tag is attached (the pinned tag would merely restate still-visible
+        // content), but the active-pointer move + `RevertApplied` event STILL
+        // fire (recordkeeping unchanged).
+        let mut ctx = AgentContext {
+            messages: vec![
+                user_msg_node("checkpoint here", 1, NodeId(10), None),
+                assistant_msg_node("the step I just finished", 2, NodeId(11), Some(NodeId(10))),
+            ],
+            next_node_id: 12,
+            ..Default::default()
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
+        let req = RevertRequest {
+            category: RevertCategory::StepSummary,
+            target: NodeId(11), // the LAST node → empty tail
+            summary: Some("sealing the step I just finished".into()),
+        };
+
+        apply_revert(&mut ctx, &req, 5, &tx, "loop-1");
+
+        // NO tag attached (empty-tail pinned no-op).
+        let target_msg = match &ctx.messages[1] {
+            AgentMessage::Llm(lm) => lm,
+            _ => unreachable!(),
+        };
+        assert!(
+            target_msg.tags.is_empty(),
+            "empty-tail pinned revert must attach NO tag (no-op)"
+        );
+        // But the pointer STILL moves + the event STILL fires.
+        assert_eq!(ctx.active_node_id, Some(NodeId(11)));
+        let events = drain_events(&mut rx);
+        let applied = events.iter().any(|e| {
+            matches!(
+                e,
+                AgentEvent::RevertApplied { applied: true, abandoned_node_ids, .. }
+                    if abandoned_node_ids.is_empty()
+            )
+        });
+        assert!(
+            applied,
+            "the empty-tail no-op still emits RevertApplied{{applied:true}}"
+        );
+    }
+
+    #[test]
+    fn apply_revert_decayable_empty_tail_still_attaches_lesson() {
+        // CC-18 F-empty-tail-summary.a — the DECAYABLE side: a `failure` revert
+        // onto the LAST node (empty tail, the #59 shape) STILL attaches the
+        // lesson, because the lesson REPLACES removed cluster content (always
+        // meaningful), unlike a pinned tag which would restate visible content.
+        let mut ctx = AgentContext {
+            messages: vec![
+                user_msg_node("write a plan", 1, NodeId(10), None),
+                assistant_msg_node("plan-v1 was wrong", 2, NodeId(11), Some(NodeId(10))),
+            ],
+            next_node_id: 12,
+            ..Default::default()
+        };
+        let (tx, _rx) = mpsc::unbounded_channel::<AgentEvent>();
+        let req = RevertRequest {
+            category: RevertCategory::Failure,
+            target: NodeId(11), // empty tail
+            summary: Some("plan-v1 was wrong".into()),
+        };
+
+        apply_revert(&mut ctx, &req, 5, &tx, "loop-1");
+
+        let target_msg = match &ctx.messages[1] {
+            AgentMessage::Llm(lm) => lm,
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            target_msg.tags.len(),
+            1,
+            "decayable (failure) revert always attaches the lesson, even empty-tail"
+        );
+        assert_eq!(target_msg.tags[0].kind, TagKind::Lesson);
     }
 
     #[test]
@@ -1475,6 +1635,178 @@ mod apply_revert_tests {
         assert!(
             !tag_text.contains("revert_to_state"),
             "breadcrumb must NOT name the revert tool's own call: {tag_text}"
+        );
+    }
+
+    /// CC-18 iter-2 (#73 / D-TEST-0068) — END-TO-END persistence via REAL
+    /// `apply_revert` (not a synthetic lone-breadcrumb fixture). A real heavy
+    /// write_file cluster is reverted (`failure`) via `apply_revert`, then the
+    /// model CONTINUES FORWARD (new nodes appended, active pointer advanced).
+    /// The production render pipeline (`build_trunk_context` →
+    /// `collapse_abandon_class_cluster` → `decay_tags_by_policy`) must:
+    ///  (a) mask the abandoned heavy body on EVERY subsequent render (persistent,
+    ///      mid-trunk) — the iter-1 tip-only collapse could not do this;
+    ///  (b) DROP the now-content-less node once its lesson is out-of-window (the
+    ///      reachable decay-drop F-collapsed-node-decay.a);
+    ///  (c) never mutate the forensic `messages` log.
+    #[test]
+    fn persistent_collapse_end_to_end_via_real_apply_revert() {
+        use crate::types::node_tag::RevertRenderPolicy;
+        // n0 user → n1 write_file CALL (heavy plan-v1) → n2 write_file RESULT.
+        let heavy_call = AgentMessage::Llm(
+            LlmMessage::new(Message::Assistant {
+                content: vec![Content::ToolCall {
+                    id: "call_v1".into(),
+                    name: "write_file".into(),
+                    arguments: serde_json::json!({
+                        "path": "plan-v1.md",
+                        "content": "PLAN-V1-HEAVY-BODY"
+                    }),
+                }],
+                stop_reason: StopReason::ToolUse,
+                model: "test".into(),
+                provider: "test".into(),
+                usage: Usage::default(),
+                timestamp: 2,
+                error_message: None,
+            })
+            .with_node_identity(NodeId(1), Some(NodeId(0))),
+        );
+        let heavy_result = AgentMessage::Llm(
+            LlmMessage::new(Message::ToolResult {
+                tool_call_id: "call_v1".into(),
+                tool_name: "write_file".into(),
+                content: vec![Content::Text {
+                    text: "Wrote 304 bytes".into(),
+                }],
+                is_error: false,
+                timestamp: 3,
+            })
+            .with_node_identity(NodeId(2), Some(NodeId(1))),
+        );
+        let mut ctx = AgentContext {
+            messages: vec![
+                user_msg_node("write a plan", 1, NodeId(0), None),
+                heavy_call,
+                heavy_result,
+            ],
+            next_node_id: 3,
+            ..Default::default()
+        };
+
+        // REAL revert: `failure` onto the tool-RESULT node n2 (the #59 shape) at
+        // turn 1. apply_revert moves the active pointer to n2 + attaches the
+        // abandon-class lesson breadcrumb naming the abandoned write_file work.
+        let (tx, _rx) = mpsc::unbounded_channel::<AgentEvent>();
+        let req = RevertRequest {
+            category: RevertCategory::Failure,
+            target: NodeId(2),
+            summary: Some("plan-v1 abandoned".into()),
+        };
+        apply_revert(&mut ctx, &req, 1, &tx, "loop-1");
+        assert_eq!(ctx.active_node_id, Some(NodeId(2)));
+
+        // CONTINUE FORWARD: the model writes plan-v2 (n3 call + n4 result),
+        // parented off the reverted-to n2. The active pointer advances to n4, so
+        // the reverted n1/n2 cluster is now MID-trunk on later renders.
+        let v2_call = AgentMessage::Llm(
+            LlmMessage::new(Message::Assistant {
+                content: vec![Content::ToolCall {
+                    id: "call_v2".into(),
+                    name: "write_file".into(),
+                    arguments: serde_json::json!({
+                        "path": "plan-v2.md",
+                        "content": "PLAN-V2-BODY"
+                    }),
+                }],
+                stop_reason: StopReason::ToolUse,
+                model: "test".into(),
+                provider: "test".into(),
+                usage: Usage::default(),
+                timestamp: 4,
+                error_message: None,
+            })
+            .with_node_identity(NodeId(3), Some(NodeId(2))),
+        );
+        let v2_result = AgentMessage::Llm(
+            LlmMessage::new(Message::ToolResult {
+                tool_call_id: "call_v2".into(),
+                tool_name: "write_file".into(),
+                content: vec![Content::Text {
+                    text: "Wrote 721 bytes".into(),
+                }],
+                is_error: false,
+                timestamp: 5,
+            })
+            .with_node_identity(NodeId(4), Some(NodeId(3))),
+        );
+        ctx.messages.push(v2_call);
+        ctx.messages.push(v2_result);
+        ctx.active_node_id = Some(NodeId(4));
+        ctx.next_node_id = 5;
+
+        let before = serde_json::to_string(&ctx.messages).unwrap();
+        let policy = RevertRenderPolicy {
+            lesson_window_turns: 3,
+            lesson_window_count: 0,
+        };
+
+        // The full production render pipeline (mirrors streaming.rs).
+        let render = |turn: u32| -> Vec<AgentMessage> {
+            let raw = ctx.build_trunk_context();
+            let collapsed = ctx.collapse_abandon_class_cluster(raw, &policy, turn);
+            AgentContext::decay_tags_by_policy(collapsed, &policy, turn)
+        };
+
+        fn has_heavy(trunk: &[AgentMessage], needle: &str) -> bool {
+            trunk.iter().any(|m| match m {
+                AgentMessage::Llm(lm) => match &lm.message {
+                    Message::Assistant { content, .. } => content.iter().any(|b| match b {
+                        Content::ToolCall { arguments, .. } => {
+                            arguments.to_string().contains(needle)
+                        }
+                        _ => false,
+                    }),
+                    _ => false,
+                },
+                _ => false,
+            })
+        }
+
+        // (a) PERSISTENT masking: on turns 1, 2, 3 (the model kept going), the
+        // abandoned plan-v1 heavy body is GONE on EVERY render — the #73 gap.
+        for turn in [1u32, 2, 3] {
+            let r = render(turn);
+            assert!(
+                !has_heavy(&r, "PLAN-V1-HEAVY-BODY"),
+                "turn {turn}: abandoned plan-v1 stays masked mid-trunk (persistent)"
+            );
+            assert!(
+                has_heavy(&r, "PLAN-V2-BODY"),
+                "turn {turn}: the live plan-v2 is untouched"
+            );
+        }
+
+        // (b) REACHABLE decay-drop: past the window (turn 10) the collapsed n1
+        // node (whose content was reclaimed) is dropped; plan-v1 never re-appears.
+        let decayed = render(10);
+        let has_n1 = decayed
+            .iter()
+            .any(|m| matches!(m, AgentMessage::Llm(lm) if lm.node_id == Some(NodeId(1))));
+        assert!(
+            !has_n1,
+            "out-of-window: the collapsed plan-v1 node is dropped (reachable decay-drop)"
+        );
+        assert!(
+            !has_heavy(&decayed, "PLAN-V1-HEAVY-BODY"),
+            "out-of-window: plan-v1 never re-appears"
+        );
+
+        // (c) the forensic log is byte-identical — render-only, never mutated.
+        let after = serde_json::to_string(&ctx.messages).unwrap();
+        assert_eq!(
+            before, after,
+            "the persistent collapse must NEVER mutate context.messages"
         );
     }
 }
