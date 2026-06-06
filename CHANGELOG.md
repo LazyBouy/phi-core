@@ -10,6 +10,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 **Braking UX + on-demand tool documentation (general-merit; surfaced by i-phi e2e testing).**
 
+- **Revert steering dedup — the `[continue_after_revert]` message references the
+  node + rendered tag-label instead of echoing the full breadcrumb**
+  (`types/context.rs` + `types/node_tag.rs`). The post-revert continue-forward
+  steering text previously echoed the most-recent tag's full breadcrumb text,
+  duplicating the adjacent on-node `[label: text]` annotation back-to-back on the
+  first post-revert render (GitHub #74 / D-TEST-0069). Now the steering text
+  **references the tip node** by its rendered node-number (`tip.node_id.render()`,
+  e.g. `n1`) + the rendered tag-label (`newest.kind.rendered_label()`) + a SHORT
+  head-elided gloss of the breadcrumb (`[label: …tail]` via the NEW
+  `elide_breadcrumb_tail` helper — the trailing `(… abandoned)` parenthetical
+  survives, a breadcrumb at/under the ~40-char cap is glossed verbatim):
+  `[continue_after_revert] You just reverted to node n1. See [lesson: …approach (write_file abandoned)] at n1. Continue forward: …`.
+  The kind→label mapping is extracted from the inline `match` in
+  `weave_braking_annotations` into the NEW `TagKind::rendered_label()` helper (the
+  single source of truth, so the label rendered ON the node and the label
+  REFERENCED by the pointer are identical by construction; weave output stays
+  byte-identical). The on-node `[label: text]` annotation remains the full summary
+  site; the steering carries only a recognizable cue to the abandoned action. No
+  `NodeTag` shape change. Closes the CC-15→…→CC-19 braking-render arc.
+
 - **PERSISTENT collapse + render-path order — reclamation that persists across turns;
   reachable breadcrumb decay-drop** (`types/context.rs` + `agent_loop/streaming.rs`).
   The render-time collapse below was **tip-only**, so reclamation lasted exactly the

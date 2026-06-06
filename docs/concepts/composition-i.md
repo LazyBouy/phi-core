@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-06-06 by Claude Code (CC-19 revert steering dedup: the [continue_after_revert] steering text now REFERENCES the tip node — tip.node_id.render() ([nN]) + newest.kind.rendered_label() ([lesson]/[finding]/[outcome]/[checkpoint]) + a SHORT head-elided gloss [label: …tail] from the NEW elide_breadcrumb_tail helper — instead of echoing the full breadcrumb. The kind→label match in weave_braking_annotations is extracted to the NEW TagKind::rendered_label() helper (single source of truth; weave output byte-identical). The on-node [label: text] annotation stays the full summary site; the pointer carries only a recognizable cue to the abandoned action (#74 / D-TEST-0069). #74 closes the CC-15→…→CC-19 braking-render arc.) -->
 <!-- Last verified: 2026-06-06 by Claude Code (0.11.6 PERSISTENT collapse + render-path order: collapse_abandon_class_cluster reworked from a single-tip act into a policy-aware PERSISTENT SCAN over ALL node-bearing trunk messages (gains &policy, current_turn) — every live abandon-class cluster is collapsed on every render, not just the tip, so reclamation persists across all post-revert turns (was tip-only/single-turn — GitHub #73 / D-TEST-0068). The collapsed-node decay-drop MOVES from build_trunk_context_with_policy INTO the policy-aware collapse (the tag-decay second pass is extracted to pub(crate) decay_tags_by_policy) — making it reachable in production (it previously ran before the collapse + read immutable heavy messages, so it never fired). Render path reordered in agent_loop/streaming.rs: collapse FIRST on the raw build_trunk_context() output, then decay_tags_by_policy on the already-collapsed trunk, then weave, then inject. messages stays the immutable forensic log (byte-identical after a MULTI-TURN scan). Pinned clusters kept verbatim everywhere — never collapsed/dropped.) -->
 <!-- Last verified: 2026-06-06 by Claude Code (0.11.5 single-axis category render rule: collapse_abandon_class_cluster now replaces the surviving assistant node's ENTIRE content — text AND tool_call — with the breadcrumb on decayable categories (was a ToolCall-only strip that left reasoning text behind, driving weak-model looping); branch purely on is_decayable(category) (no tail-emptiness / own-action discriminator); apply_revert gates the pinned Outcome/Checkpoint tag on a non-empty abandoned tail (empty-tail summary = no-op no-tag; decayable always attaches); build_trunk_context_with_policy drops a collapsed node whose lone breadcrumb has fully decayed; revert_to_state description gains the tail-reclamation sentence; messages-byte-identical invariant preserved) -->
 <!-- Last verified: 2026-06-05 by Claude Code (CC-17 render-time token reclamation: collapse_abandon_class_cluster collapses an abandon-class reverted-onto cluster atomically for BOTH revert-target shapes (call-tip strips the tip; result-tip strips the parent call, moves the tag onto it, and removes the tool-result tip — no orphaned result) into its one-line breadcrumb at render time (messages byte-identical); atomic-cluster invariant for all categories (abandon drops the whole cluster, pinned keeps both); post-revert continue-forward steering is now a SEPARATE decaying, tagged, all-category [continue_after_revert] synthetic Message::User (CONTINUE_AFTER_REVERT_MARKER) inserted after the tip by inject_continue_after_revert — emitted for all four categories while within lesson_window_turns, suppressed past the window incl. pinned outcome/checkpoint; the iter-2 inline annotation fold is removed; weave is markers+tags only; breadcrumb excludes the revert tool's own name; decay-window default lowered 5→3; revert description gains 4-category budget framing) -->
@@ -186,9 +187,19 @@ right after the weave:
   the literal marker `pub const CONTINUE_AFTER_REVERT_MARKER = "[continue_after_revert]"`
   so consumers (channels, UIs, transcript renderers) can identify + filter it out
   of the real conversation stream — these are model-steering signals, NOT real
-  user input. It echoes the tip breadcrumb then carries the directive:
-  `[continue_after_revert] <breadcrumb>. You just reverted to this node. Continue
-  forward: do the next uncompleted step; do NOT redo completed steps; do NOT stop.`
+  user input. It **references the tip node by its rendered node-number + rendered
+  tag-label + a short head-elided gloss of the breadcrumb** then carries the
+  directive:
+  `[continue_after_revert] You just reverted to node n1. See [lesson: …approach (write_file abandoned)] at n1. Continue forward: do the next uncompleted step; do NOT redo completed steps; do NOT stop.`
+  The node-number is `tip.node_id.render()` (e.g. `n1`); the label is
+  `newest.kind.rendered_label()` (`lesson`/`finding`/`outcome`/`checkpoint` — the
+  single source of truth the weave shares); the gloss is `elide_breadcrumb_tail`
+  applied to the newest tag's text (the trailing `(… abandoned)` parenthetical
+  survives, the head is elided to a `…`; a breadcrumb at or under the ~40-char cap
+  is glossed verbatim). The **full breadcrumb is no longer echoed** — the adjacent
+  on-node `[label: text]` annotation is the full summary site, and the pointer
+  references it by node-number so the model can find it without the back-to-back
+  full repeat (#74 / D-TEST-0069).
 - It fires for **ALL revert categories** — failure→`Lesson`, tangent→`Finding`,
   completion→`Outcome`, step-summary→`Checkpoint` — not just the abandon class.
 - It **decays**: emitted ONLY while the tip's most-recent revert tag is within the

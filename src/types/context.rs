@@ -27,6 +27,64 @@ fn prepend_marker_to_message(message: &mut super::content::Message, marker: &str
     }
 }
 
+/// Char-cap for [`elide_breadcrumb_tail`] — a breadcrumb at or under this length
+/// is glossed verbatim; a longer one is head-elided to its tail.
+const BREADCRUMB_GLOSS_CAP: usize = 40;
+
+/// Head-elide a breadcrumb to a short trailing gloss for the
+/// `[continue_after_revert]` steering pointer
+/// ([`AgentContext::inject_continue_after_revert`]).
+///
+/// The on-node `[label: text]` annotation (woven by
+/// [`AgentContext::weave_braking_annotations`]) remains the FULL summary site;
+/// the steering pointer carries only a short recognizable cue to the abandoned
+/// action so a weaker model gets the "what was abandoned" thread inline without
+/// the full back-to-back echo CC-18 shipped.
+///
+/// Rules:
+/// - If `text` is at or under [`BREADCRUMB_GLOSS_CAP`] chars (after trimming),
+///   it is returned verbatim (no `…`).
+/// - Otherwise the trailing slice is kept and prefixed with `…`. The retained
+///   tail is anchored on the closing `(… abandoned)` parenthetical (plus ~1
+///   preceding word) when present — so the action cue survives the elision;
+///   absent a parenthetical, the last [`BREADCRUMB_GLOSS_CAP`] chars are kept.
+///   All slicing is on UTF-8 char boundaries.
+fn elide_breadcrumb_tail(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= BREADCRUMB_GLOSS_CAP {
+        return trimmed.to_string();
+    }
+
+    // Prefer anchoring on the LAST opening parenthesis, backing up over any
+    // immediately-preceding whitespace + one preceding word, so the gloss reads
+    // like `…approach (write_file abandoned)` rather than starting mid-paren.
+    if let Some(paren_byte) = trimmed.rfind('(') {
+        // Back up over whitespace just before the `(`.
+        let before = &trimmed[..paren_byte];
+        let ws_trimmed = before.trim_end();
+        // Back up one preceding word: the slice from the last whitespace in
+        // `ws_trimmed` to its end is the preceding word; keep from there.
+        let word_start = ws_trimmed
+            .char_indices()
+            .rev()
+            .find(|(_, c)| c.is_whitespace())
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(0);
+        let tail = &trimmed[word_start..];
+        return format!("…{tail}");
+    }
+
+    // No parenthetical: keep the last `BREADCRUMB_GLOSS_CAP` chars on a char
+    // boundary.
+    let start = trimmed
+        .char_indices()
+        .rev()
+        .nth(BREADCRUMB_GLOSS_CAP - 1)
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    format!("…{}", &trimmed[start..])
+}
+
 /// Literal marker that prefixes every synthetic post-revert continue-forward
 /// steering message ([`AgentContext::inject_continue_after_revert`]).
 ///
@@ -647,12 +705,7 @@ impl AgentContext {
                         if !seen.insert((tag.kind, tag.text.as_str())) {
                             continue; // identical tag already rendered on this node
                         }
-                        let kind = match tag.kind {
-                            TagKind::Lesson => "lesson",
-                            TagKind::Finding => "finding",
-                            TagKind::Outcome => "outcome",
-                            TagKind::Checkpoint => "checkpoint",
-                        };
+                        let kind = tag.kind.rendered_label();
                         marker.push_str(&format!(" [{}: {}]", kind, tag.text));
                     }
                     prepend_marker_to_message(&mut lm.message, &marker);
@@ -686,9 +739,14 @@ impl AgentContext {
     ///   the message is NOT emitted — even for pinned (`Outcome`/`Checkpoint`)
     ///   tags whose TAG itself persists on the trunk. The steering is a
     ///   transient nudge, not a permanent fixture.
-    /// - **Breadcrumb echo** — the most-recent tag's text is echoed into the
-    ///   message (as the old standalone note did) so the model concretely knows
-    ///   what was just reverted from.
+    /// - **Node+label pointer + elided gloss** — the message references the
+    ///   tip's rendered node-number (`tip.node_id.render()`, e.g. `n1`) + the
+    ///   rendered tag-label (`newest.kind.rendered_label()`, e.g. `lesson`) + a
+    ///   SHORT head-elided gloss of the breadcrumb (`[label: …tail]` via
+    ///   [`elide_breadcrumb_tail`]) so the model can find the full on-node
+    ///   `[label: text]` annotation by its node-number + still gets a
+    ///   recognizable cue to the abandoned action — without the full back-to-back
+    ///   echo of the breadcrumb that duplicated the adjacent on-node note.
     ///
     /// Caller contract: invoke ONLY on the revert-mode trunk path
     /// (`active_node_id.is_some()`), AFTER `collapse_abandon_class_cluster` (so
@@ -722,8 +780,9 @@ impl AgentContext {
 
         // Read the tip's MOST-RECENT revert tag (highest `created_at_turn`).
         // A node can accrue multiple tags across repeated reverts; the newest
-        // governs the decay gate + supplies the breadcrumb echo. No tag → no
-        // revert landed here → nothing to steer.
+        // governs the decay gate + supplies the tag-label + the elided-gloss
+        // breadcrumb tail for the steering pointer. No tag → no revert landed
+        // here → nothing to steer.
         let AgentMessage::Llm(tip) = &messages[tip_idx] else {
             return messages;
         };
@@ -739,19 +798,30 @@ impl AgentContext {
             return messages;
         }
 
-        // Compose the steering text: `[continue_after_revert]` marker + an
-        // optional breadcrumb echo (the newest tag's text) + the concrete
-        // continue-forward directive.
-        let trimmed = newest.text.trim();
-        let crumb = if trimmed.is_empty() {
-            String::new()
-        } else {
-            format!(" {trimmed}.")
-        };
+        // Compose the steering text: `[continue_after_revert]` marker + a
+        // pointer to the tip node (its rendered `[nN]` node-number + the rendered
+        // tag-label + a SHORT head-elided gloss of the breadcrumb) + the concrete
+        // continue-forward directive. The FULL breadcrumb is NOT echoed — the
+        // adjacent on-node `[label: text]` annotation (woven upstream) is the full
+        // summary site; the pointer references it by node-number so the model can
+        // find it, and carries only a short recognizable cue to the abandoned
+        // action via the elided gloss (#74 / D-TEST-0069).
+        //
+        // `tip.node_id` is structurally guaranteed present: `tip_idx` was found
+        // by the `lm.node_id.is_some()` predicate above. The tag-label comes from
+        // the SAME `rendered_label()` helper the weave uses, so the label
+        // rendered ON the node and the label REFERENCED here are identical by
+        // construction.
+        let node = tip
+            .node_id
+            .expect("tip_idx finder guarantees node_id.is_some()")
+            .render();
+        let label = newest.kind.rendered_label();
+        let gloss = elide_breadcrumb_tail(&newest.text);
         let text = format!(
-            "{CONTINUE_AFTER_REVERT_MARKER}{crumb} You just reverted to this \
-             node. Continue forward: do the next uncompleted step; do NOT redo \
-             completed steps; do NOT stop."
+            "{CONTINUE_AFTER_REVERT_MARKER} You just reverted to node {node}. \
+             See [{label}: {gloss}] at {node}. Continue forward: do the next \
+             uncompleted step; do NOT redo completed steps; do NOT stop."
         );
         let note = AgentMessage::Llm(super::agent_message::LlmMessage::new(Message::User {
             content: vec![Content::Text { text }],
@@ -1437,17 +1507,23 @@ mod build_trunk_context_tests {
         // The decaying `[continue_after_revert]` synthetic user message is
         // emitted after the tip for ALL FOUR revert categories — failure→Lesson,
         // tangent→Finding, completion→Outcome, step-summary→Checkpoint — while
-        // the tip's newest tag is within the decay window.
+        // the tip's newest tag is within the decay window. CC-19: the text is a
+        // node+label POINTER (`reverted to node n1` + `at n1` + the rendered
+        // tag-label gloss `[<label>: …]`), NOT a full breadcrumb echo.
         for kind in [
             TagKind::Lesson,
             TagKind::Finding,
             TagKind::Outcome,
             TagKind::Checkpoint,
         ] {
+            // A LONG breadcrumb so the gloss is head-elided: the FULL middle must
+            // be absent (the pointer is not a full echo) while the trailing
+            // parenthetical action-cue survives.
+            let crumb = "reverted past: drafted the v1 plan-file approach (write_file abandoned)";
             let root = user("write a plan", 1, NodeId(0), None);
             let mut tip = assistant("reverted here", 2, NodeId(1), Some(NodeId(0)));
             if let AgentMessage::Llm(lm) = &mut tip {
-                lm.tags.push(tag(kind, 5, "v1 abandoned"));
+                lm.tags.push(tag(kind, 5, crumb));
             }
             let woven = AgentContext::weave_braking_annotations(vec![root, tip]);
             // current_turn = 5, created_at_turn = 5, window = 3 → distance 0 ≤ 3.
@@ -1469,20 +1545,30 @@ mod build_trunk_context_tests {
                 ),
                 "{kind:?}: the steering message must be a nodeless Message::User"
             );
-            // Its text starts with the marker, echoes the breadcrumb, and carries
-            // the continue-forward directive.
+            // Its text starts with the marker, points at the tip node by its
+            // rendered node-number (`node n1` + `at n1`), carries the rendered
+            // tag-label gloss `[<label>: …]`, and carries the directive.
             let text = first_text(note);
+            let label = kind.rendered_label();
             assert!(
                 text.starts_with(CONTINUE_AFTER_REVERT_MARKER),
                 "{kind:?}: text must start with the marker: {text}"
             );
             assert!(
-                text.contains("v1 abandoned")
+                text.contains("reverted to node n1")
+                    && text.contains("at n1")
+                    && text.contains(&format!("[{label}: …"))
+                    && text.contains("(write_file abandoned)]")
                     && text.contains("Continue forward")
                     && text.contains("next uncompleted step")
                     && text.contains("do NOT redo completed steps")
                     && text.contains("do NOT stop"),
-                "{kind:?}: text must echo the breadcrumb + carry the directive: {text}"
+                "{kind:?}: text must point at node n1 + the {label} gloss + carry the directive: {text}"
+            );
+            // The FULL breadcrumb middle is NOT echoed (the head was elided away).
+            assert!(
+                !text.contains("drafted the v1 plan-file"),
+                "{kind:?}: the full breadcrumb middle must be elided away: {text}"
             );
         }
     }
@@ -1542,32 +1628,57 @@ mod build_trunk_context_tests {
     #[test]
     fn continue_after_revert_newest_tag_governs_decay_and_breadcrumb() {
         // A node accruing multiple revert tags uses the NEWEST (highest
-        // created_at_turn) to gate decay AND to supply the breadcrumb echo.
-        let mut tip = assistant("reverted here", 2, NodeId(1), None);
+        // created_at_turn) to gate decay AND to supply the tag-label + the
+        // elided-gloss tail for the steering pointer. CC-19: the pointer
+        // references the tip node-number; the gloss reflects the NEWEST tag's
+        // tail, and the OLDER tag's tail is not present. Use distinct LONG tails
+        // so the elided gloss carries the newest's parenthetical cue, not the
+        // older's.
+        let mut tip = assistant("reverted here", 2, NodeId(7), None);
         if let AgentMessage::Llm(lm) = &mut tip {
-            lm.tags.push(tag(TagKind::Lesson, 2, "old breadcrumb"));
-            lm.tags.push(tag(TagKind::Lesson, 8, "newest breadcrumb"));
+            lm.tags.push(tag(
+                TagKind::Lesson,
+                2,
+                "reverted past: the older exploratory pass (read_file abandoned)",
+            ));
+            lm.tags.push(tag(
+                TagKind::Finding,
+                8,
+                "reverted past: the newest tangent thread (grep_search abandoned)",
+            ));
         }
         let woven = AgentContext::weave_braking_annotations(vec![tip]);
         // current_turn = 9, newest created_at_turn = 8, window = 3 → distance 1.
         let out = AgentContext::inject_continue_after_revert(woven, 9, 3);
         assert_eq!(out.len(), 2, "in-window via the newest tag → emit");
         let text = first_text(&out[1]);
+        // Pointer references the tip node (NodeId(7) → n7) and uses the NEWEST
+        // tag's label (Finding → finding) + the newest tag's elided tail.
         assert!(
-            text.contains("newest breadcrumb") && !text.contains("old breadcrumb"),
-            "the breadcrumb echo must use the newest tag: {text}"
+            text.contains("reverted to node n7") && text.contains("at n7"),
+            "the pointer must reference the tip node n7: {text}"
+        );
+        assert!(
+            text.contains("[finding: …") && text.contains("(grep_search abandoned)]"),
+            "the gloss must use the NEWEST tag's label + tail: {text}"
+        );
+        assert!(
+            !text.contains("read_file abandoned"),
+            "the OLDER tag's tail must not appear: {text}"
         );
     }
 
     #[test]
     fn continue_after_revert_emitted_after_tool_result_tip() {
         // When the trunk tip is a `Message::ToolResult` carrying a revert tag,
-        // the steering message is still emitted immediately after it.
+        // the steering message is still emitted immediately after it. CC-19: the
+        // steering text points at the tip node (`n1`) + carries the `lesson`
+        // label + an elided gloss; the FULL breadcrumb sentence is NOT present.
+        let crumb = "reverted past: the v1 tangential exploration thread (write_file abandoned)";
         let root = user("write a plan", 1, NodeId(0), None);
         let mut tip = tool_result("file written", 2, NodeId(1), Some(NodeId(0)));
         if let AgentMessage::Llm(lm) = &mut tip {
-            lm.tags
-                .push(tag(TagKind::Lesson, 2, "v1 was tangential, restarting"));
+            lm.tags.push(tag(TagKind::Lesson, 2, crumb));
         }
         let woven = AgentContext::weave_braking_annotations(vec![root, tip]);
         let out = AgentContext::inject_continue_after_revert(woven, 2, 3);
@@ -1580,8 +1691,16 @@ mod build_trunk_context_tests {
         let text = first_text(&out[2]);
         assert!(
             text.starts_with(CONTINUE_AFTER_REVERT_MARKER)
-                && text.contains("v1 was tangential, restarting"),
-            "the steering message follows the tool-result tip: {text}"
+                && text.contains("reverted to node n1")
+                && text.contains("at n1")
+                && text.contains("[lesson: …")
+                && text.contains("(write_file abandoned)]"),
+            "the steering message points at n1 + the lesson gloss after the tool-result tip: {text}"
+        );
+        // The FULL breadcrumb sentence is NOT echoed (head elided away).
+        assert!(
+            !text.contains("the v1 tangential exploration thread"),
+            "the full breadcrumb sentence must be elided away: {text}"
         );
         // The tool-result tip itself keeps its woven marker + content untouched.
         let tip_text = first_text(&out[1]);
@@ -1603,6 +1722,131 @@ mod build_trunk_context_tests {
             !out.iter()
                 .any(|m| first_text(m).contains(CONTINUE_AFTER_REVERT_MARKER)),
             "no [continue_after_revert] message without a revert tag"
+        );
+    }
+
+    #[test]
+    fn continue_after_revert_pointer_uses_actual_non_n0_node_number() {
+        // CC-19 / #74 correction (ii): the pointer emits the ACTUAL tip
+        // node-number, not a hardcoded `n0`. A tip at NodeId(7) renders `n7` in
+        // BOTH the `node n7` and the `at n7` occurrences.
+        let mut tip = assistant("reverted here", 1, NodeId(7), None);
+        if let AgentMessage::Llm(lm) = &mut tip {
+            lm.tags.push(tag(TagKind::Lesson, 1, "v1 abandoned"));
+        }
+        let woven = AgentContext::weave_braking_annotations(vec![tip]);
+        let out = AgentContext::inject_continue_after_revert(woven, 1, 3);
+        assert_eq!(out.len(), 2, "in-window → steering emitted");
+        let text = first_text(&out[1]);
+        assert!(
+            text.contains("reverted to node n7") && text.contains("at n7"),
+            "the pointer must render the ACTUAL tip node n7: {text}"
+        );
+        assert!(
+            !text.contains("n0"),
+            "the node-number must not be the hardcoded n0: {text}"
+        );
+    }
+
+    #[test]
+    fn continue_after_revert_label_matches_kind_across_4_categories() {
+        // CC-19 / #74 correction (i): the pointer carries the RENDERED tag-label
+        // (`lesson`/`finding`/`outcome`/`checkpoint`), not the raw RevertCategory
+        // word — and it matches the tip tag's kind across all four categories.
+        for (kind, expected_label) in [
+            (TagKind::Lesson, "lesson"),
+            (TagKind::Finding, "finding"),
+            (TagKind::Outcome, "outcome"),
+            (TagKind::Checkpoint, "checkpoint"),
+        ] {
+            let mut tip = assistant("reverted here", 1, NodeId(2), None);
+            if let AgentMessage::Llm(lm) = &mut tip {
+                lm.tags.push(tag(kind, 1, "v1 abandoned"));
+            }
+            let woven = AgentContext::weave_braking_annotations(vec![tip]);
+            let out = AgentContext::inject_continue_after_revert(woven, 1, 3);
+            let text = first_text(&out[1]);
+            assert!(
+                text.contains(&format!("[{expected_label}: ")),
+                "{kind:?}: the pointer must carry the rendered label [{expected_label}: …]: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn continue_after_revert_elided_gloss_drops_full_echo_keeps_parenthetical() {
+        // CC-19: a LONG breadcrumb is head-elided in the gloss — the `…` elision
+        // happens, the FULL middle of the breadcrumb is absent, and the trailing
+        // `(… abandoned)` parenthetical action-cue survives.
+        let crumb =
+            "reverted past: a very long exploratory drafting pass over the plan-file approach (write_file abandoned)";
+        let mut tip = assistant("reverted here", 1, NodeId(3), None);
+        if let AgentMessage::Llm(lm) = &mut tip {
+            lm.tags.push(tag(TagKind::Lesson, 1, crumb));
+        }
+        let woven = AgentContext::weave_braking_annotations(vec![tip]);
+        let out = AgentContext::inject_continue_after_revert(woven, 1, 3);
+        let text = first_text(&out[1]);
+        // The elision happened (a `…` is present) and the parenthetical survived.
+        assert!(
+            text.contains("[lesson: …") && text.contains("(write_file abandoned)]"),
+            "the gloss must be head-elided with the parenthetical surviving: {text}"
+        );
+        // The FULL middle of the breadcrumb is absent.
+        assert!(
+            !text.contains("a very long exploratory drafting pass"),
+            "the full breadcrumb middle must be elided away: {text}"
+        );
+    }
+
+    #[test]
+    fn continue_after_revert_short_no_parenthetical_breadcrumb_un_elided() {
+        // CC-19: a SHORT breadcrumb (≤ cap) with no parenthetical is glossed
+        // VERBATIM — no `…` elision — and the gloss is still well-formed.
+        let crumb = "reverted past: short summary"; // ≤ 40 chars, no `(`
+        let mut tip = assistant("reverted here", 1, NodeId(4), None);
+        if let AgentMessage::Llm(lm) = &mut tip {
+            lm.tags.push(tag(TagKind::Finding, 1, crumb));
+        }
+        let woven = AgentContext::weave_braking_annotations(vec![tip]);
+        let out = AgentContext::inject_continue_after_revert(woven, 1, 3);
+        let text = first_text(&out[1]);
+        assert!(
+            text.contains("[finding: reverted past: short summary]"),
+            "a short no-parenthetical breadcrumb is glossed verbatim (no …): {text}"
+        );
+        assert!(
+            !text.contains('…'),
+            "no ellipsis when the breadcrumb is at/under the cap: {text}"
+        );
+    }
+
+    #[test]
+    fn continue_after_revert_pointer_is_never_dangling() {
+        // CC-19 load-bearing invariant: the SAME tip node that the pointer's `nN`
+        // references ALSO carries the woven on-node `[label: text]` annotation —
+        // so the pointer is never dangling (it always points at a node that
+        // actually carries the breadcrumb the model can read in full).
+        let mut tip = assistant("reverted here", 1, NodeId(9), None);
+        if let AgentMessage::Llm(lm) = &mut tip {
+            lm.tags
+                .push(tag(TagKind::Lesson, 1, "v1 plan-file approach abandoned"));
+        }
+        let woven = AgentContext::weave_braking_annotations(vec![tip]);
+        let out = AgentContext::inject_continue_after_revert(woven, 1, 3);
+        assert_eq!(out.len(), 2, "in-window → steering emitted after the tip");
+        // The tip (index 0) carries the woven [n9] marker + the [lesson: …] note.
+        let tip_text = first_text(&out[0]);
+        assert!(
+            tip_text.starts_with("[n9]")
+                && tip_text.contains("[lesson: v1 plan-file approach abandoned]"),
+            "the tip node carries the woven [n9] marker + the full on-node annotation: {tip_text}"
+        );
+        // The steering pointer (index 1) references THAT SAME node (n9).
+        let steer_text = first_text(&out[1]);
+        assert!(
+            steer_text.contains("reverted to node n9") && steer_text.contains("at n9"),
+            "the steering pointer references the SAME node n9 that carries the annotation: {steer_text}"
         );
     }
 }

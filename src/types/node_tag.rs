@@ -123,6 +123,22 @@ impl TagKind {
     pub fn is_decayable(self) -> bool {
         matches!(self, Self::Lesson | Self::Finding)
     }
+
+    /// The lowercase render label for this kind — the single source of truth for
+    /// the kind→label mapping used both when weaving the on-node `[label: text]`
+    /// annotation ([`AgentContext::weave_braking_annotations`](super::context::AgentContext::weave_braking_annotations))
+    /// and when composing the `[continue_after_revert]` steering pointer
+    /// ([`AgentContext::inject_continue_after_revert`](super::context::AgentContext::inject_continue_after_revert)).
+    /// Extracting it here guarantees the label rendered ON the node and the label
+    /// REFERENCED by the steering pointer are identical by construction.
+    pub fn rendered_label(self) -> &'static str {
+        match self {
+            Self::Lesson => "lesson",
+            Self::Finding => "finding",
+            Self::Outcome => "outcome",
+            Self::Checkpoint => "checkpoint",
+        }
+    }
 }
 
 /// A model-generated summary attached to a trunk node by `apply_revert`.
@@ -221,6 +237,17 @@ mod tests {
         assert_eq!(NodeId(12).render(), "n12");
         assert_eq!(NodeId(0).render(), "n0");
         assert_eq!(format!("{}", NodeId(99)), "n99");
+    }
+
+    #[test]
+    fn tag_kind_rendered_label() {
+        // CC-19: the single source of truth for the kind→label mapping — shared
+        // by `weave_braking_annotations` (on-node `[label: text]`) and
+        // `inject_continue_after_revert` (the steering pointer's `[label: …]`).
+        assert_eq!(TagKind::Lesson.rendered_label(), "lesson");
+        assert_eq!(TagKind::Finding.rendered_label(), "finding");
+        assert_eq!(TagKind::Outcome.rendered_label(), "outcome");
+        assert_eq!(TagKind::Checkpoint.rendered_label(), "checkpoint");
     }
 
     #[test]
