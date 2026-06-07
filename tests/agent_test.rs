@@ -365,3 +365,68 @@ async fn test_prompt_with_sender_tools_restored() {
     while rx2.try_recv().is_ok() {}
     assert_eq!(agent.messages().len(), 4); // 2 from first + 2 from second
 }
+
+#[tokio::test]
+async fn test_repeated_prompt_renders_prior_history_to_provider() {
+    // Regression guard for the `agent_loop` / `agent_loop_continue`
+    // inconsistency: a SECOND `prompt()` on the same agent must render the
+    // prior turn TO THE PROVIDER, not just the new message. Before `agent_loop`
+    // classified pre-seeded messages into the working-context streams (mirroring
+    // `agent_loop_continue`), `build_working_context` rendered only the new
+    // `user_context` entry and silently dropped the conversation — the
+    // accumulator (`messages().len()`) stayed correct, so the older
+    // length-only assertion above did NOT catch it. The mock provider emits a
+    // `RawWire::Request` whose body carries `"messages":N` = the rendered
+    // `llm_messages.len()`, so a counting wire sink observes the actual sent
+    // context size per call.
+    use std::sync::Mutex;
+
+    use phi_core::provider::{ProviderWireSink, RawWire};
+
+    #[derive(Default)]
+    struct CountingSink {
+        counts: Mutex<Vec<usize>>,
+    }
+    impl ProviderWireSink for CountingSink {
+        fn on_wire(&self, ev: &RawWire) {
+            if let RawWire::Request { body, .. } = ev {
+                let key = "\"messages\":";
+                if let Some(i) = body.find(key) {
+                    let digits: String = body[i + key.len()..]
+                        .chars()
+                        .take_while(|c| c.is_ascii_digit())
+                        .collect();
+                    if let Ok(n) = digits.parse::<usize>() {
+                        self.counts.lock().unwrap().push(n);
+                    }
+                }
+            }
+        }
+    }
+
+    let sink = Arc::new(CountingSink::default());
+    let mut agent = BasicAgent::new(ModelConfig::anthropic("mock", "mock", "test"))
+        .with_provider_override(Arc::new(MockProvider::texts(vec!["first", "second"])))
+        .with_system_prompt("test")
+        .with_provider_wire_sink(sink.clone());
+
+    {
+        let mut rx = agent.prompt("Remember the value X.").await;
+        while rx.recv().await.is_some() {}
+    }
+    {
+        let mut rx = agent.prompt("What was the value?").await;
+        while rx.recv().await.is_some() {}
+    }
+
+    let counts = sink.counts.lock().unwrap().clone();
+    assert_eq!(counts.len(), 2, "expected two provider calls, got {counts:?}");
+    // Call 1 renders just the first user message (1). Call 2 (the follow-up)
+    // must carry the prior user+assistant pair + the new user message (>= 3),
+    // not collapse back to the lone new turn (1).
+    assert!(
+        counts[1] > counts[0] && counts[1] >= 3,
+        "second prompt() must render prior history to the provider; got {counts:?} \
+         (call-2 == 1 means the prior turn was dropped)"
+    );
+}

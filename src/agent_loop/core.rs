@@ -90,6 +90,29 @@ pub async fn agent_loop(
 
     let mut new_messages: Vec<AgentMessage> = prompts.clone();
 
+    // Classify any PRE-SEEDED prior messages into the working-context streams
+    // (user_context / inrun_context) BEFORE appending the new prompts, mirroring
+    // `agent_loop_continue` below. Without this, a caller that re-invokes
+    // `agent_loop` on a context carrying prior history (e.g. repeated
+    // `BasicAgent::prompt()` for multi-turn) leaves the earlier turns ONLY in
+    // `context.messages`; `build_working_context` then renders solely the new
+    // `user_context` entry and silently drops the conversation from the LLM
+    // request. The guard runs this only once, when the streams are unseeded
+    // (a fresh first call has empty `messages`, so it is a no-op there).
+    if context.user_context.is_empty() && context.inrun_context.is_empty() {
+        for msg in &context.messages {
+            match msg.as_llm() {
+                Some(Message::User { .. }) => context.user_context.push(msg.clone()),
+                Some(Message::Assistant { .. }) | Some(Message::ToolResult { .. }) => {
+                    context
+                        .inrun_context
+                        .push(crate::types::InRunEntry::Live(msg.clone()));
+                }
+                _ => {}
+            }
+        }
+    }
+
     // Add prompts to context
     for prompt in &prompts {
         context.messages.push(prompt.clone());
