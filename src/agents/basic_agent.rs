@@ -41,6 +41,57 @@ fn lock_queue<T>(q: &Mutex<Vec<T>>) -> std::sync::MutexGuard<'_, Vec<T>> {
     }
 }
 
+/// A cheap, cloneable handle to a [`BasicAgent`]'s steering + follow-up queues.
+///
+/// This is the concurrent-**control** dual of the concurrent-**event** API
+/// (`prompt_with_sender`): events stream OUT to a separate task; control streams
+/// IN from one. It lets another task inject steering / follow-up into a
+/// **currently-running** loop without touching the `&mut`-borrowed agent — the
+/// queues are `Arc<Mutex<Vec<AgentMessage>>>` shared with the agent loop's
+/// `get_steering_messages` / `get_follow_up_messages` closures, so a push here is
+/// drained at the next checkpoint:
+///
+/// - **steering** — checked between tools under
+///   [`ToolExecutionStrategy::Sequential`]/[`Batched`](crate::types::ToolExecutionStrategy)
+///   and after every turn (all strategies), so a steer reaches a mid-run loop;
+/// - **follow-up** — consumed when the agent would otherwise stop.
+///
+/// The queues are stable for the agent's lifetime, so a handle taken once (e.g.
+/// before driving `prompt_with_sender` on a spawned task, or before handing the
+/// agent to a long-running session task) stays valid across turns.
+#[derive(Clone)]
+pub struct AgentControlHandle {
+    steering_queue: Arc<Mutex<Vec<AgentMessage>>>,
+    follow_up_queue: Arc<Mutex<Vec<AgentMessage>>>,
+}
+
+impl AgentControlHandle {
+    /// Queue a steering message — a user turn injected mid-run. Drained at the
+    /// next steering checkpoint (between tools under Sequential/Batched, or after
+    /// the current turn).
+    pub fn steer(&self, text: impl Into<String>) {
+        lock_queue(&self.steering_queue)
+            .push(AgentMessage::Llm(LlmMessage::new(Message::user(text.into()))));
+    }
+
+    /// Queue a follow-up message — consumed when the agent would otherwise stop.
+    pub fn follow_up(&self, text: impl Into<String>) {
+        lock_queue(&self.follow_up_queue)
+            .push(AgentMessage::Llm(LlmMessage::new(Message::user(text.into()))));
+    }
+
+    /// Queue a pre-built steering [`AgentMessage`] (full control over the message
+    /// shape; e.g. an extension message or a multi-content user turn).
+    pub fn steer_message(&self, msg: AgentMessage) {
+        lock_queue(&self.steering_queue).push(msg);
+    }
+
+    /// Queue a pre-built follow-up [`AgentMessage`].
+    pub fn follow_up_message(&self, msg: AgentMessage) {
+        lock_queue(&self.follow_up_queue).push(msg);
+    }
+}
+
 /*
 ARCHITECTURE: BasicAgent vs agent_loop — stateful wrapper vs stateless functions
 
@@ -905,6 +956,23 @@ impl BasicAgent {
     // All other runtime methods (state, mutation, control, queues) are provided solely by
     // the `Agent` trait impl below — import `use phi_core::Agent` (or `use phi_core::*`)
     // to call them on a concrete `BasicAgent`.
+
+    /// Hand out a cloneable [`AgentControlHandle`] over this agent's steering +
+    /// follow-up queues, for concurrent mid-run injection from another task.
+    ///
+    /// The handle holds clones of the same `Arc`s the agent loop drains, so a
+    /// push via the handle reaches a currently-running `prompt()` at the next
+    /// steering checkpoint (between tools under
+    /// [`ToolExecutionStrategy::Sequential`](crate::types::ToolExecutionStrategy),
+    /// or after the current turn). The queues are stable across turns, so the
+    /// handle stays valid for the agent's lifetime — take it once (e.g. before
+    /// handing the agent to a long-running session task) and reuse it.
+    pub fn control_handle(&self) -> AgentControlHandle {
+        AgentControlHandle {
+            steering_queue: self.steering_queue.clone(),
+            follow_up_queue: self.follow_up_queue.clone(),
+        }
+    }
 
     /// Send a text prompt. Returns a stream of `AgentEvent`s.
     ///

@@ -430,3 +430,50 @@ async fn test_repeated_prompt_renders_prior_history_to_provider() {
          (call-2 == 1 means the prior turn was dropped)"
     );
 }
+
+/// CC-22 P3 — `AgentControlHandle` injects steering into a running loop.
+///
+/// The concurrent-control dual of `prompt_with_sender`: a control handle pushes
+/// a steering message that the agent loop drains at its post-turn steering
+/// checkpoint. Proven without tools — `get_steering_messages` is drained after
+/// every turn, so a pre-pushed steer makes the loop continue with it (mid-tool
+/// steering under Sequential is the same queue, exercised live in the i-phi HTC).
+#[tokio::test]
+async fn test_control_handle_steers_running_agent() {
+    let provider = MockProvider::texts(vec!["first answer", "answer after steer"]);
+    let mut agent = BasicAgent::new(ModelConfig::anthropic("mock", "mock", "test"))
+        .with_provider_override(Arc::new(provider));
+
+    // Take a control handle BEFORE driving the agent, then inject a steering turn.
+    let ctrl = agent.control_handle();
+    ctrl.steer("STEER-INJECTED");
+
+    let mut rx = agent.prompt("initial question").await;
+    while rx.recv().await.is_some() {}
+
+    // The control handle's push reached the loop's steering queue + was drained
+    // into the conversation as a DISTINCT user turn (separate from the initial
+    // prompt) — proving the queue plumbing. (The mid-tool TIMING of a steer that
+    // arrives DURING a running turn is exercised by the i-phi live HTC, where a
+    // /steer HTTP request lands between tools of a Sequential multi-tool turn.)
+    let msgs = <BasicAgent as phi_core::Agent>::messages(&agent);
+    let user_texts: Vec<String> = msgs
+        .iter()
+        .filter_map(|m| match m.as_llm() {
+            Some(Message::User { content, .. }) => content.iter().find_map(|c| match c {
+                Content::Text { text } => Some(text.clone()),
+                _ => None,
+            }),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        user_texts.iter().any(|t| t == "initial question"),
+        "initial prompt present (user_texts={user_texts:?})"
+    );
+    assert!(
+        user_texts.iter().any(|t| t == "STEER-INJECTED"),
+        "the steered message was drained into the conversation as a distinct user \
+         turn — the control handle reached the loop's steering queue (user_texts={user_texts:?})"
+    );
+}
