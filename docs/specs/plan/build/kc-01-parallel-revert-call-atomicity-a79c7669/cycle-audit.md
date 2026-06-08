@@ -11,8 +11,8 @@
 | Unit gate (clippy + full suite + fmt) | **GREEN** |
 | Both #77 BROKEN matrix rows flip to call-atomic (`dangling=[]`) | **YES** (`row_pinned_revert_to_first_result_now_call_atomic`, `row_pinned_revert_to_call_node_now_call_atomic`) |
 | M=1 / 3 SAFE rows regression | **no regression** (13 existing + 3 SAFE rows green) |
-| Live transcript close-gate (parallel-tool + pinned revert, no provider 400) | **PENDING** (orchestrator-run, post-seal; per `[[feedback_render_transcript_close_gate]]`) |
-| Overall (code) | **structural-pass + unit-pass**; #77 stays OPEN until the live close-gate reads clean |
+| Live transcript close-gate (parallel-tool + pinned revert, no provider 400) | **PASS** (HTC `KC01-CLOSEGATE`, deepseek; pinned revert onto the F-5 cluster → post-revert request accepted, no 400, clean `AgentEnd`; transcript read — see `close-gate-result.md`) |
+| Overall (code) | **structural-pass + unit-pass + live-pass**; #77 / D-TEST-0072 **closed**. Adjacent semantic finding filed #80 / D-TEST-0075 (S3; does not reopen #77) |
 
 ## §1 — Audit-pipeline summary
 
@@ -71,7 +71,8 @@ No public API signature change, no new persisted field, no migration (P0 F-7). C
 | D-1 | Pre-existing-drift hygiene | 3 `dev` fmt drifts (CC-22-era `basic_agent.rs`/`agent_test.rs`, unrelated to KC-01) surfaced by gate-2 `fmt --check`; fixed as a **separate scoped commit `2dc2c40`** (not in the KC-01 seal) to keep the seal clean + the crate gate green. Semantically null. |
 | D-2 | LOC Band-2 (no pause) | `streaming.rs` +71 vs cap 60 (1.18×, < 90 pause) — backstop doc-comment + invariant logic; `context.rs` inline-test +315 vs cap 240 (1.31×, < 360 pause) — NEW parallel fixture + thoroughly-documented tests. Both within pause thresholds; logged per chunk-implementer v15 P-impl-2. |
 | D-3 | Archive done manually | `chunk-archive-plan` skill is baby-phi/i-phi-aware only (not phi-core); orchestrator minted the cycle folder + `_cycle-index.md` by hand (phi-core uses baby-phi's exact `docs/specs/plan/build/` shape). v4 hard-assertion satisfied by direct read of §1 (heading + 3 subsections + 3-sentence bodies). |
-| D-4 | Live close-gate post-seal | The §10 live transcript-read close-gate (i-phi parallel-tool + pinned-revert HTC, no provider 400) needs a live provider round-trip → orchestrator-run AFTER the phi-core seal (so i-phi builds against the landed fix). #77 stays OPEN until it reads clean. |
+| D-4 | Live close-gate post-seal | The §10 live transcript-read close-gate ran AFTER the phi-core seal (so i-phi built against the landed fix). **PASS** — #77 closed. |
+| D-5 | Transcript-surfaced follow-up | Reading the close-gate transcript surfaced that `completion` onto a parallel call-node keeps the first result + drops siblings (atomic but lossy). Filed **#80 / D-TEST-0075** (S3 semantic; KC-02 candidate). Does NOT reopen #77 (atomicity holds + validated). |
 
 No phi-core-specific skill/agent gaps beyond D-3 (the lane shipped 2026-06-08; first exercise).
 

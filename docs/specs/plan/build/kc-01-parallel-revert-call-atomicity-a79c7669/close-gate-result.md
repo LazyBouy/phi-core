@@ -28,6 +28,8 @@ Pre-KC-01, the TURN-3 post-revert-to-n0 request carries a dangling `skill_help` 
 
 deepseek looped mildly — it re-applied the "seal" instruction across several turns (repeated reverts to n0, re-fetching the abandoned skill) before delivering `write_file`. This is driver instruction-following behaviour, not a render defect; it actually **strengthens** the gate (multiple distinct pinned-revert-into-cluster requests, all rendered call-atomic + accepted). Duration 36,965 ms; clean convergence to `AgentEnd`.
 
+**Adjacent finding surfaced by the transcript-read → filed as #80 / D-TEST-0075 (S3 semantic, does NOT reopen #77):** the re-fetch loop's root cause is that `completion` (pinned) onto a parallel call-node keeps the FIRST result (`n1`, a direct child of `n0`) but drops the sibling (`n2`, a linear-stamped grandchild) — atomic (no 400) but asymmetric/lossy. Three coherent options ((a) reclaim-to-breadcrumb / (b) pin-whole-cluster / (c) current keep-first-drop-rest); lean (a) per the tool's "reclaim the abandoned tail" wording. KC-01's atomicity scope is unaffected + remains closed; #80 is a KC-02 candidate.
+
 ## §5 — Artifacts
 
 In the i-phi phi-e2e worktree under `docs/e2e-test/cycles/kc01-close-gate-a79c7669/`:
