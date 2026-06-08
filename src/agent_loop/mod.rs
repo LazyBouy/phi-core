@@ -40,3 +40,8 @@ pub use evaluation::{
 // Internal utility — used by parallel.rs via super::, kept pub(crate) for future BasicAgent use
 #[allow(unused_imports)]
 pub(crate) use helpers::derive_config_segment;
+
+// KC-01 (#77) — declarative call-atomicity backstop; pub(crate) so the
+// render-pass regression tests in `types::context` can exercise it directly.
+#[allow(unused_imports)]
+pub(crate) use streaming::enforce_call_atomic_backstop;

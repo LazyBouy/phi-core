@@ -1,4 +1,4 @@
-<!-- Last verified: 2026-05-22 by Claude Code (concept exploration; not yet a binding spec) -->
+<!-- Last verified: 2026-06-08 by Claude Code (KC-01 #77: co-keep constraint now enforced CALL-ATOMICALLY at the revert render locus; concept exploration, not yet a binding spec) -->
 
 # Context Brake — concept exploration
 
@@ -189,7 +189,7 @@ The richest design:
 
 #### Critical questions (load-bearing risks)
 
-1. **Co-keep constraint specification.** `ToolCall` ↔ `ToolResult` are a bonded pair; the refresh filter must keep them atomically (or drop both). Without an explicit rule, dropped tool-call blocks orphan their results and the next LLM call fails at the provider layer. Other implicit pairs need cataloguing (assistant message + immediate tool-result follow-up).
+1. **Co-keep constraint specification.** `ToolCall` ↔ `ToolResult` are a bonded pair; the refresh filter must keep them atomically (or drop both). Without an explicit rule, dropped tool-call blocks orphan their results and the next LLM call fails at the provider layer. Other implicit pairs need cataloguing (assistant message + immediate tool-result follow-up). **KC-01 (#77 / D-TEST-0072) makes the revert/working-context render enforce this bonded-pair invariant CALL-ATOMICALLY (was node-atomic).** A parallel assistant node carrying N tool-calls (with N linearly-chained result nodes) is now drop/kept PER CALL keyed on the `(node_id, tool_call_id)` composite join: an assistant node emits only the calls whose result is live on the trunk (R1), an abandon-class collapse removes only the specific collapsing call/result and leaves live siblings intact (R2), a mixed-class node (abandon tag + live sibling) is kept whole — pin wins (R3), and a node left with zero calls + no text is dropped to avoid an empty-assistant 400 (R4). A declarative orphan-filter backstop (`enforce_call_atomic_backstop`) on the `streaming.rs` render pipeline is the locus-independent belt-and-suspenders. See `phi-core ADR-0001` + `src/types/context.rs::collapse_abandon_class_cluster`. The single-call (M=1) path is byte-identical.
 2. **Self-rating bias persists.** Re-evaluation closes drift over time, but the in-the-moment scoring still skews high (recency / sunk-cost). Re-evaluation requires the model to remember to do it; needs a triggering mechanism (see "Bundled revise+refresh" in contributions).
 3. **Score self-confirmation loop.** If score records appear in model-facing context, seeing *"I rated this 0.9"* reinforces the judgment in subsequent reasoning. Mitigation: score records are operational metadata for the strategy, NOT part of the conversational stream visible to the LLM.
 4. **Block-ID stability.** Position-derived IDs (`turn12.thinking[0]`) can shift under splices/edits; content-hash IDs require original bytes for revision. Prefer monotonic IDs assigned at write-time by phi-core with a session-side mapping.

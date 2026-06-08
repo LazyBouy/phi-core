@@ -418,14 +418,36 @@ impl AgentContext {
     ///   tag-window state AND owns the content — makes it fire in production.
     /// - **Pinned cluster** (`Outcome`/`Checkpoint`, NOT decay-able): the cluster
     ///   is load-bearing (a sealed result the model may re-read), so it is kept
-    ///   WHOLE everywhere on the trunk — if the node is a tool-call whose matching
-    ///   tool-result is off-trunk, the result is re-appended right after it so the
-    ///   kept call is never left dangling. Pinned clusters are never collapsed and
-    ///   never dropped.
+    ///   WHOLE everywhere on the trunk — but **per call** (KC-01 R1). A pinned
+    ///   assistant node may carry N parallel tool-calls (#77); for EACH call,
+    ///   keep it if its result is live on the trunk, re-append the result if it is
+    ///   a DIRECT child of this call node (off-trunk M=1 case), or DROP that call
+    ///   if its result was abandoned (a parallel sibling whose result descended
+    ///   from the revert tip's discarded span). Pinned clusters are never
+    ///   collapsed to a breadcrumb and never dropped.
     ///
-    /// The **atomic-cluster invariant** therefore holds for ALL categories: the
-    /// rendered trunk never carries a tool-call without its matching result
-    /// (abandon-class drops both; pinned keeps both).
+    /// The **atomic-cluster invariant** is now enforced **CALL-ATOMICALLY** (was
+    /// node-atomic — KC-01 / #77 / D-TEST-0072). The rendered trunk never carries
+    /// a tool-call without its matching result, even when a revert lands INTO a
+    /// parallel (multi-tool-call) cluster. Drop/keep is decided PER CALL keyed on
+    /// the `(node_id, tool_call_id)` composite join (F1.b), not whole-node:
+    /// - **R1 per-call retain**: an assistant node emits only the calls whose
+    ///   result is live on the trunk; a call is dropped iff its result was
+    ///   abandoned (never a live sibling).
+    /// - **R2 per-call collapse**: an abandon-class collapse removes only the
+    ///   collapsing call/result, breadcrumbs it, and leaves live sibling calls
+    ///   intact (instead of clearing the whole node).
+    /// - **R3 mixed-class → pin wins**: a node carrying both an abandon tag
+    ///   (migrated from a collapsed sibling result) AND a pinned/live sibling call
+    ///   is kept WHOLE — extra context can't 400.
+    /// - **R4 empty-node**: per-call retain that leaves a node with zero calls and
+    ///   no text drops the node (no empty-assistant 400); a node retaining text is
+    ///   kept as plain assistant text. R4 + a declarative orphan-filter backstop
+    ///   ride the `streaming.rs` render pipeline (`enforce_call_atomic_backstop`)
+    ///   as a locus-independent belt-and-suspenders.
+    ///
+    /// The M=1 single-call path is preserved BYTE-IDENTICAL (the SAFE regression
+    /// rows guard it).
     ///
     /// Operates over the **cloned** trunk that `build_trunk_context` returns by
     /// value; `self.messages` (the forensic log) is **never** mutated — the
@@ -539,15 +561,30 @@ impl AgentContext {
                 let surviving_idx: Option<usize>;
 
                 if node_is_call {
-                    // Call-node shape: replace its ENTIRE content with the
-                    // breadcrumb (drop the heavy ToolCall AND any reasoning Text).
+                    // KC-01 R3 (mixed-class → pin wins): if this abandon-tagged
+                    // call node ALSO carries a sibling tool-call whose result is
+                    // live on the trunk, do NOT collapse the whole node — keep it
+                    // whole (the live sibling cluster is real context that can't
+                    // 400). Remove only the abandoning call (R2 per-call collapse).
+                    let has_live_sibling =
+                        Self::call_node_has_live_sibling(&trunk, idx, &node_call_id);
                     if let AgentMessage::Llm(lm) = &mut trunk[idx] {
                         if let Message::Assistant { content, .. } = &mut lm.message {
-                            content.clear();
+                            if has_live_sibling {
+                                content.retain(|b| {
+                                    !matches!(b, Content::ToolCall { id, .. } if *id == node_call_id)
+                                });
+                            } else {
+                                // No live sibling → whole-node collapse (M=1 path,
+                                // byte-identical to pre-KC-01).
+                                content.clear();
+                            }
                         }
                     }
                     processed.insert(node_id);
-                    surviving_idx = Some(idx);
+                    // A kept-whole node (live sibling) is NOT a lone breadcrumb →
+                    // never the decay-drop target.
+                    surviving_idx = if has_live_sibling { None } else { Some(idx) };
                 } else {
                     // Result-node shape (#59-canonical): the heavy body lives in
                     // the PARENT assistant-call node. Find it, clear its content,
@@ -562,6 +599,20 @@ impl AgentContext {
                         },
                         _ => false,
                     }) {
+                        // KC-01 R3 (mixed-class → pin wins): if the parent call
+                        // node carries a SIBLING tool-call (other than the
+                        // collapsing one) whose matching tool-result is live on
+                        // the trunk, do NOT collapse the parent — keep the node
+                        // whole (extra context can't 400). Remove only the
+                        // collapsing result node + its specific call from the
+                        // parent (R2 per-call collapse), leave the live siblings
+                        // intact. The migrated abandon tag still lands on the
+                        // parent so the breadcrumb renders.
+                        let parent_has_live_sibling = Self::call_node_has_live_sibling(
+                            &trunk,
+                            parent_idx,
+                            &node_call_id,
+                        );
                         let moved_tags = match &trunk[idx] {
                             AgentMessage::Llm(lm) => lm.tags.clone(),
                             _ => Vec::new(),
@@ -572,7 +623,17 @@ impl AgentContext {
                         };
                         if let AgentMessage::Llm(lm) = &mut trunk[parent_idx] {
                             if let Message::Assistant { content, .. } = &mut lm.message {
-                                content.clear();
+                                if parent_has_live_sibling {
+                                    // R3 pin-wins: remove ONLY the collapsing
+                                    // call (R2 per-call), keep siblings + text.
+                                    content.retain(|b| {
+                                        !matches!(b, Content::ToolCall { id, .. } if *id == node_call_id)
+                                    });
+                                } else {
+                                    // No live sibling → whole-node collapse
+                                    // (M=1 path, byte-identical to pre-KC-01).
+                                    content.clear();
+                                }
                             }
                             lm.tags.extend(moved_tags);
                         }
@@ -587,11 +648,18 @@ impl AgentContext {
                         // was after the result (it is always before, so it does
                         // not — but compute the surviving index defensively).
                         trunk.remove(idx);
-                        surviving_idx = Some(if parent_idx > idx {
-                            parent_idx - 1
+                        // R3 pin-wins: a kept-whole parent (with live siblings) is
+                        // NOT a collapse-to-breadcrumb, so it must NOT be the
+                        // decay-drop target (it carries real, live content).
+                        surviving_idx = if parent_has_live_sibling {
+                            None
                         } else {
-                            parent_idx
-                        });
+                            Some(if parent_idx > idx {
+                                parent_idx - 1
+                            } else {
+                                parent_idx
+                            })
+                        };
                     } else {
                         // No parent on-trunk (degenerate) — just drop the orphan
                         // result tag node from consideration.
@@ -621,38 +689,184 @@ impl AgentContext {
                 // is correct only when the surviving node is at/after idx).
                 cursor = idx; // re-scan from idx; `processed` prevents re-work
             } else {
-                // Pinned cluster (Outcome/Checkpoint): keep WHOLE. If the node is
-                // a tool-call whose matching tool-result is off-trunk, re-append
-                // the result (read from the forensic log) right after it so the
-                // kept call never dangles. Never collapsed, never dropped.
-                if node_is_call {
-                    let already_present = trunk.iter().any(|m| match m {
-                        AgentMessage::Llm(lm) => matches!(
-                            &lm.message,
-                            Message::ToolResult { tool_call_id, .. } if *tool_call_id == node_call_id
-                        ),
-                        _ => false,
-                    });
-                    if !already_present {
-                        if let Some(result) = self.messages.iter().find(|m| match m {
-                            AgentMessage::Llm(lm) => matches!(
-                                &lm.message,
-                                Message::ToolResult { tool_call_id, .. } if *tool_call_id == node_call_id
+                // Pinned cluster (Outcome/Checkpoint): keep WHOLE, but PER CALL
+                // (KC-01 R1 per-call retain). The pinned node may carry N parallel
+                // tool-calls (#77). For EACH call:
+                //   - its result is already on the trunk → keep the call (atomic);
+                //   - its result is off-trunk but a DIRECT child of this call node
+                //     (`result.parent_id == this node_id`, the F1.b composite join)
+                //     → re-append the result from the forensic log so the kept call
+                //     never dangles (the M=1 revert-onto-call-node case);
+                //   - its result is in the ABANDONED tail (off-trunk and NOT a
+                //     direct child of this call node, e.g. a parallel sibling whose
+                //     result descended from the revert tip's discarded span) →
+                //     DROP only that call from the node's content. We never
+                //     re-materialise abandoned work and never leave a dangling call.
+                // The composite `(node_id, tool_call_id)` join key (rather than a
+                // raw `tool_call_id`) is what makes the direct-child test collision-
+                // proof: a provider that reuses an id across turns (MockProvider
+                // `mock-tool-{i}`, #77 F-8) cannot cross-join a stale prior-turn
+                // result, because the parent-id must match THIS node.
+                // Resolve the cluster's CALL node to apply per-call retain to:
+                //   - tagged a call node → that node;
+                //   - tagged a result node → its parent call node on the trunk
+                //     (whose siblings may still dangle — the #77 parallel case).
+                let call_node_idx = if node_is_call {
+                    Some(idx)
+                } else {
+                    trunk.iter().position(|m| match m {
+                        AgentMessage::Llm(lm) => match &lm.message {
+                            Message::Assistant { content, .. } => content.iter().any(
+                                |b| matches!(b, Content::ToolCall { id, .. } if *id == node_call_id),
                             ),
                             _ => false,
-                        }) {
-                            trunk.insert(idx + 1, result.clone());
-                        }
-                    }
+                        },
+                        _ => false,
+                    })
+                };
+                if let Some(cn_idx) = call_node_idx {
+                    self.retain_pinned_calls_on_node(&mut trunk, cn_idx);
                 }
-                // Pinned + result-node: the cluster (parent call + result) is
-                // already whole on-trunk — no action.
                 processed.insert(node_id);
                 cursor = idx + 1;
             }
         }
 
         trunk
+    }
+
+    /// KC-01 R1 helper — per-call retain on a PINNED call node at `idx`.
+    ///
+    /// The pinned node may carry N parallel tool-calls (#77). For EACH call:
+    ///   - its result is already live on the trunk → keep the call (atomic);
+    ///   - its result is off-trunk but a DIRECT child of THIS call node
+    ///     (`result.parent_id == this node_id`, the F1.b composite join) →
+    ///     re-append the result from the forensic log so the kept call never
+    ///     dangles (the M=1 revert-onto-call-node case);
+    ///   - its result is in the ABANDONED tail (off-trunk and NOT a direct child,
+    ///     e.g. a parallel sibling whose result descended from the revert tip's
+    ///     discarded span) → DROP only that call from the node's content. We never
+    ///     re-materialise abandoned work and never leave a dangling call.
+    ///
+    /// The composite `(node_id, tool_call_id)` join (vs a raw `tool_call_id`) is
+    /// what makes the direct-child test collision-proof: a provider that reuses an
+    /// id across turns (MockProvider `mock-tool-{i}`, #77 F-8) cannot cross-join a
+    /// stale prior-turn result, because the parent-id must match THIS node.
+    fn retain_pinned_calls_on_node(&self, trunk: &mut Vec<AgentMessage>, idx: usize) {
+        use super::content::{Content, Message};
+        let this_node_id = match &trunk[idx] {
+            AgentMessage::Llm(lm) => lm.node_id,
+            _ => None,
+        };
+        let Some(this_node_id) = this_node_id else {
+            return;
+        };
+        // This call-node's tool-call ids in content order, with a deterministic
+        // synthetic id for any id-less call (F1.b synthetic fallback — every call
+        // carries a join key).
+        let call_ids: Vec<String> = match &trunk[idx] {
+            AgentMessage::Llm(lm) => match &lm.message {
+                Message::Assistant { content, .. } => content
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(ci, b)| match b {
+                        Content::ToolCall { id, .. } if !id.is_empty() => Some(id.clone()),
+                        Content::ToolCall { .. } => {
+                            Some(format!("synth-{}-{}", this_node_id.0, ci))
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        };
+        if call_ids.is_empty() {
+            return;
+        }
+        // Decide per-call: keep (result live on-trunk or re-appendable direct
+        // child) or drop (result abandoned off-trunk).
+        let mut ids_to_drop: Vec<String> = Vec::new();
+        let mut results_to_append: Vec<AgentMessage> = Vec::new();
+        for call_id in &call_ids {
+            let on_trunk = trunk.iter().any(|m| match m {
+                AgentMessage::Llm(lm) => matches!(
+                    &lm.message,
+                    Message::ToolResult { tool_call_id, .. } if tool_call_id == call_id
+                ),
+                _ => false,
+            });
+            if on_trunk {
+                continue; // call already atomic
+            }
+            let direct_child = self.messages.iter().find(|m| match m {
+                AgentMessage::Llm(lm) => {
+                    lm.parent_id == Some(this_node_id)
+                        && matches!(
+                            &lm.message,
+                            Message::ToolResult { tool_call_id, .. } if tool_call_id == call_id
+                        )
+                }
+                _ => false,
+            });
+            match direct_child {
+                Some(result) => results_to_append.push(result.clone()),
+                None => ids_to_drop.push(call_id.clone()),
+            }
+        }
+        // Apply per-call drops (R1) on the kept node's content.
+        if !ids_to_drop.is_empty() {
+            if let AgentMessage::Llm(lm) = &mut trunk[idx] {
+                if let Message::Assistant { content, .. } = &mut lm.message {
+                    content.retain(
+                        |b| !matches!(b, Content::ToolCall { id, .. } if ids_to_drop.contains(id)),
+                    );
+                }
+            }
+        }
+        // Re-append recoverable direct-child results right after the call node
+        // (preserve content order).
+        for (offset, result) in results_to_append.into_iter().enumerate() {
+            trunk.insert(idx + 1 + offset, result);
+        }
+    }
+
+    /// KC-01 R3 helper — does the call node at `parent_idx` carry a tool-call
+    /// OTHER than `collapsing_call_id` whose matching tool-result is live on the
+    /// trunk? If so, an abandon-class collapse of that sibling result must NOT
+    /// clear the whole node (pin-wins) — the live sibling cluster is real,
+    /// load-bearing context that "can't 400".
+    fn call_node_has_live_sibling(
+        trunk: &[AgentMessage],
+        parent_idx: usize,
+        collapsing_call_id: &str,
+    ) -> bool {
+        use super::content::{Content, Message};
+        let sibling_ids: Vec<String> = match &trunk[parent_idx] {
+            AgentMessage::Llm(lm) => match &lm.message {
+                Message::Assistant { content, .. } => content
+                    .iter()
+                    .filter_map(|b| match b {
+                        Content::ToolCall { id, .. } if id != collapsing_call_id => {
+                            Some(id.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        };
+        if sibling_ids.is_empty() {
+            return false;
+        }
+        trunk.iter().any(|m| match m {
+            AgentMessage::Llm(lm) => matches!(
+                &lm.message,
+                Message::ToolResult { tool_call_id, .. } if sibling_ids.contains(tool_call_id)
+            ),
+            _ => false,
+        })
     }
 
     /// Composition I — weave node markers + surviving tag annotations into the
@@ -2942,6 +3156,331 @@ mod collapse_abandon_class_cluster_tests {
         assert!(
             trunk_has_surviving_assistant_text(&decayed, "substantive reasoning output"),
             "the real content survives (the node is not a lone breadcrumb)"
+        );
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // KC-01 (#77 / D-TEST-0072) — PARALLEL-revert call-atomicity regression.
+    //
+    // Promoted from the P0 §7 throwaway scratch repro. A PARALLEL assistant node
+    // carries N tool-calls (#77); the N results chain LINEARLY
+    // (result_a.parent = call_node, result_b.parent = result_a, …). Reverting
+    // INTO such a cluster used to leave the 2nd..Nth call dangling (a `tool_use`
+    // with no `tool_result` → provider 400). The render is now CALL-ATOMIC:
+    // drop/keep PER CALL keyed on the `(node_id, tool_call_id)` composite.
+    // ───────────────────────────────────────────────────────────────────────
+
+    /// A PARALLEL assistant node: a leading reasoning `Text` block PLUS two heavy
+    /// tool-calls (`call_a` + `call_b`) in ONE assistant message (the #77 shape).
+    fn multi_call_node(
+        call_a: &str,
+        call_b: &str,
+        ts: u64,
+        node: NodeId,
+        parent: Option<NodeId>,
+    ) -> AgentMessage {
+        AgentMessage::Llm(
+            LlmMessage::new(Message::Assistant {
+                content: vec![
+                    Content::Text {
+                        text: "I'll run both lookups in parallel.".to_string(),
+                    },
+                    Content::ToolCall {
+                        id: call_a.to_string(),
+                        name: "write_file".to_string(),
+                        arguments: serde_json::json!({ "path": "a.md", "content": "BODY-A" }),
+                    },
+                    Content::ToolCall {
+                        id: call_b.to_string(),
+                        name: "write_file".to_string(),
+                        arguments: serde_json::json!({ "path": "b.md", "content": "BODY-B" }),
+                    },
+                ],
+                stop_reason: StopReason::ToolUse,
+                model: "test".into(),
+                provider: "test".into(),
+                usage: Usage::default(),
+                timestamp: ts,
+                error_message: None,
+            })
+            .with_node_identity(node, parent),
+        )
+    }
+
+    /// #77 parallel cluster: user (n0) → assistant `[call_a, call_b]` (n1) →
+    /// result_a (n2, parent n1) → result_b (n3, parent n2, linear chain).
+    /// `active` selects the revert target node. `tag` is attached to that target.
+    fn parallel_fixture(active: NodeId, target_idx: usize, kind: TagKind) -> AgentContext {
+        let mut ctx = AgentContext {
+            messages: vec![
+                user_node("do parallel work", 1, NodeId(0), None),
+                multi_call_node("pcall_a", "pcall_b", 2, NodeId(1), Some(NodeId(0))),
+                result_node("pcall_a", 3, NodeId(2), Some(NodeId(1))),
+                result_node("pcall_b", 4, NodeId(3), Some(NodeId(2))),
+            ],
+            next_node_id: 4,
+            active_node_id: Some(active),
+            ..Default::default()
+        };
+        tag_message(
+            &mut ctx.messages,
+            target_idx,
+            kind,
+            "reverted past: parallel cluster",
+        );
+        ctx
+    }
+
+    /// Tier A — BROKEN→SAFE: a PINNED (Outcome) revert onto the FIRST result of a
+    /// parallel cluster used to dangle `call_b` (#77 F-4). It is now call-atomic.
+    #[test]
+    fn row_pinned_revert_to_first_result_now_call_atomic() {
+        // Revert target = result_a (n2). Trunk = [n0, n1, n2]; result_b (n3) is
+        // off-trunk. call_b's result is in the abandoned tail → call_b is dropped.
+        let ctx = parallel_fixture(NodeId(2), 2, TagKind::Outcome);
+        let trunk = ctx.build_trunk_context();
+        let collapsed =
+            ctx.collapse_abandon_class_cluster(trunk, &in_window_policy(), IN_WINDOW_TURN);
+        assert!(
+            !trunk_has_dangling_call(&collapsed),
+            "pinned revert into a parallel cluster must leave no dangling tool-call"
+        );
+        // call_a is kept (its result is live on-trunk); call_b is dropped.
+        let has_call_a_result = trunk_has_tool_result(&collapsed, "pcall_a");
+        assert!(has_call_a_result, "the live call_a result stays on-trunk");
+        assert!(
+            !trunk_has_tool_result(&collapsed, "pcall_b"),
+            "the abandoned call_b result is NOT re-materialised"
+        );
+    }
+
+    /// Tier A — BROKEN→SAFE: a PINNED revert onto the CALL node of a parallel
+    /// cluster used to dangle `call_b` (#77 F-5). Now call-atomic: call_a's
+    /// direct-child result is re-appended; call_b (abandoned) is dropped.
+    #[test]
+    fn row_pinned_revert_to_call_node_now_call_atomic() {
+        // Revert target = call node (n1). Trunk = [n0, n1]; both results off-trunk.
+        let ctx = parallel_fixture(NodeId(1), 1, TagKind::Outcome);
+        let trunk = ctx.build_trunk_context();
+        let collapsed =
+            ctx.collapse_abandon_class_cluster(trunk, &in_window_policy(), IN_WINDOW_TURN);
+        assert!(
+            !trunk_has_dangling_call(&collapsed),
+            "pinned revert onto the call node must leave no dangling tool-call"
+        );
+        // call_a's result (direct child of n1) is re-appended; call_b's is not.
+        assert!(
+            trunk_has_tool_result(&collapsed, "pcall_a"),
+            "call_a's direct-child result is re-appended"
+        );
+        assert!(
+            !trunk_has_tool_result(&collapsed, "pcall_b"),
+            "call_b's abandoned result is NOT re-materialised"
+        );
+    }
+
+    /// Tier B — SAFE regression: an ABANDON (Failure/Lesson) revert onto the first
+    /// result of a parallel cluster stays SAFE (whole-cluster collapse, no dangle).
+    #[test]
+    fn row_abandon_revert_to_first_result_stays_safe() {
+        let ctx = parallel_fixture(NodeId(2), 2, TagKind::Lesson);
+        let trunk = ctx.build_trunk_context();
+        let collapsed =
+            ctx.collapse_abandon_class_cluster(trunk, &in_window_policy(), IN_WINDOW_TURN);
+        assert!(
+            !trunk_has_dangling_call(&collapsed),
+            "abandon revert into a parallel cluster must leave no dangling tool-call"
+        );
+        // Abandon-class with no live sibling → the whole cluster collapses.
+        assert!(
+            !trunk_has_any_tool_call(&collapsed),
+            "abandon collapse strips both parallel calls (no live sibling)"
+        );
+    }
+
+    /// Tier B — SAFE regression: an ABANDON revert onto the CALL node of a
+    /// parallel cluster stays SAFE.
+    #[test]
+    fn row_abandon_revert_to_call_node_stays_safe() {
+        let ctx = parallel_fixture(NodeId(1), 1, TagKind::Lesson);
+        let trunk = ctx.build_trunk_context();
+        let collapsed =
+            ctx.collapse_abandon_class_cluster(trunk, &in_window_policy(), IN_WINDOW_TURN);
+        assert!(
+            !trunk_has_dangling_call(&collapsed),
+            "abandon revert onto the call node must leave no dangling tool-call"
+        );
+        assert!(
+            !trunk_has_any_tool_call(&collapsed),
+            "abandon collapse strips the parallel call node (no live sibling)"
+        );
+    }
+
+    /// Tier B — SAFE regression: a revert onto the LAST result of a parallel
+    /// cluster keeps BOTH calls atomic (both results are on-trunk).
+    #[test]
+    fn row_revert_to_last_result_stays_safe() {
+        // Revert target = result_b (n3). Trunk = [n0, n1, n2, n3]; BOTH results
+        // on-trunk. Pinned (Outcome) keeps both calls whole, no drops.
+        let ctx = parallel_fixture(NodeId(3), 3, TagKind::Outcome);
+        let trunk = ctx.build_trunk_context();
+        let collapsed =
+            ctx.collapse_abandon_class_cluster(trunk, &in_window_policy(), IN_WINDOW_TURN);
+        assert!(
+            !trunk_has_dangling_call(&collapsed),
+            "both results on-trunk → no dangling tool-call"
+        );
+        assert!(
+            trunk_has_tool_result(&collapsed, "pcall_a")
+                && trunk_has_tool_result(&collapsed, "pcall_b"),
+            "both parallel results stay live on-trunk"
+        );
+    }
+
+    /// Tier C (R4) — per-call retain that leaves a node with ZERO calls + no text
+    /// is dropped (no empty-assistant 400); a node that retains text is kept as
+    /// plain assistant text. Exercises the `enforce_call_atomic_backstop` pass.
+    #[test]
+    fn r4_empty_node_after_per_call_retain_is_dropped() {
+        use crate::agent_loop::enforce_call_atomic_backstop;
+        // An assistant node carrying ONLY an orphan tool-call (its result is
+        // absent) + no text → the orphan-filter strips the call → empty → dropped.
+        let empty_after = AgentMessage::Llm(
+            LlmMessage::new(Message::Assistant {
+                content: vec![Content::ToolCall {
+                    id: "orphan_x".to_string(),
+                    name: "write_file".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                stop_reason: StopReason::ToolUse,
+                model: "test".into(),
+                provider: "test".into(),
+                usage: Usage::default(),
+                timestamp: 2,
+                error_message: None,
+            })
+            .with_node_identity(NodeId(1), Some(NodeId(0))),
+        );
+        // A second node with an orphan call BUT surviving text → kept as text.
+        let kept_as_text = AgentMessage::Llm(
+            LlmMessage::new(Message::Assistant {
+                content: vec![
+                    Content::Text {
+                        text: "here is my summary".to_string(),
+                    },
+                    Content::ToolCall {
+                        id: "orphan_y".to_string(),
+                        name: "write_file".to_string(),
+                        arguments: serde_json::json!({}),
+                    },
+                ],
+                stop_reason: StopReason::ToolUse,
+                model: "test".into(),
+                provider: "test".into(),
+                usage: Usage::default(),
+                timestamp: 3,
+                error_message: None,
+            })
+            .with_node_identity(NodeId(2), Some(NodeId(1))),
+        );
+        let trunk = vec![
+            user_node("task", 1, NodeId(0), None),
+            empty_after,
+            kept_as_text,
+        ];
+        let out = enforce_call_atomic_backstop(trunk);
+        // The empty-after-strip node (NodeId 1) is dropped.
+        assert!(
+            !out.iter()
+                .any(|m| matches!(m, AgentMessage::Llm(lm) if lm.node_id == Some(NodeId(1)))),
+            "R4: an assistant node left with no calls + no text is dropped"
+        );
+        // The text-bearing node (NodeId 2) is kept (call stripped, text survives).
+        assert!(
+            out.iter()
+                .any(|m| matches!(m, AgentMessage::Llm(lm) if lm.node_id == Some(NodeId(2)))),
+            "R4: a node retaining text is kept as plain assistant text"
+        );
+        assert!(
+            trunk_has_surviving_assistant_text(&out, "here is my summary"),
+            "the surviving text is preserved"
+        );
+        assert!(
+            !trunk_has_dangling_call(&out),
+            "the backstop leaves no dangling tool-call"
+        );
+        assert!(
+            !trunk_has_any_tool_call(&out),
+            "both orphan calls were stripped by the orphan-filter"
+        );
+    }
+
+    /// Tier C (R3) — mixed-class pin-wins: a node carrying an abandon tag
+    /// (migrated from a collapsed sibling result) AND a pinned/live sibling call
+    /// is kept WHOLE (not collapsed), with the abandoning call removed per-call.
+    #[test]
+    fn r3_mixed_class_pin_wins_keeps_node_whole() {
+        // u(n0) → assistant `[call_a, call_b]` (n1) → result_a (n2) → result_b
+        // (n3). An ABANDON (Lesson) revert lands on result_a (n2); but call_b's
+        // result (n3) is LIVE on the trunk (active tip = n3). R3: the parent n1
+        // carries a live sibling (call_b) → keep n1 WHOLE, remove only call_a.
+        let mut ctx = AgentContext {
+            messages: vec![
+                user_node("do parallel work", 1, NodeId(0), None),
+                multi_call_node("pcall_a", "pcall_b", 2, NodeId(1), Some(NodeId(0))),
+                result_node("pcall_a", 3, NodeId(2), Some(NodeId(1))),
+                result_node("pcall_b", 4, NodeId(3), Some(NodeId(2))),
+            ],
+            next_node_id: 4,
+            active_node_id: Some(NodeId(3)), // tip = result_b → both results on-trunk
+            ..Default::default()
+        };
+        // Abandon tag on result_a (n2).
+        tag_message(
+            &mut ctx.messages,
+            2,
+            TagKind::Lesson,
+            "reverted past: call_a abandoned",
+        );
+        let trunk = ctx.build_trunk_context(); // [n0, n1, n2, n3]
+        let collapsed =
+            ctx.collapse_abandon_class_cluster(trunk, &in_window_policy(), IN_WINDOW_TURN);
+        // R3 pin-wins: the node is kept whole — call_b (live sibling) survives.
+        let has_call_b = collapsed.iter().any(|m| match m {
+            AgentMessage::Llm(lm) => match &lm.message {
+                Message::Assistant { content, .. } => content
+                    .iter()
+                    .any(|b| matches!(b, Content::ToolCall { id, .. } if id == "pcall_b")),
+                _ => false,
+            },
+            _ => false,
+        });
+        assert!(
+            has_call_b,
+            "R3 pin-wins: the live sibling call_b must survive (node kept whole)"
+        );
+        // The abandoning call_a is removed (per-call collapse).
+        let has_call_a = collapsed.iter().any(|m| match m {
+            AgentMessage::Llm(lm) => match &lm.message {
+                Message::Assistant { content, .. } => content
+                    .iter()
+                    .any(|b| matches!(b, Content::ToolCall { id, .. } if id == "pcall_a")),
+                _ => false,
+            },
+            _ => false,
+        });
+        assert!(
+            !has_call_a,
+            "R3: the abandoning call_a is removed per-call (R2)"
+        );
+        // call_b's result stays live; no dangling call.
+        assert!(
+            trunk_has_tool_result(&collapsed, "pcall_b"),
+            "call_b's live result stays on-trunk"
+        );
+        assert!(
+            !trunk_has_dangling_call(&collapsed),
+            "R3 pin-wins must leave no dangling tool-call"
         );
     }
 }

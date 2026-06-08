@@ -106,6 +106,73 @@ pub(super) fn derive_provenance(messages: &[AgentMessage]) -> Vec<BlockProvenanc
     out
 }
 
+/// KC-01 (#77 / D-TEST-0072) — declarative call-atomicity backstop (F3 + R4).
+///
+/// A final, locus-independent linear pass over an assembled revert-mode trunk
+/// that GUARANTEES the call-atomic invariant regardless of which path built the
+/// trunk. `collapse_abandon_class_cluster` already lands R1/R2/R3 where the
+/// per-cluster tag/window state lives; this pass is the belt-and-suspenders that
+/// also covers any FUTURE trunk-assembly path (e.g. `build_trunk_context_with_policy`)
+/// re-introducing an orphan unguarded.
+///
+/// Two invariants, applied in order:
+/// 1. **Orphan-filter** — drop any on-trunk assistant `Content::ToolCall` whose
+///    matching `Message::ToolResult` (`tool_call_id == id`) is absent anywhere on
+///    the trunk. A `tool_use` with no `tool_result` is a provider 400.
+/// 2. **R4 empty-node** — after the orphan-filter, an assistant node left with
+///    NO tool-calls and NO non-blank text is dropped entirely (an empty assistant
+///    turn is itself a provider 400); a node that still carries text is kept as
+///    plain assistant text.
+///
+/// The well-formed M=1 / non-revert path is byte-identical: a single-call cluster
+/// already has its result on-trunk (no orphan to drop) and carries content (no
+/// empty node to remove).
+pub(crate) fn enforce_call_atomic_backstop(trunk: Vec<AgentMessage>) -> Vec<AgentMessage> {
+    // Result ids present anywhere on the trunk (the live join set).
+    let result_ids: std::collections::HashSet<String> = trunk
+        .iter()
+        .filter_map(|m| match m {
+            AgentMessage::Llm(lm) => match &lm.message {
+                Message::ToolResult { tool_call_id, .. } => Some(tool_call_id.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+
+    let mut out: Vec<AgentMessage> = Vec::with_capacity(trunk.len());
+    for m in trunk {
+        let AgentMessage::Llm(mut lm) = m else {
+            out.push(m);
+            continue;
+        };
+        if let Message::Assistant { content, .. } = &mut lm.message {
+            let had_tool_call = content
+                .iter()
+                .any(|b| matches!(b, Content::ToolCall { .. }));
+            if had_tool_call {
+                // 1) Orphan-filter: drop any call whose result is absent.
+                content.retain(|b| match b {
+                    Content::ToolCall { id, .. } => result_ids.contains(id),
+                    _ => true,
+                });
+                // 2) R4 empty-node: if nothing meaningful survives, drop the node.
+                let has_call = content
+                    .iter()
+                    .any(|b| matches!(b, Content::ToolCall { .. }));
+                let has_text = content
+                    .iter()
+                    .any(|b| matches!(b, Content::Text { text } if !text.trim().is_empty()));
+                if !has_call && !has_text {
+                    continue; // drop the empty assistant node
+                }
+            }
+        }
+        out.push(AgentMessage::Llm(lm));
+    }
+    out
+}
+
 /*
 stream_assistant_response — the core LLM call.
 
@@ -181,11 +248,15 @@ pub(super) async fn stream_assistant_response(
         // while the tip's newest revert tag is within the decay window. Past the
         // window (for any category, incl. pinned outcome/checkpoint) it is
         // suppressed. The marker lets channels filter it from real user input.
-        AgentContext::inject_continue_after_revert(
+        let injected = AgentContext::inject_continue_after_revert(
             woven,
             turn_index,
             config.revert_render_policy.lesson_window_turns,
-        )
+        );
+        // KC-01 (#77) — declarative call-atomicity backstop (F3 + R4): a final
+        // linear pass guaranteeing no on-trunk tool_call dangles and no empty
+        // assistant node survives, regardless of which path assembled the trunk.
+        enforce_call_atomic_backstop(injected)
     } else {
         context.build_working_context()
     };
