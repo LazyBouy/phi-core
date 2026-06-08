@@ -420,7 +420,11 @@ async fn test_repeated_prompt_renders_prior_history_to_provider() {
     }
 
     let counts = sink.counts.lock().unwrap().clone();
-    assert_eq!(counts.len(), 2, "expected two provider calls, got {counts:?}");
+    assert_eq!(
+        counts.len(),
+        2,
+        "expected two provider calls, got {counts:?}"
+    );
     // Call 1 renders just the first user message (1). Call 2 (the follow-up)
     // must carry the prior user+assistant pair + the new user message (>= 3),
     // not collapse back to the lone new turn (1).

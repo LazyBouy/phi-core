@@ -70,14 +70,16 @@ impl AgentControlHandle {
     /// next steering checkpoint (between tools under Sequential/Batched, or after
     /// the current turn).
     pub fn steer(&self, text: impl Into<String>) {
-        lock_queue(&self.steering_queue)
-            .push(AgentMessage::Llm(LlmMessage::new(Message::user(text.into()))));
+        lock_queue(&self.steering_queue).push(AgentMessage::Llm(LlmMessage::new(Message::user(
+            text.into(),
+        ))));
     }
 
     /// Queue a follow-up message — consumed when the agent would otherwise stop.
     pub fn follow_up(&self, text: impl Into<String>) {
-        lock_queue(&self.follow_up_queue)
-            .push(AgentMessage::Llm(LlmMessage::new(Message::user(text.into()))));
+        lock_queue(&self.follow_up_queue).push(AgentMessage::Llm(LlmMessage::new(Message::user(
+            text.into(),
+        ))));
     }
 
     /// Queue a pre-built steering [`AgentMessage`] (full control over the message
