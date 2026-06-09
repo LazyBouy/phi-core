@@ -4,20 +4,57 @@ use super::node_tag::NodeId;
 use super::tool::AgentTool;
 use std::sync::Arc;
 
+/// Strip a spurious leading `[n<digits>]` token (plus any trailing whitespace)
+/// the MODEL may have echoed at the very start of an assistant turn. Node
+/// markers are assigned by the system; a model-emitted one is always wrong +
+/// stale (it guesses an id the system has not allocated). Without this, the
+/// system marker prepended below double-renders as `[n5] [n2] …`. Returns the
+/// input unchanged when there is no leading marker token. Dependency-free
+/// (no regex): match `[n`, ≥1 ASCII digit, `]`.
+fn strip_leading_node_marker(text: &str) -> &str {
+    let Some(rest) = text.strip_prefix("[n") else {
+        return text;
+    };
+    let digits_end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    if digits_end == 0 {
+        return text; // `[n` not followed by a digit → not a node marker
+    }
+    match rest[digits_end..].strip_prefix(']') {
+        Some(after) => after.trim_start(),
+        None => text, // no closing `]` → leave untouched
+    }
+}
+
 /// Composition I — prepend a braking marker (`[n<id>] …`) onto a message's
 /// content so it reaches the provider. Prefixes the leading text block when one
 /// exists (the common case for user prompts + tool results); otherwise inserts a
 /// fresh leading text block (e.g. an assistant message whose first block is a
-/// `ToolCall`). Used only by [`AgentContext::weave_braking_annotations`].
+/// `ToolCall`). For an ASSISTANT turn, a spurious model-echoed leading
+/// `[n<digits>]` is stripped first (the system marker is authoritative). Used
+/// only by [`AgentContext::weave_braking_annotations`].
 fn prepend_marker_to_message(message: &mut super::content::Message, marker: &str) {
     use super::content::{Content, Message};
+    let is_assistant = matches!(message, Message::Assistant { .. });
     let content = match message {
         Message::User { content, .. }
         | Message::Assistant { content, .. }
         | Message::ToolResult { content, .. } => content,
     };
     match content.first_mut() {
-        Some(Content::Text { text }) => *text = format!("{marker} {text}"),
+        Some(Content::Text { text }) => {
+            let body = if is_assistant {
+                strip_leading_node_marker(text)
+            } else {
+                text.as_str()
+            };
+            *text = if body.is_empty() {
+                marker.to_string()
+            } else {
+                format!("{marker} {body}")
+            };
+        }
         _ => content.insert(
             0,
             Content::Text {
@@ -1641,6 +1678,49 @@ mod build_trunk_context_tests {
         let woven = AgentContext::weave_braking_annotations(vec![am]);
         let text = first_text(&woven[0]);
         assert_eq!(text, "[n3] state your name");
+    }
+
+    #[test]
+    fn strip_leading_node_marker_cases() {
+        // Strips a genuine leading marker token (+ trailing whitespace).
+        assert_eq!(super::strip_leading_node_marker("[n2] hello"), "hello");
+        assert_eq!(super::strip_leading_node_marker("[n12]\nbody"), "body");
+        assert_eq!(super::strip_leading_node_marker("[n0]"), "");
+        // Leaves non-marker text untouched.
+        assert_eq!(super::strip_leading_node_marker("hello [n2]"), "hello [n2]");
+        assert_eq!(
+            super::strip_leading_node_marker("[memory · ShortTerm]"),
+            "[memory · ShortTerm]"
+        );
+        assert_eq!(
+            super::strip_leading_node_marker("[n] no digit"),
+            "[n] no digit"
+        );
+        assert_eq!(
+            super::strip_leading_node_marker("[n2 unclosed"),
+            "[n2 unclosed"
+        );
+        assert_eq!(super::strip_leading_node_marker("plain"), "plain");
+    }
+
+    #[test]
+    fn weave_strips_model_echoed_node_marker_on_assistant_turn() {
+        // The model pattern-matches the `[nN]`-prefixed context and echoes its
+        // own (wrong, stale) `[n2]` at the start of its reply. The system marker
+        // for the node is `[n5]`; the render must be `[n5] …` — NOT the
+        // double-marker `[n5] [n2] …`.
+        let am = assistant("[n2] here is my answer", 1, NodeId(5), None);
+        let woven = AgentContext::weave_braking_annotations(vec![am]);
+        assert_eq!(first_text(&woven[0]), "[n5] here is my answer");
+    }
+
+    #[test]
+    fn weave_keeps_assistant_text_without_an_echoed_marker() {
+        // No spurious marker → the system marker is prepended normally (the
+        // strip must not eat legitimate leading text).
+        let am = assistant("here is my answer", 1, NodeId(5), None);
+        let woven = AgentContext::weave_braking_annotations(vec![am]);
+        assert_eq!(first_text(&woven[0]), "[n5] here is my answer");
     }
 
     #[test]
