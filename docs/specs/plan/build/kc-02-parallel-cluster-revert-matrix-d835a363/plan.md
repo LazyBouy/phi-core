@@ -1,5 +1,5 @@
-<!-- Last verified: 2026-06-08 by Claude Code -->
-<!-- KC-02 cycle plan DRAFT (pre-archive; not yet hex-minted). iter-2 — F1 USER-LOCKED at the BROADER (B) fix 2026-06-08 (USER-DIVERGENT from the iter-1 (a)-only draft); F2/F3 at investigation-rec. project=phi-core. -->
+<!-- Last verified: 2026-06-09 by Claude Code -->
+<!-- KC-02 cycle plan — ARCHIVED at cycle hex d835a363 (2026-06-09). iter-2 — F1 USER-LOCKED at the BROADER (B) fix 2026-06-08 (USER-DIVERGENT from the iter-1 (a)-only draft); F2/F3 at investigation-rec. project=phi-core. -->
 
 # KC-02 — parallel-cluster revert keep/drop matrix: the F1(B) reclaim-on-call-node + keep-cluster-on-result-node fix
 
