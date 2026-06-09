@@ -17,4 +17,4 @@ Historical/audit ledger for **phi-core kernel chunks** (the `KC-NN` namespace) r
 | Hex | Slug | Phases | Auditors | Iterations | Status | Retro |
 |---|---|---|---|---|---|---|
 | `a79c7669` | [kc-01-parallel-revert-call-atomicity](kc-01-parallel-revert-call-atomicity-a79c7669/plan.md) | 5 | 2 (A+B) | A1·B1 (both PASS) | audited-pending-retro (close-gate PASS; #77 closed) | pending |
-| `d835a363` | [kc-02-parallel-cluster-revert-matrix](kc-02-parallel-cluster-revert-matrix-d835a363/plan.md) | 4 | 3 (A+B+C) | pending | in-flight | TBD |
+| `d835a363` | [kc-02-parallel-cluster-revert-matrix](kc-02-parallel-cluster-revert-matrix-d835a363/plan.md) | 4 | 3 (A+B+C) | A1·B1·C1 (all PASS) | audited-pending-retro (live close-gate pending) | pending |

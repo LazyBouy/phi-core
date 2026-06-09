@@ -689,24 +689,29 @@ impl AgentContext {
                 // is correct only when the surviving node is at/after idx).
                 cursor = idx; // re-scan from idx; `processed` prevents re-work
             } else {
-                // Pinned cluster (Outcome/Checkpoint): keep WHOLE, but PER CALL
-                // (KC-01 R1 per-call retain). The pinned node may carry N parallel
-                // tool-calls (#77). For EACH call:
-                //   - its result is already on the trunk → keep the call (atomic);
-                //   - its result is off-trunk but a DIRECT child of this call node
-                //     (`result.parent_id == this node_id`, the F1.b composite join)
-                //     → re-append the result from the forensic log so the kept call
-                //     never dangles (the M=1 revert-onto-call-node case);
-                //   - its result is in the ABANDONED tail (off-trunk and NOT a
-                //     direct child of this call node, e.g. a parallel sibling whose
-                //     result descended from the revert tip's discarded span) →
-                //     DROP only that call from the node's content. We never
-                //     re-materialise abandoned work and never leave a dangling call.
-                // The composite `(node_id, tool_call_id)` join key (rather than a
-                // raw `tool_call_id`) is what makes the direct-child test collision-
-                // proof: a provider that reuses an id across turns (MockProvider
-                // `mock-tool-{i}`, #77 F-8) cannot cross-join a stale prior-turn
-                // result, because the parent-id must match THIS node.
+                // Pinned cluster (Outcome/Checkpoint): TARGET-AWARE per-call
+                // disposition (KC-02 F1(B), ADR-0002 §D2.1 — SUPERSEDES the KC-01
+                // §D1.2 direct-child re-append + M=1 keep-whole). The pinned node
+                // may carry N parallel tool-calls (#77/#80). For EACH call:
+                //   - its result is already on the trunk → KEEP the call always
+                //     (the model continued PAST this cluster; the load-bearing
+                //     on-trunk gate that keeps a mid-trunk pinned cluster verbatim);
+                //   - its result is off-trunk AND the revert landed onto the CALL
+                //     node (`tag_on_call_node`) → DROP the call, never re-append →
+                //     reclaim the whole sealed-past cluster into the durable
+                //     breadcrumb (symmetric with abandon-class);
+                //   - its result is off-trunk AND the revert landed INTO the cluster
+                //     (onto a RESULT node) → RE-APPEND the result by CALL-NODE
+                //     MEMBERSHIP (`tool_call_id == call_id` against the forensic log,
+                //     reaching the off-trunk parallel GRANDCHILDREN the direct-child
+                //     `parent_id` gate could not) → keep the WHOLE gathered cluster.
+                //     A genuine post-cluster follow-on whose `tool_call_id ∉ this
+                //     node's calls` never matches → stays dropped/sealed-past.
+                // The node-scoped `call_ids` set (the call node's own tool-call ids)
+                // is what makes the membership re-append collision-proof: a provider
+                // that reuses an id across turns (MockProvider `mock-tool-{i}`, #77
+                // F-8) cannot cross-join a stale prior-turn result, because only
+                // THIS node's calls are resolved.
                 // Resolve the cluster's CALL node to apply per-call retain to:
                 //   - tagged a call node → that node;
                 //   - tagged a result node → its parent call node on the trunk
@@ -725,7 +730,7 @@ impl AgentContext {
                     })
                 };
                 if let Some(cn_idx) = call_node_idx {
-                    self.retain_pinned_calls_on_node(&mut trunk, cn_idx);
+                    self.retain_pinned_calls_on_node(&mut trunk, cn_idx, node_is_call);
                 }
                 processed.insert(node_id);
                 cursor = idx + 1;
@@ -735,24 +740,38 @@ impl AgentContext {
         trunk
     }
 
-    /// KC-01 R1 helper — per-call retain on a PINNED call node at `idx`.
+    /// KC-02 F1(B) helper — TARGET-AWARE per-call retain on a PINNED call node at
+    /// `idx`. `tag_on_call_node` is the caller's `node_is_call`: `true` when the
+    /// revert landed onto the call node (seal-past the whole sub-task), `false`
+    /// when it landed INTO the cluster (onto a result node).
     ///
-    /// The pinned node may carry N parallel tool-calls (#77). For EACH call:
-    ///   - its result is already live on the trunk → keep the call (atomic);
-    ///   - its result is off-trunk but a DIRECT child of THIS call node
-    ///     (`result.parent_id == this node_id`, the F1.b composite join) →
-    ///     re-append the result from the forensic log so the kept call never
-    ///     dangles (the M=1 revert-onto-call-node case);
-    ///   - its result is in the ABANDONED tail (off-trunk and NOT a direct child,
-    ///     e.g. a parallel sibling whose result descended from the revert tip's
-    ///     discarded span) → DROP only that call from the node's content. We never
-    ///     re-materialise abandoned work and never leave a dangling call.
+    /// SUPERSEDES the KC-01 §D1.2 direct-child re-append + M=1 keep-whole
+    /// (ADR-0002 §D2.1). The pinned node may carry N parallel tool-calls
+    /// (#77/#80). For EACH call:
+    ///   - its result is already live on the trunk → KEEP the call always (the
+    ///     model continued PAST this cluster — the load-bearing on-trunk gate);
+    ///   - its result is off-trunk AND `tag_on_call_node` → DROP the call, never
+    ///     re-append → reclaim the whole sealed-past cluster to the durable
+    ///     breadcrumb (the (a) semantic for the call-node case);
+    ///   - its result is off-trunk AND `!tag_on_call_node` (the revert landed onto
+    ///     a result node) → RE-APPEND the result by CALL-NODE MEMBERSHIP
+    ///     (`tool_call_id == call_id` against the forensic log) so the WHOLE
+    ///     gathered cluster survives. This reaches the off-trunk parallel
+    ///     GRANDCHILDREN that the old direct-child `parent_id` gate could not; a
+    ///     genuine post-cluster follow-on whose `tool_call_id ∉ this node's calls`
+    ///     is never matched here → stays dropped/sealed-past.
     ///
-    /// The composite `(node_id, tool_call_id)` join (vs a raw `tool_call_id`) is
-    /// what makes the direct-child test collision-proof: a provider that reuses an
-    /// id across turns (MockProvider `mock-tool-{i}`, #77 F-8) cannot cross-join a
-    /// stale prior-turn result, because the parent-id must match THIS node.
-    fn retain_pinned_calls_on_node(&self, trunk: &mut Vec<AgentMessage>, idx: usize) {
+    /// The membership re-append is collision-proof by construction: only THIS
+    /// node's own `call_ids` are resolved, so a provider that reuses an id across
+    /// turns (MockProvider `mock-tool-{i}`, #77 F-8) cannot cross-join a stale
+    /// prior-turn result. KC-02 keeps the fix render-pass-only: the forensic
+    /// `self.messages` is read (`.iter().find()` + `.clone()`) and NEVER mutated.
+    fn retain_pinned_calls_on_node(
+        &self,
+        trunk: &mut Vec<AgentMessage>,
+        idx: usize,
+        tag_on_call_node: bool,
+    ) {
         use super::content::{Content, Message};
         let this_node_id = match &trunk[idx] {
             AgentMessage::Llm(lm) => lm.node_id,
@@ -784,8 +803,21 @@ impl AgentContext {
         if call_ids.is_empty() {
             return;
         }
-        // Decide per-call: keep (result live on-trunk or re-appendable direct
-        // child) or drop (result abandoned off-trunk).
+        // Decide per-call, target-aware (KC-02 F1(B)):
+        //   (i)  result already live ON-trunk → KEEP always (the model continued
+        //        PAST this cluster — mid-trunk pinned cluster; dropping it would
+        //        collapse a legitimately-kept span). Load-bearing on-trunk gate.
+        //   (ii) result OFF-trunk + the revert landed onto the CALL node
+        //        (`tag_on_call_node`) → DROP the call, never re-append → reclaim
+        //        the whole abandoned cluster to the durable breadcrumb.
+        //   (iii) result OFF-trunk + the revert landed onto a RESULT node
+        //        (`!tag_on_call_node`) → RE-APPEND the result by CALL-NODE
+        //        MEMBERSHIP (`tool_call_id == call_id` against the forensic log),
+        //        NOT the direct-child `parent_id == this_node_id` gate — the
+        //        linear-stamped siblings are GRANDCHILDREN. A genuine post-cluster
+        //        follow-on whose `tool_call_id ∉ this node's calls` never matches
+        //        `call_ids` here → stays dropped/sealed-past.
+        let _ = this_node_id; // node-scoped synthetic-id fallback uses it above
         let mut ids_to_drop: Vec<String> = Vec::new();
         let mut results_to_append: Vec<AgentMessage> = Vec::new();
         for call_id in &call_ids {
@@ -797,19 +829,24 @@ impl AgentContext {
                 _ => false,
             });
             if on_trunk {
-                continue; // call already atomic
+                continue; // (i) call already atomic — keep
             }
-            let direct_child = self.messages.iter().find(|m| match m {
-                AgentMessage::Llm(lm) => {
-                    lm.parent_id == Some(this_node_id)
-                        && matches!(
-                            &lm.message,
-                            Message::ToolResult { tool_call_id, .. } if tool_call_id == call_id
-                        )
-                }
+            if tag_on_call_node {
+                // (ii) reclaim: the whole cluster is sealed-past — drop the call.
+                ids_to_drop.push(call_id.clone());
+                continue;
+            }
+            // (iii) keep-whole: re-append the off-trunk cluster sibling by
+            // call-node membership (reaches grandchildren the direct-child gate
+            // could not).
+            let cluster_result = self.messages.iter().find(|m| match m {
+                AgentMessage::Llm(lm) => matches!(
+                    &lm.message,
+                    Message::ToolResult { tool_call_id, .. } if tool_call_id == call_id
+                ),
                 _ => false,
             });
-            match direct_child {
+            match cluster_result {
                 Some(result) => results_to_append.push(result.clone()),
                 None => ids_to_drop.push(call_id.clone()),
             }
@@ -2454,6 +2491,12 @@ mod collapse_abandon_class_cluster_tests {
         assert_eq!(before, after, "collapse must never mutate context.messages");
     }
 
+    /// KC-02 F1(B) flip — a PINNED (completion/Outcome) revert onto the CALL node
+    /// (M=1) now RECLAIMS the whole sealed-past cluster to the durable breadcrumb
+    /// instead of re-appending the direct-child result. SUPERSEDES the KC-01
+    /// §D1.2 M=1 keep-whole + re-append (ADR-0002 §D2.1): off-trunk + tag-on-call-
+    /// node → `[DROP]` + breadcrumb, never re-append. (The most consequential flip
+    /// — the "keep the sealed body whole" assertion is INVERTED.)
     #[test]
     fn pinned_class_keeps_cluster_whole_no_dangling_call() {
         let mut ctx = fixture_59_shape();
@@ -2473,16 +2516,7 @@ mod collapse_abandon_class_cluster_tests {
         let collapsed =
             ctx.collapse_abandon_class_cluster(trunk, &in_window_policy(), IN_WINDOW_TURN);
 
-        // Pinned keeps the heavy body whole...
-        assert!(
-            trunk_has_heavy_args(&collapsed, "PLAN-V1-HEAVY-BODY"),
-            "pinned category keeps the sealed tool-call body whole"
-        );
-        // ...AND re-includes the matching result so the call never dangles.
-        assert!(
-            !trunk_has_dangling_call(&collapsed),
-            "pinned keep-whole must re-include the matching tool-result"
-        );
+        // (B) the sealed-past call-node cluster is RECLAIMED: the call is dropped...
         let has_result = collapsed.iter().any(|m| {
             matches!(
                 m,
@@ -2493,8 +2527,18 @@ mod collapse_abandon_class_cluster_tests {
             )
         });
         assert!(
-            has_result,
-            "the matching tool-result must be present on the trunk"
+            !has_result,
+            "(B) off-trunk + tag-on-call-node reclaims: the result is NOT re-appended"
+        );
+        // ...AND no dangling call survives (the call was dropped, not left orphaned).
+        assert!(
+            !trunk_has_dangling_call(&collapsed),
+            "(B) reclaim drops the call so it never dangles"
+        );
+        // ...AND the durable breadcrumb is retained (reclaimed cluster summary).
+        assert!(
+            trunk_has_breadcrumb(&collapsed, "reverted past: sub-task sealed"),
+            "(B) the reclaimed call-node cluster keeps its durable breadcrumb"
         );
     }
 
@@ -3231,12 +3275,18 @@ mod collapse_abandon_class_cluster_tests {
         ctx
     }
 
-    /// Tier A — BROKEN→SAFE: a PINNED (Outcome) revert onto the FIRST result of a
-    /// parallel cluster used to dangle `call_b` (#77 F-4). It is now call-atomic.
+    /// KC-02 F1(B) flip — a PINNED (Outcome) revert onto the FIRST result of a
+    /// parallel cluster now KEEPS the WHOLE gathered cluster (was `[PAIR,DROP]`
+    /// dropping call_b; now `[PAIR,PAIR]` re-appending call_b by call-node
+    /// membership). The revert landed INTO the cluster (a RESULT node), so the
+    /// off-trunk grandchild sibling is re-materialised — exactly the
+    /// "row_pinned_revert_to_first_result → now [PAIR,PAIR]" prediction
+    /// (ADR-0002 §D2.1, P0 §10.7 row 3).
     #[test]
     fn row_pinned_revert_to_first_result_now_call_atomic() {
         // Revert target = result_a (n2). Trunk = [n0, n1, n2]; result_b (n3) is
-        // off-trunk. call_b's result is in the abandoned tail → call_b is dropped.
+        // off-trunk (a grandchild: parent n2, not n1). Under (B) tag-on-result-node
+        // re-appends call_b by call-node membership → the whole cluster survives.
         let ctx = parallel_fixture(NodeId(2), 2, TagKind::Outcome);
         let trunk = ctx.build_trunk_context();
         let collapsed =
@@ -3245,18 +3295,23 @@ mod collapse_abandon_class_cluster_tests {
             !trunk_has_dangling_call(&collapsed),
             "pinned revert into a parallel cluster must leave no dangling tool-call"
         );
-        // call_a is kept (its result is live on-trunk); call_b is dropped.
-        let has_call_a_result = trunk_has_tool_result(&collapsed, "pcall_a");
-        assert!(has_call_a_result, "the live call_a result stays on-trunk");
+        // call_a is kept (its result is live on-trunk)...
         assert!(
-            !trunk_has_tool_result(&collapsed, "pcall_b"),
-            "the abandoned call_b result is NOT re-materialised"
+            trunk_has_tool_result(&collapsed, "pcall_a"),
+            "the live call_a result stays on-trunk (on-trunk-keep gate)"
+        );
+        // ...AND call_b's off-trunk sibling is re-appended by call-node membership.
+        assert!(
+            trunk_has_tool_result(&collapsed, "pcall_b"),
+            "(B) the off-trunk call_b sibling is re-appended (whole cluster kept)"
         );
     }
 
-    /// Tier A — BROKEN→SAFE: a PINNED revert onto the CALL node of a parallel
-    /// cluster used to dangle `call_b` (#77 F-5). Now call-atomic: call_a's
-    /// direct-child result is re-appended; call_b (abandoned) is dropped.
+    /// KC-02 F1(B) flip — a PINNED revert onto the CALL node of a parallel cluster
+    /// now RECLAIMS the WHOLE off-trunk cluster to the breadcrumb (was `[PAIR,DROP]`
+    /// re-appending call_a's direct-child; now `[DROP,DROP]` + crumb). SUPERSEDES
+    /// KC-01 §D1.2 (ADR-0002 §D2.1): off-trunk + tag-on-call-node → reclaim, never
+    /// re-append — the sealed-past sub-task is summarised uniformly.
     #[test]
     fn row_pinned_revert_to_call_node_now_call_atomic() {
         // Revert target = call node (n1). Trunk = [n0, n1]; both results off-trunk.
@@ -3268,14 +3323,19 @@ mod collapse_abandon_class_cluster_tests {
             !trunk_has_dangling_call(&collapsed),
             "pinned revert onto the call node must leave no dangling tool-call"
         );
-        // call_a's result (direct child of n1) is re-appended; call_b's is not.
+        // (B) BOTH off-trunk siblings are reclaimed (neither re-materialised).
         assert!(
-            trunk_has_tool_result(&collapsed, "pcall_a"),
-            "call_a's direct-child result is re-appended"
+            !trunk_has_tool_result(&collapsed, "pcall_a"),
+            "(B) call_a's result is reclaimed (call-node revert), NOT re-appended"
         );
         assert!(
             !trunk_has_tool_result(&collapsed, "pcall_b"),
-            "call_b's abandoned result is NOT re-materialised"
+            "(B) call_b's result is reclaimed, NOT re-appended"
+        );
+        // ...the whole cluster is summarised into the durable breadcrumb.
+        assert!(
+            trunk_has_breadcrumb(&collapsed, "reverted past: parallel cluster"),
+            "(B) the reclaimed call-node cluster keeps its durable breadcrumb"
         );
     }
 
@@ -3482,5 +3542,496 @@ mod collapse_abandon_class_cluster_tests {
             !trunk_has_dangling_call(&collapsed),
             "R3 pin-wins must leave no dangling tool-call"
         );
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // KC-02 (#80 / D-TEST-0075) — parallel-cluster pinned-revert keep/drop matrix.
+    //
+    // Promoted from the P0 §10 throwaway 32-cell matrix + 5 edge fixtures. F1(B):
+    // pinned-revert disposition is TARGET-AWARE — a revert onto the CALL node
+    // (sealed-past) RECLAIMS the whole abandoned cluster to the breadcrumb
+    // (`[DROP,…]`); a revert INTO the cluster (onto a RESULT node) KEEPS the WHOLE
+    // gathered cluster verbatim (every off-trunk sibling re-appended by call-node
+    // membership, `[PAIR,…]`); on-trunk results are ALWAYS kept (the load-bearing
+    // mid-trunk gate). Abandon-class is unchanged. No 400 in any cell. Cite
+    // ADR-0002 §D2.1–§D2.4 + P0 §10.2/§10.5.
+    // ───────────────────────────────────────────────────────────────────────
+
+    /// A PARALLEL assistant node carrying THREE heavy tool-calls (`a`,`b`,`c`) in
+    /// ONE assistant message (the arity-3 #80 shape).
+    fn multi_call_node_3(
+        call_a: &str,
+        call_b: &str,
+        call_c: &str,
+        ts: u64,
+        node: NodeId,
+        parent: Option<NodeId>,
+    ) -> AgentMessage {
+        AgentMessage::Llm(
+            LlmMessage::new(Message::Assistant {
+                content: vec![
+                    Content::Text {
+                        text: "I'll run three lookups in parallel.".to_string(),
+                    },
+                    Content::ToolCall {
+                        id: call_a.to_string(),
+                        name: "write_file".to_string(),
+                        arguments: serde_json::json!({ "path": "a.md", "content": "BODY-A" }),
+                    },
+                    Content::ToolCall {
+                        id: call_b.to_string(),
+                        name: "write_file".to_string(),
+                        arguments: serde_json::json!({ "path": "b.md", "content": "BODY-B" }),
+                    },
+                    Content::ToolCall {
+                        id: call_c.to_string(),
+                        name: "write_file".to_string(),
+                        arguments: serde_json::json!({ "path": "c.md", "content": "BODY-C" }),
+                    },
+                ],
+                stop_reason: StopReason::ToolUse,
+                model: "test".into(),
+                provider: "test".into(),
+                usage: Usage::default(),
+                timestamp: ts,
+                error_message: None,
+            })
+            .with_node_identity(node, parent),
+        )
+    }
+
+    /// #80 arity-3 parallel cluster: user (n0) → assistant `[a,b,c]` (n1) →
+    /// result_a (n2, parent n1) → result_b (n3, parent n2) → result_c (n4, parent
+    /// n3) — the LINEAR result chain. `active` selects the revert target node;
+    /// `tag` is attached to that target.
+    fn parallel_fixture_3(active: NodeId, target_idx: usize, kind: TagKind) -> AgentContext {
+        let mut ctx = AgentContext {
+            messages: vec![
+                user_node("do parallel work", 1, NodeId(0), None),
+                multi_call_node_3(
+                    "pcall_a",
+                    "pcall_b",
+                    "pcall_c",
+                    2,
+                    NodeId(1),
+                    Some(NodeId(0)),
+                ),
+                result_node("pcall_a", 3, NodeId(2), Some(NodeId(1))),
+                result_node("pcall_b", 4, NodeId(3), Some(NodeId(2))),
+                result_node("pcall_c", 5, NodeId(4), Some(NodeId(3))),
+            ],
+            next_node_id: 5,
+            active_node_id: Some(active),
+            ..Default::default()
+        };
+        tag_message(
+            &mut ctx.messages,
+            target_idx,
+            kind,
+            "reverted past: parallel cluster",
+        );
+        ctx
+    }
+
+    /// Does the rendered trunk carry an ORPHANED tool-result — a `ToolResult`
+    /// whose matching `ToolCall` is NOT present anywhere on the trunk? (The mirror
+    /// of `trunk_has_dangling_call`; together they are the no-400 invariant.)
+    fn trunk_has_orphan_result(trunk: &[AgentMessage]) -> bool {
+        let call_ids: std::collections::HashSet<&str> = trunk
+            .iter()
+            .filter_map(|m| match m {
+                AgentMessage::Llm(lm) => match &lm.message {
+                    Message::Assistant { content, .. } => Some(content),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .flat_map(|content| {
+                content.iter().filter_map(|b| match b {
+                    Content::ToolCall { id, .. } => Some(id.as_str()),
+                    _ => None,
+                })
+            })
+            .collect();
+        trunk.iter().any(|m| match m {
+            AgentMessage::Llm(lm) => match &lm.message {
+                Message::ToolResult { tool_call_id, .. } => {
+                    !call_ids.contains(tool_call_id.as_str())
+                }
+                _ => false,
+            },
+            _ => false,
+        })
+    }
+
+    /// Drive a fixture through the VERBATIM production render pipeline incl. the
+    /// final `enforce_call_atomic_backstop` orphan-filter — the same order
+    /// `agent_loop/streaming.rs:215-262` uses. This is what the matrix asserts on.
+    fn render_with_backstop(
+        ctx: &AgentContext,
+        policy: &super::super::node_tag::RevertRenderPolicy,
+        current_turn: u32,
+    ) -> Vec<AgentMessage> {
+        use crate::agent_loop::enforce_call_atomic_backstop;
+        let collapsed = render_pipeline(ctx, policy, current_turn);
+        enforce_call_atomic_backstop(collapsed)
+    }
+
+    /// The no-400 invariant: NO dangling call AND NO orphan result, ever.
+    fn assert_no_400(trunk: &[AgentMessage], cell: &str) {
+        assert!(
+            !trunk_has_dangling_call(trunk),
+            "{cell}: no dangling tool-call (no-400 invariant)"
+        );
+        assert!(
+            !trunk_has_orphan_result(trunk),
+            "{cell}: no orphan tool-result (no-400 invariant)"
+        );
+    }
+
+    /// Tier A — the 4 onto-CALL-node LOSS cells (completion + step-summary,
+    /// arity 2 + 3). Each RECLAIMS the whole off-trunk cluster: `[DROP,…]` + a
+    /// durable breadcrumb, symmetric, no dangling/orphan. P0 §10.2 Δ-fix rows.
+    #[test]
+    fn matrix_pinned_onto_call_node_reclaims_to_breadcrumb() {
+        for kind in [TagKind::Outcome, TagKind::Checkpoint] {
+            // arity-2: revert onto call node n1; both results off-trunk.
+            let ctx2 = parallel_fixture(NodeId(1), 1, kind);
+            let r2 = render_with_backstop(&ctx2, &in_window_policy(), IN_WINDOW_TURN);
+            assert!(
+                !trunk_has_tool_result(&r2, "pcall_a") && !trunk_has_tool_result(&r2, "pcall_b"),
+                "{kind:?} call-node a2: both off-trunk siblings reclaimed (DROP,DROP)"
+            );
+            assert!(
+                !trunk_has_any_tool_call(&r2),
+                "{kind:?} call-node a2: no surviving tool-call (whole cluster reclaimed)"
+            );
+            assert!(
+                trunk_has_breadcrumb(&r2, "reverted past: parallel cluster"),
+                "{kind:?} call-node a2: the reclaimed cluster keeps its breadcrumb"
+            );
+            assert_no_400(&r2, "pinned call-node a2");
+
+            // arity-3: revert onto call node n1; all three results off-trunk.
+            let ctx3 = parallel_fixture_3(NodeId(1), 1, kind);
+            let r3 = render_with_backstop(&ctx3, &in_window_policy(), IN_WINDOW_TURN);
+            assert!(
+                !trunk_has_tool_result(&r3, "pcall_a")
+                    && !trunk_has_tool_result(&r3, "pcall_b")
+                    && !trunk_has_tool_result(&r3, "pcall_c"),
+                "{kind:?} call-node a3: all three off-trunk siblings reclaimed (DROP,DROP,DROP)"
+            );
+            assert!(
+                trunk_has_breadcrumb(&r3, "reverted past: parallel cluster"),
+                "{kind:?} call-node a3: the reclaimed cluster keeps its breadcrumb"
+            );
+            assert_no_400(&r3, "pinned call-node a3");
+        }
+    }
+
+    /// Tier A — the 6 onto-RESULT-node LOSS cells (completion + step-summary;
+    /// first-result a2+a3, mid-result a3). Each KEEPS the WHOLE cluster: every
+    /// off-trunk sibling re-appended by call-node membership → `[PAIR,…]`, no
+    /// dangling/orphan. P0 §10.2 Δ-fix rows + §10.3.
+    #[test]
+    fn matrix_pinned_into_cluster_keeps_whole_cluster() {
+        for kind in [TagKind::Outcome, TagKind::Checkpoint] {
+            // a2 first-result: revert onto result_a (n2); result_b (n3) off-trunk.
+            let ctx2 = parallel_fixture(NodeId(2), 2, kind);
+            let r2 = render_with_backstop(&ctx2, &in_window_policy(), IN_WINDOW_TURN);
+            assert!(
+                trunk_has_tool_result(&r2, "pcall_a") && trunk_has_tool_result(&r2, "pcall_b"),
+                "{kind:?} first-result a2: whole cluster kept ([PAIR,PAIR])"
+            );
+            assert_no_400(&r2, "pinned first-result a2");
+
+            // a3 first-result: revert onto result_a (n2); b,c off-trunk grandchildren.
+            let ctx3f = parallel_fixture_3(NodeId(2), 2, kind);
+            let r3f = render_with_backstop(&ctx3f, &in_window_policy(), IN_WINDOW_TURN);
+            assert!(
+                trunk_has_tool_result(&r3f, "pcall_a")
+                    && trunk_has_tool_result(&r3f, "pcall_b")
+                    && trunk_has_tool_result(&r3f, "pcall_c"),
+                "{kind:?} first-result a3: whole cluster kept ([PAIR,PAIR,PAIR])"
+            );
+            assert_no_400(&r3f, "pinned first-result a3");
+
+            // a3 mid-result: revert onto result_b (n3); a,b on-trunk, c off-trunk
+            // past the tip → re-appended by membership → whole cluster kept.
+            let ctx3m = parallel_fixture_3(NodeId(3), 3, kind);
+            let r3m = render_with_backstop(&ctx3m, &in_window_policy(), IN_WINDOW_TURN);
+            assert!(
+                trunk_has_tool_result(&r3m, "pcall_a")
+                    && trunk_has_tool_result(&r3m, "pcall_b")
+                    && trunk_has_tool_result(&r3m, "pcall_c"),
+                "{kind:?} mid-result a3: the off-trunk sibling past the tip is re-appended"
+            );
+            assert_no_400(&r3m, "pinned mid-result a3");
+        }
+    }
+
+    /// Tier A — explicit on-trunk-keep gate probe (clause i). A pinned cluster the
+    /// model continued PAST (results on-trunk) is kept verbatim — NEVER reclaimed.
+    /// This is the load-bearing gate without which `pinned_cluster_mid_trunk_
+    /// kept_verbatim` regresses (P0 §10.6 / §10.8 surprise #1).
+    #[test]
+    fn matrix_on_trunk_pinned_cluster_kept_always() {
+        for kind in [TagKind::Outcome, TagKind::Checkpoint] {
+            // last-result a2: revert onto result_b (n3); BOTH results on-trunk.
+            let ctx = parallel_fixture(NodeId(3), 3, kind);
+            let r = render_with_backstop(&ctx, &in_window_policy(), IN_WINDOW_TURN);
+            assert!(
+                trunk_has_tool_result(&r, "pcall_a") && trunk_has_tool_result(&r, "pcall_b"),
+                "{kind:?} last-result a2: on-trunk cluster kept verbatim (gate)"
+            );
+            assert!(
+                trunk_has_any_tool_call(&r),
+                "{kind:?} last-result a2: the on-trunk calls are kept (not reclaimed)"
+            );
+            assert_no_400(&r, "pinned last-result a2 (on-trunk gate)");
+
+            // last-result a3: revert onto result_c (n4); all three results on-trunk.
+            let ctx3 = parallel_fixture_3(NodeId(4), 4, kind);
+            let r3 = render_with_backstop(&ctx3, &in_window_policy(), IN_WINDOW_TURN);
+            assert!(
+                trunk_has_tool_result(&r3, "pcall_a")
+                    && trunk_has_tool_result(&r3, "pcall_b")
+                    && trunk_has_tool_result(&r3, "pcall_c"),
+                "{kind:?} last-result a3: all on-trunk results kept verbatim (gate)"
+            );
+            assert_no_400(&r3, "pinned last-result a3 (on-trunk gate)");
+        }
+    }
+
+    /// Tier B — abandon-class onto-call-node + first-result is SYMMETRIC: the
+    /// whole cluster collapses to the breadcrumb (`[DROP,…]`, no surviving call).
+    /// The (B) branch is in the PINNED arm only — abandon-class is byte-identical
+    /// pre/post-(B) (P0 §10.4). 8 symmetric abandon cells (failure+tangent ×
+    /// {call-node,first-result} × {a2,a3}).
+    #[test]
+    fn matrix_abandon_class_call_node_first_result_symmetric() {
+        for kind in [TagKind::Lesson, TagKind::Finding] {
+            // a2 call-node + first-result.
+            for (active, target) in [(NodeId(1), 1usize), (NodeId(2), 2usize)] {
+                let ctx = parallel_fixture(active, target, kind);
+                let r = render_with_backstop(&ctx, &in_window_policy(), IN_WINDOW_TURN);
+                assert!(
+                    !trunk_has_any_tool_call(&r),
+                    "{kind:?} a2 target {target}: abandon collapses the whole cluster"
+                );
+                assert!(
+                    trunk_has_breadcrumb(&r, "reverted past: parallel cluster"),
+                    "{kind:?} a2 target {target}: breadcrumb survives"
+                );
+                assert_no_400(&r, "abandon a2");
+            }
+            // a3 call-node + first-result.
+            for (active, target) in [(NodeId(1), 1usize), (NodeId(2), 2usize)] {
+                let ctx = parallel_fixture_3(active, target, kind);
+                let r = render_with_backstop(&ctx, &in_window_policy(), IN_WINDOW_TURN);
+                assert!(
+                    !trunk_has_any_tool_call(&r),
+                    "{kind:?} a3 target {target}: abandon collapses the whole cluster"
+                );
+                assert_no_400(&r, "abandon a3");
+            }
+        }
+    }
+
+    /// Tier B — the abandon-class ASYMMETRIC cells are BENIGN (target-position
+    /// effects, not the #80 keep-first/drop-rest leak): surviving siblings are
+    /// LIVE on-trunk; the abandoned tail is reclaimed; no silent loss, no 400
+    /// (P0 F-4). last-result a2; mid/last-result a3.
+    #[test]
+    fn matrix_abandon_class_asymmetry_is_benign() {
+        for kind in [TagKind::Lesson, TagKind::Finding] {
+            // a2 last-result: revert onto result_b (n3); a,b live on-trunk, the
+            // abandoned tip is the tag target itself → whole cluster collapses
+            // (the tip IS the cluster's last node).
+            let ctx2 = parallel_fixture(NodeId(3), 3, kind);
+            let r2 = render_with_backstop(&ctx2, &in_window_policy(), IN_WINDOW_TURN);
+            assert_no_400(&r2, "abandon last-result a2");
+
+            // a3 mid-result: revert onto result_b (n3); a,b on-trunk live, c
+            // (off-trunk tail) reclaimed → [PAIR,PAIR,DROP], no orphan.
+            let ctx3 = parallel_fixture_3(NodeId(3), 3, kind);
+            let r3 = render_with_backstop(&ctx3, &in_window_policy(), IN_WINDOW_TURN);
+            assert!(
+                !trunk_has_tool_result(&r3, "pcall_c"),
+                "{kind:?} mid-result a3: the abandoned tail c is reclaimed (not kept)"
+            );
+            assert_no_400(&r3, "abandon mid-result a3");
+
+            // a3 last-result: revert onto result_c (n4); all live on-trunk.
+            let ctx3l = parallel_fixture_3(NodeId(4), 4, kind);
+            let r3l = render_with_backstop(&ctx3l, &in_window_policy(), IN_WINDOW_TURN);
+            assert_no_400(&r3l, "abandon last-result a3");
+        }
+    }
+
+    /// Tier B — pinned no-loss post-cluster: a sequential follow-on AFTER a
+    /// fully-on-trunk pinned cluster; a pinned revert onto the post-cluster node
+    /// leaves the upstream cluster untouched ([PAIR,PAIR]).
+    #[test]
+    fn matrix_pinned_last_result_and_post_cluster_no_loss() {
+        // user(n0) → [a,b](n1) → r_a(n2) → r_b(n3) → seq CALL(n4) → seq result(n5).
+        // Pinned revert onto the post-cluster seq result n5: the upstream parallel
+        // cluster is fully on-trunk → kept verbatim.
+        for kind in [TagKind::Outcome, TagKind::Checkpoint] {
+            let mut ctx = AgentContext {
+                messages: vec![
+                    user_node("do work then continue", 1, NodeId(0), None),
+                    multi_call_node("pcall_a", "pcall_b", 2, NodeId(1), Some(NodeId(0))),
+                    result_node("pcall_a", 3, NodeId(2), Some(NodeId(1))),
+                    result_node("pcall_b", 4, NodeId(3), Some(NodeId(2))),
+                    tool_call_node("seq_c", "SEQ-BODY", 5, NodeId(4), Some(NodeId(3))),
+                    result_node("seq_c", 6, NodeId(5), Some(NodeId(4))),
+                ],
+                next_node_id: 6,
+                active_node_id: Some(NodeId(5)),
+                ..Default::default()
+            };
+            tag_message(&mut ctx.messages, 5, kind, "reverted past: post-cluster");
+            let r = render_with_backstop(&ctx, &in_window_policy(), IN_WINDOW_TURN);
+            assert!(
+                trunk_has_tool_result(&r, "pcall_a") && trunk_has_tool_result(&r, "pcall_b"),
+                "{kind:?} post-cluster: the upstream parallel cluster is kept verbatim"
+            );
+            assert_no_400(&r, "pinned post-cluster");
+        }
+    }
+
+    /// Tier C — EDGE-4 genuine post-cluster follow-on (P0 §10.5). A SEQUENTIAL
+    /// follow-on after a parallel cluster; a pinned revert onto the cluster's
+    /// FIRST result re-appends the cluster siblings (by membership) but DROPS the
+    /// sealed-past sequential follow-on (its `tool_call_id ∉ the cluster's calls`).
+    #[test]
+    fn edge_post_cluster_followon_dropped() {
+        // user(n0) → [pc_0,pc_1](n1) → r0(n2) → r1(n3) → seq CALL(n4) → seq r(n5).
+        // Pinned revert onto r0 (n2): trunk = [n0,n1,n2]; r1,seq off-trunk.
+        let mut ctx = AgentContext {
+            messages: vec![
+                user_node("parallel then sequential", 1, NodeId(0), None),
+                multi_call_node("pc_0", "pc_1", 2, NodeId(1), Some(NodeId(0))),
+                result_node("pc_0", 3, NodeId(2), Some(NodeId(1))),
+                result_node("pc_1", 4, NodeId(3), Some(NodeId(2))),
+                tool_call_node("seq_c", "SEQ-BODY", 5, NodeId(4), Some(NodeId(3))),
+                result_node("seq_c", 6, NodeId(5), Some(NodeId(4))),
+            ],
+            next_node_id: 6,
+            active_node_id: Some(NodeId(2)),
+            ..Default::default()
+        };
+        tag_message(
+            &mut ctx.messages,
+            2,
+            TagKind::Outcome,
+            "reverted past: parallel cluster",
+        );
+        let r = render_with_backstop(&ctx, &in_window_policy(), IN_WINDOW_TURN);
+        // pc_0 on-trunk (kept); pc_1 re-appended by membership (whole cluster).
+        assert!(
+            trunk_has_tool_result(&r, "pc_0") && trunk_has_tool_result(&r, "pc_1"),
+            "the cluster siblings are kept whole (membership re-append)"
+        );
+        // The sealed-past sequential follow-on is DROPPED (not a cluster member).
+        assert!(
+            !trunk_has_tool_result(&r, "seq_c"),
+            "the sealed-past sequential follow-on is dropped (membership distinguishes it)"
+        );
+        assert_no_400(&r, "edge post-cluster follow-on");
+    }
+
+    /// Tier C — EDGE-5 mixed on/off-trunk (P0 §10.5). An arity-3 pinned revert
+    /// onto the MID result re-appends the off-trunk sibling PAST the revert tip
+    /// (not just those before it) → whole cluster survives.
+    #[test]
+    fn edge_mixed_on_off_trunk() {
+        // revert onto result_b (n3): a,b on-trunk, c (n4) off-trunk past the tip.
+        let ctx = parallel_fixture_3(NodeId(3), 3, TagKind::Outcome);
+        let r = render_with_backstop(&ctx, &in_window_policy(), IN_WINDOW_TURN);
+        assert!(
+            trunk_has_tool_result(&r, "pcall_a")
+                && trunk_has_tool_result(&r, "pcall_b")
+                && trunk_has_tool_result(&r, "pcall_c"),
+            "the off-trunk sibling past the revert tip is re-appended (whole cluster)"
+        );
+        assert_no_400(&r, "edge mixed on/off-trunk");
+    }
+
+    /// Tier C — TWO-CLUSTER isolation (P0 §10.5 / §10.8 surprise #4). An upstream
+    /// continued-past pinned cluster (on-trunk) stays verbatim while the tip
+    /// cluster re-appends its off-trunk sibling — no cross-cluster interaction.
+    #[test]
+    fn edge_two_cluster_isolation() {
+        // user(n0) → cluster1 [c1a,c1b](n1) → r1a(n2) → r1b(n3) [on-trunk] →
+        // cluster2 [c2a,c2b](n4) → r2a(n5) → r2b(n6, off-trunk).
+        // Pinned revert onto cluster2's first result r2a (n5): trunk through n5;
+        // r2b off-trunk. cluster1 fully on-trunk (continued past) → kept verbatim.
+        let mut ctx = AgentContext {
+            messages: vec![
+                user_node("two parallel clusters", 1, NodeId(0), None),
+                multi_call_node("c1a", "c1b", 2, NodeId(1), Some(NodeId(0))),
+                result_node("c1a", 3, NodeId(2), Some(NodeId(1))),
+                result_node("c1b", 4, NodeId(3), Some(NodeId(2))),
+                multi_call_node("c2a", "c2b", 5, NodeId(4), Some(NodeId(3))),
+                result_node("c2a", 6, NodeId(5), Some(NodeId(4))),
+                result_node("c2b", 7, NodeId(6), Some(NodeId(5))),
+            ],
+            next_node_id: 7,
+            active_node_id: Some(NodeId(5)),
+            ..Default::default()
+        };
+        tag_message(
+            &mut ctx.messages,
+            5,
+            TagKind::Outcome,
+            "reverted past: parallel cluster",
+        );
+        let r = render_with_backstop(&ctx, &in_window_policy(), IN_WINDOW_TURN);
+        // cluster1 kept verbatim (both results on-trunk).
+        assert!(
+            trunk_has_tool_result(&r, "c1a") && trunk_has_tool_result(&r, "c1b"),
+            "upstream continued-past cluster1 is kept verbatim"
+        );
+        // cluster2 whole: c2a on-trunk + c2b re-appended by membership.
+        assert!(
+            trunk_has_tool_result(&r, "c2a") && trunk_has_tool_result(&r, "c2b"),
+            "tip cluster2 survives whole (c2b re-appended), no cross-cluster bleed"
+        );
+        assert_no_400(&r, "edge two-cluster isolation");
+    }
+
+    /// Tier C — the no-400 invariant across the load-bearing cells: NO dangling
+    /// call AND NO orphan result for every category × the call-node + result-node
+    /// targets at arity 2 + 3 (the cells the disposition actually touches). The
+    /// backstop guarantee (ADR-0002 §D2.4; P0 F-1 / §10.4).
+    #[test]
+    fn matrix_no_dangling_or_orphan_across_all_cells() {
+        let kinds = [
+            TagKind::Lesson,
+            TagKind::Finding,
+            TagKind::Outcome,
+            TagKind::Checkpoint,
+        ];
+        for kind in kinds {
+            // arity-2: every revert target node 1..=3.
+            for (active, target) in [(NodeId(1), 1usize), (NodeId(2), 2), (NodeId(3), 3)] {
+                let ctx = parallel_fixture(active, target, kind);
+                let r = render_with_backstop(&ctx, &in_window_policy(), IN_WINDOW_TURN);
+                assert_no_400(&r, "no-400 a2 sweep");
+            }
+            // arity-3: every revert target node 1..=4.
+            for (active, target) in [
+                (NodeId(1), 1usize),
+                (NodeId(2), 2),
+                (NodeId(3), 3),
+                (NodeId(4), 4),
+            ] {
+                let ctx = parallel_fixture_3(active, target, kind);
+                let r = render_with_backstop(&ctx, &in_window_policy(), IN_WINDOW_TURN);
+                assert_no_400(&r, "no-400 a3 sweep");
+            }
+        }
     }
 }

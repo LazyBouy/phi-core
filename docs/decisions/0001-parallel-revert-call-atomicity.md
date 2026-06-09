@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-06-09 by Claude Code (amended at KC-02 #80: §D1.2's M=1 re-append + M=1 keep-whole superseded-in-part by ADR-0002 §D2.1 — pinned-revert disposition is now target-aware) -->
 <!-- Last verified: 2026-06-08 by Claude Code (KC-01 #77/D-TEST-0072 — phi-core ADR-0001, first phi-core ADR; call-atomic render) -->
 
 # phi-core ADR-0001 — Parallel-revert call-atomicity (call-atomic render)
@@ -35,6 +36,8 @@ KC-01 makes the revert render **call-atomic**: drop/keep PER CALL keyed on the n
 *Net-new surface* (no prior behaviour to preserve at this granularity): the native `Content::ToolCall.id` ↔ `Message::ToolResult.tool_call_id` join (`content.rs:143`, populated verbatim at ingest, P0 F-7) existed but was not session-namespaced. KC-01 consumes that native join and namespaces it with the already-session-unique `node_id`: a call's result is "live for call `(node_X, id)`" iff a `ToolResult{tool_call_id == id}` is on the trunk; an off-trunk result is re-appendable iff `result.parent_id == node_X` (direct child of THIS call node). The composite makes the direct-child test collision-proof against an id-reuse provider (MockProvider `mock-tool-{i}`, #77 F-8). An id-less call gets a deterministic synthetic id `format!("synth-{node_id}-{idx}")` so every call carries a join key. NO new persisted field; NO change to provider id semantics — the namespacing is render-internal only.
 
 ### §D1.2 — R1 per-call retain
+
+> Superseded-in-part by ADR-0002 §D2.1 (2026-06-09): pinned-revert disposition is target-aware — onto-call-node reclaims (drop, no re-append); into-cluster re-appends siblings by call-node membership (not the direct-child gate). KC-01's M=1-byte-identical no longer holds for the pinned-onto-call-node / into-cluster sub-cases.
 
 **Pre-existing-behaviour:** `collapse_abandon_class_cluster` shipped whole-node `content.clear()` (former `:546`/`:575`) and a first-call-only pinned re-append (former `:628-646`) at CC-18 / #73. KC-01 replaces the pinned re-append with id-keyed PER-CALL removal: a pinned assistant node emits only the calls whose result is live on the trunk (or re-appendable as a direct child); a call whose result was abandoned (off-trunk, not a direct child) is dropped. The M=1 single-call path is preserved byte-identical (the SAFE regression rows guard it — `row_revert_to_last_result_stays_safe`, `pinned_class_keeps_cluster_whole_no_dangling_call`).
 
