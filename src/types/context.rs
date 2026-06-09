@@ -43,7 +43,10 @@ fn append_annotation_to_message(message: &mut super::content::Message, annotatio
         | Message::ToolResult { content, .. } => content,
     };
     match content.first_mut() {
-        Some(Content::Text { text }) => *text = format!("{text} {annotation}"),
+        // Newline (not a space) so the revert breadcrumb renders on its OWN line
+        // after the node's remaining original content — both on the wire and in
+        // the rendered transcript (one render path).
+        Some(Content::Text { text }) => *text = format!("{text}\n{annotation}"),
         _ => content.insert(
             0,
             Content::Text {
@@ -905,7 +908,7 @@ impl AgentContext {
     /// This bakes both into the content, in place, so they survive to the wire:
     /// - each `Llm` message carrying a `node_id` gets a leading `[n<id>]` marker;
     /// - each surviving [`NodeTag`](super::node_tag::NodeTag) renders right after
-    ///   the marker as `[<kind>: <text>]` (e.g. `[lesson: …]` / `[checkpoint: …]`).
+    ///   the marker as `[<kind>: <text>]` (e.g. `[revert-lesson: …]` / `[revert-checkpoint: …]`).
     ///
     /// Caller contract: invoke ONLY on the revert-mode trunk path
     /// (`active_node_id.is_some()`), after `build_trunk_context_with_policy` has
@@ -952,7 +955,7 @@ impl AgentContext {
                         // SINGLE label (KC-03): the `[<kind>: …]` label already
                         // names the revert kind, so strip the breadcrumb's own
                         // `reverted past: ` prefix to avoid the
-                        // `[outcome: reverted past: …]` double-label.
+                        // `[revert-outcome: reverted past: …]` double-label.
                         let text = tag
                             .text
                             .strip_prefix("reverted past: ")
@@ -1622,7 +1625,7 @@ mod build_trunk_context_tests {
         let text = first_text(&woven[0]);
         assert!(text.starts_with("[n7]"), "marker missing: {text}");
         assert!(
-            text.contains("[lesson: npm is denied; do not retry]"),
+            text.contains("[revert-lesson: npm is denied; do not retry]"),
             "lesson annotation missing: {text}"
         );
         assert!(
@@ -1672,7 +1675,7 @@ mod build_trunk_context_tests {
         let woven = AgentContext::weave_braking_annotations(vec![am]);
         let text = first_text(&woven[0]);
         let occurrences = text
-            .matches("[lesson: approach v1 was tangential, restarting]")
+            .matches("[revert-lesson: approach v1 was tangential, restarting]")
             .count();
         assert_eq!(
             occurrences, 1,
@@ -1695,12 +1698,12 @@ mod build_trunk_context_tests {
         let woven = AgentContext::weave_braking_annotations(vec![am]);
         let text = first_text(&woven[0]);
         assert_eq!(
-            text.matches("[lesson: npm denied]").count(),
+            text.matches("[revert-lesson: npm denied]").count(),
             1,
             "interleaved identical lesson must render once: {text}"
         );
         assert!(
-            text.contains("[finding: registry is slow]"),
+            text.contains("[revert-finding: registry is slow]"),
             "the interleaved distinct finding must still render: {text}"
         );
     }
@@ -1715,8 +1718,8 @@ mod build_trunk_context_tests {
         }
         let woven = AgentContext::weave_braking_annotations(vec![am]);
         let text = first_text(&woven[0]);
-        assert!(text.contains("[lesson: npm denied]"), "{text}");
-        assert!(text.contains("[lesson: yarn denied]"), "{text}");
+        assert!(text.contains("[revert-lesson: npm denied]"), "{text}");
+        assert!(text.contains("[revert-lesson: yarn denied]"), "{text}");
     }
 
     #[test]
@@ -1743,7 +1746,7 @@ mod build_trunk_context_tests {
         let tip_text = first_text(&woven[1]);
         assert!(
             tip_text.starts_with("[n1]")
-                && tip_text.contains("[lesson: v1 was tangential, restarting]"),
+                && tip_text.contains("[revert-lesson: v1 was tangential, restarting]"),
             "tip keeps its marker + lesson tag: {tip_text}"
         );
         assert!(
@@ -1917,7 +1920,7 @@ mod build_trunk_context_tests {
             "the pointer must reference the tip node n7: {text}"
         );
         assert!(
-            text.contains("[finding: …") && text.contains("(grep_search abandoned)]"),
+            text.contains("[revert-finding: …") && text.contains("(grep_search abandoned)]"),
             "the gloss must use the NEWEST tag's label + tail: {text}"
         );
         assert!(
@@ -1951,7 +1954,7 @@ mod build_trunk_context_tests {
             text.starts_with(CONTINUE_AFTER_REVERT_MARKER)
                 && text.contains("reverted to node n1")
                 && text.contains("at n1")
-                && text.contains("[lesson: …")
+                && text.contains("[revert-lesson: …")
                 && text.contains("(write_file abandoned)]"),
             "the steering message points at n1 + the lesson gloss after the tool-result tip: {text}"
         );
@@ -2012,10 +2015,10 @@ mod build_trunk_context_tests {
         // (`lesson`/`finding`/`outcome`/`checkpoint`), not the raw RevertCategory
         // word — and it matches the tip tag's kind across all four categories.
         for (kind, expected_label) in [
-            (TagKind::Lesson, "lesson"),
-            (TagKind::Finding, "finding"),
-            (TagKind::Outcome, "outcome"),
-            (TagKind::Checkpoint, "checkpoint"),
+            (TagKind::Lesson, "revert-lesson"),
+            (TagKind::Finding, "revert-finding"),
+            (TagKind::Outcome, "revert-outcome"),
+            (TagKind::Checkpoint, "revert-checkpoint"),
         ] {
             let mut tip = assistant("reverted here", 1, NodeId(2), None);
             if let AgentMessage::Llm(lm) = &mut tip {
@@ -2047,7 +2050,7 @@ mod build_trunk_context_tests {
         let text = first_text(&out[1]);
         // The elision happened (a `…` is present) and the parenthetical survived.
         assert!(
-            text.contains("[lesson: …") && text.contains("(write_file abandoned)]"),
+            text.contains("[revert-lesson: …") && text.contains("(write_file abandoned)]"),
             "the gloss must be head-elided with the parenthetical surviving: {text}"
         );
         // The FULL middle of the breadcrumb is absent.
@@ -2070,7 +2073,7 @@ mod build_trunk_context_tests {
         let out = AgentContext::inject_continue_after_revert(woven, 1, 3);
         let text = first_text(&out[1]);
         assert!(
-            text.contains("[finding: reverted past: short summary]"),
+            text.contains("[revert-finding: reverted past: short summary]"),
             "a short no-parenthetical breadcrumb is glossed verbatim (no …): {text}"
         );
         assert!(
@@ -2093,11 +2096,11 @@ mod build_trunk_context_tests {
         let woven = AgentContext::weave_braking_annotations(vec![tip]);
         let out = AgentContext::inject_continue_after_revert(woven, 1, 3);
         assert_eq!(out.len(), 2, "in-window → steering emitted after the tip");
-        // The tip (index 0) carries the woven [n9] marker + the [lesson: …] note.
+        // The tip (index 0) carries the woven [n9] marker + the [revert-lesson: …] note.
         let tip_text = first_text(&out[0]);
         assert!(
             tip_text.starts_with("[n9]")
-                && tip_text.contains("[lesson: v1 plan-file approach abandoned]"),
+                && tip_text.contains("[revert-lesson: v1 plan-file approach abandoned]"),
             "the tip node carries the woven [n9] marker + the full on-node annotation: {tip_text}"
         );
         // The steering pointer (index 1) references THAT SAME node (n9).
@@ -2646,7 +2649,7 @@ mod collapse_abandon_class_cluster_tests {
         // The minimax shape end-to-end (collapse → weave → inject): the model
         // reverts onto a tool-RESULT tip carrying an abandon-class Lesson
         // breadcrumb. After the atomic collapse + weave + inject, the rendered
-        // output is a single surviving assistant node carrying `[lesson: …
+        // output is a single surviving assistant node carrying `[revert-lesson: …
         // write_file …]` (NO `Message::ToolResult`) FOLLOWED BY a separate
         // decaying `[continue_after_revert]` synthetic user message.
         let mut ctx = fixture_59_tool_result_tip();
@@ -2693,7 +2696,7 @@ mod collapse_abandon_class_cluster_tests {
             .find_map(assistant_text)
             .expect("a surviving assistant node must carry woven content");
         assert!(
-            tip_text.contains("[lesson:") && tip_text.contains("write_file abandoned"),
+            tip_text.contains("[revert-lesson:") && tip_text.contains("write_file abandoned"),
             "the surviving assistant node must carry the lesson breadcrumb: {tip_text}"
         );
         assert!(
@@ -4232,13 +4235,13 @@ mod collapse_abandon_class_cluster_tests {
             NodeId(3),
         );
         assert!(
-            pinned_text.contains("Wrote 356 bytes") && pinned_text.contains("[outcome:"),
+            pinned_text.contains("Wrote 356 bytes") && pinned_text.contains("[revert-outcome:"),
             "pinned ADDS the summary while keeping X's content: {pinned_text}"
         );
     }
 
     /// Tier A (render nit — single label) — the breadcrumb carries ONE label, not
-    /// the `[outcome: reverted past: …]` double-label, on the rendered node. The
+    /// the `[revert-outcome: reverted past: …]` double-label, on the rendered node. The
     /// `reverted past: ` prefix on the tag text is stripped at weave time.
     #[test]
     fn revert_breadcrumb_single_label_not_double() {
@@ -4249,8 +4252,8 @@ mod collapse_abandon_class_cluster_tests {
             NodeId(3),
         );
         assert!(
-            text.contains("[outcome: parallel cluster]"),
-            "single label `[outcome: parallel cluster]`: {text}"
+            text.contains("[revert-outcome: parallel cluster]"),
+            "single label `[revert-outcome: parallel cluster]`: {text}"
         );
         assert!(
             !text.contains("reverted past:"),

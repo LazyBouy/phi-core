@@ -1,4 +1,4 @@
-<!-- Last verified: 2026-06-09 by Claude Code (KC-03 #81: the pinned-revert disposition is now the SIMPLE TAIL-SHRINK CONTRACT — every node strictly after X is shrunk (R1), pinned ADDS the summary after X's kept content / abandon REPLACES it (R2/R2a), the orphan paired call is removed by id (R3); the pinned arm converges to the abandon arm; cite ADR-0003 §D3.1, which SUPERSEDES ADR-0002 §D2.1's result-node keep-whole re-append) -->
+<!-- Last verified: 2026-06-09 by Claude Code (KC-03 #81: the pinned-revert disposition is now the SIMPLE TAIL-SHRINK CONTRACT — every node strictly after X is shrunk (R1), pinned ADDS the summary after X's kept content / abandon REPLACES it (R2/R2a), the orphan paired call is removed by id (R3); the pinned arm converges to the abandon arm; cite ADR-0003 §D3.1, which SUPERSEDES ADR-0002 §D2.1's result-node keep-whole re-append; render-polish follow-up: the on-node tag label is now the revert--prefixed rendered_label() form (e.g. [revert-lesson]) + the breadcrumb appends on its OWN line after the original content) -->
 <!-- Last verified: 2026-06-09 by Claude Code (KC-02 #80: pinned-revert disposition is now TARGET-AWARE — call-node reclaims to the breadcrumb, result-node keeps the whole gathered cluster; the 32-cell matrix is the binding semantics; cite ADR-0002 §D2.1) -->
 <!-- Last verified: 2026-06-08 by Claude Code (KC-01 #77: co-keep constraint now enforced CALL-ATOMICALLY at the revert render locus; concept exploration, not yet a binding spec) -->
 
@@ -333,7 +333,7 @@ A braked trunk accumulates only real work → it crosses the compaction threshol
 
 ```
 [ID: n10] User: Write a fast sorting algorithm.
-   ↳ [lesson] evidence: bubble sort (O(n²)) timed out on this input
+   ↳ [revert-lesson] evidence: bubble sort (O(n²)) timed out on this input
 ```
 
 #### Kind-aware render policy — and the load-bearing asymmetry

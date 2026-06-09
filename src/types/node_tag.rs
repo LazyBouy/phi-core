@@ -133,10 +133,10 @@ impl TagKind {
     /// REFERENCED by the steering pointer are identical by construction.
     pub fn rendered_label(self) -> &'static str {
         match self {
-            Self::Lesson => "lesson",
-            Self::Finding => "finding",
-            Self::Outcome => "outcome",
-            Self::Checkpoint => "checkpoint",
+            Self::Lesson => "revert-lesson",
+            Self::Finding => "revert-finding",
+            Self::Outcome => "revert-outcome",
+            Self::Checkpoint => "revert-checkpoint",
         }
     }
 }
@@ -244,10 +244,10 @@ mod tests {
         // CC-19: the single source of truth for the kind→label mapping — shared
         // by `weave_braking_annotations` (on-node `[label: text]`) and
         // `inject_continue_after_revert` (the steering pointer's `[label: …]`).
-        assert_eq!(TagKind::Lesson.rendered_label(), "lesson");
-        assert_eq!(TagKind::Finding.rendered_label(), "finding");
-        assert_eq!(TagKind::Outcome.rendered_label(), "outcome");
-        assert_eq!(TagKind::Checkpoint.rendered_label(), "checkpoint");
+        assert_eq!(TagKind::Lesson.rendered_label(), "revert-lesson");
+        assert_eq!(TagKind::Finding.rendered_label(), "revert-finding");
+        assert_eq!(TagKind::Outcome.rendered_label(), "revert-outcome");
+        assert_eq!(TagKind::Checkpoint.rendered_label(), "revert-checkpoint");
     }
 
     #[test]

@@ -1512,10 +1512,10 @@ mod apply_revert_tests {
         );
         // KC-03 single-label: the woven render carries the breadcrumb as a SINGLE
         // `[<kind>: …]` label — the tag's own `reverted past: ` prefix is stripped
-        // at weave time to avoid the `[lesson: reverted past: …]` double-label
+        // at weave time to avoid the `[revert-lesson: reverted past: …]` double-label
         // (ADR-0003 §D3.2). The breadcrumb summary itself still survives.
         assert!(
-            all_text.contains("[lesson: wrote plan-v1.md"),
+            all_text.contains("[revert-lesson: wrote plan-v1.md"),
             "the one-line breadcrumb must survive into the trunk (single-label): {all_text}"
         );
     }
