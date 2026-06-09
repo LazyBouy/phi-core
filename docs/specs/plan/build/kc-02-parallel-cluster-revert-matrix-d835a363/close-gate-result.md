@@ -6,9 +6,13 @@
 **Harness:** i-phi HTC daemon (phi-e2e worktree `dev-v0-e2e`), release-rebuilt against patched phi-core 0.11.4 (`ba1244c`) via the `[patch.crates-io]` path. Cycle folder: `i-phi/docs/e2e-test/cycles/kc02-close-gate-d835a363/`.
 **Per `[[feedback_render_transcript_close_gate]]`:** every cell's rendered per-turn wire context was READ (not just "wire produced"). **Per `[[feedback_htc_cohort_strongest_open_source]]`:** both strongest-available open-source drivers exercised.
 
-## Verdict: PASS
+## ⚠️ CORRECTION (2026-06-09, user-surfaced) — this PASS validated the WRONG invariant
 
-The (B) target-aware pinned-revert disposition holds **live, end-to-end, on real providers**, across both new dispositions and both drivers. **Zero provider 400 across all 27 turns. Zero silent loss. The exact #80 defect is demonstrably fixed.**
+**Superseded by [D-TEST-0076 / #81].** On user review of `KC02-RECLAIM` turn-3 **request.json**, the (B) semantics this gate "passed" are themselves a misread of the intended revert contract. The wire shows that a `completion` revert onto result-node `n1` does **not** shrink the post-target tail: the sibling result `n2` (skill_help) survives in full, with its tool_call still in `n0`, while the breadcrumb claims `skill_help abandoned`. The intended contract is the simple **Rule 1 shrink-tail / Rule 2 abandon-replace-vs-pinned-add / Rule 3 surgical-call-removal-by-id** model — NOT (B)'s "keep-whole-cluster-on-result-node" re-append. This gate's checks (no-400, no-orphan, facts-present) are all true but do **not** verify the disposition, so they read PASS over a wrong behavior. The fix is a new cycle (re-implement to the simple contract, re-author the unit matrix, update the `revert_to_state` tool docs, re-run a disposition-asserting close-gate). The "Verdict: PASS" below is retained verbatim for the audit trail but is **NOT** authoritative — see D-TEST-0076.
+
+## Verdict: PASS [RETRACTED — see CORRECTION above]
+
+The (B) target-aware pinned-revert disposition holds **live, end-to-end, on real providers**, across both new dispositions and both drivers. **Zero provider 400 across all 27 turns. Zero silent loss. The exact #80 defect is demonstrably fixed.** *(Retained for the audit trail; superseded — the no-400/no-orphan invariant was the wrong bar; the disposition itself is wrong per D-TEST-0076.)*
 
 ## Cells
 
