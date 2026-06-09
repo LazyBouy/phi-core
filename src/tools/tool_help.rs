@@ -132,7 +132,10 @@ revert_to_state — rewind the conversation tree and resume forward.
 MENTAL MODEL
   The conversation is a TREE of nodes. Each assistant/tool step is a node,
   tagged inline in the messages as [n0], [n1], [n2], … in order. Those inline
-  tags ARE the nodes — the `step` argument names one of them.
+  tags ARE the nodes — the `step` argument names one of them. The `[nN]` tags
+  are assigned by the system as it records each step; you only READ them to
+  pick a `step`. Do NOT write `[nN]` tags yourself in your replies — the system
+  prepends the next one for you; emitting your own just adds a wrong, stale id.
 
 WHAT IT DOES
   Naming a node X in `step` makes it the new tip. The simple contract:
