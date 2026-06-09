@@ -819,16 +819,30 @@ fn apply_revert(
     // only the tool-call names + the summary. General braking-machinery merit:
     // any consumer reverting repeatedly keeps a progress thread.
     //
-    // Name SOURCE-SET (F-breadcrumb-tool-source REFINED, 0.11): the abandoned
-    // work is sometimes ON the TARGET node itself, not strictly after it. The
-    // #59 shape is a revert whose `step` names the heavy `write_file` CALL node:
-    // the abandoned `write_file` is the target node's OWN ToolCall, and the
-    // strictly-after span carries only the `revert_to_state` call — so the old
-    // strictly-after-only walk mislabels the breadcrumb `revert_to_state
-    // abandoned`. We therefore seed the name set with the TARGET cluster's own
-    // tool-call name(s) FIRST (the work the model reverted ONTO + abandoned),
-    // then add the strictly-after span. Pure no-op when the target is a User /
-    // text-only Assistant / tool-result (no ToolCall on the target).
+    // Name SOURCE-SET (F-breadcrumb-tool-source REFINED, 0.11; KC-03 truthful
+    // list): the abandoned work is sometimes ON the TARGET node itself, not
+    // strictly after it. The #59 shape is a revert whose `step` names the heavy
+    // `write_file` CALL node: the abandoned `write_file` is the target node's OWN
+    // ToolCall, and the strictly-after span carries only the `revert_to_state`
+    // call — so the old strictly-after-only walk mislabels the breadcrumb
+    // `revert_to_state abandoned`. We therefore seed the name set with the TARGET
+    // cluster's own tool-call name(s) FIRST (the work the model reverted ONTO +
+    // abandoned), then add the strictly-after span. Pure no-op when the target is
+    // a User / text-only Assistant / tool-result (no ToolCall on the target).
+    //
+    // KC-03 truthful-list carve-out (ADR-0003 §D3.2): a PINNED revert
+    // (`completion`/`step-summary` → Outcome/Checkpoint) ONTO a RESULT node KEEPS
+    // the target cluster's content (Rule 2 ADDS the summary; it does NOT replace).
+    // Naming the kept target's own call would mislabel still-visible work as
+    // "abandoned" (#81 obs #4). So for that case we EXCLUDE step (i) and seed ONLY
+    // from the strictly-after span (the span the contract actually shrinks). The
+    // abandon-class arm (`failure`/`tangent`) REPLACES the target content, so its
+    // own calls ARE abandoned → keep step (i) for abandon-class.
+    let target_is_result_node = matches!(
+        &context.messages[target_idx],
+        AgentMessage::Llm(lm) if matches!(lm.message, Message::ToolResult { .. })
+    );
+    let pinned_onto_result = !request.category.tag_kind().is_decayable() && target_is_result_node;
     let abandoned_tool_names: Vec<String> = {
         // The revert tool's own name is the TRIGGERING action, not abandoned
         // work — exclude it from the breadcrumb. In the #59 shape the revert
@@ -858,8 +872,12 @@ fn apply_revert(
                 Message::User { .. } => {}
             };
         // (i) the TARGET cluster's own tool-call(s) — the #59 reverted-onto work.
-        if let AgentMessage::Llm(lm) = &context.messages[target_idx] {
-            push_call_names(lm, &mut names);
+        // SKIPPED for a pinned-onto-result revert: the kept target's own work is
+        // NOT abandoned (Rule 2 ADDS the summary; content stays) — KC-03 §D3.2.
+        if !pinned_onto_result {
+            if let AgentMessage::Llm(lm) = &context.messages[target_idx] {
+                push_call_names(lm, &mut names);
+            }
         }
         // (ii) the strictly-after abandoned span (the CC-16 walk).
         for m in &context.messages[target_idx + 1..] {
@@ -1492,9 +1510,13 @@ mod apply_revert_tests {
             !all_text.contains("ABANDONED-BODY-secret"),
             "abandoned branch content must not be reintroduced: {all_text}"
         );
+        // KC-03 single-label: the woven render carries the breadcrumb as a SINGLE
+        // `[<kind>: …]` label — the tag's own `reverted past: ` prefix is stripped
+        // at weave time to avoid the `[lesson: reverted past: …]` double-label
+        // (ADR-0003 §D3.2). The breadcrumb summary itself still survives.
         assert!(
-            all_text.contains("reverted past: wrote plan-v1.md"),
-            "the one-line breadcrumb must survive into the trunk: {all_text}"
+            all_text.contains("[lesson: wrote plan-v1.md"),
+            "the one-line breadcrumb must survive into the trunk (single-label): {all_text}"
         );
     }
 
@@ -1635,6 +1657,99 @@ mod apply_revert_tests {
         assert!(
             !tag_text.contains("revert_to_state"),
             "breadcrumb must NOT name the revert tool's own call: {tag_text}"
+        );
+    }
+
+    /// KC-03 (#81 obs #4) — TRUTHFUL abandoned-list on a PINNED-onto-RESULT
+    /// revert: the breadcrumb names ONLY the tools whose results were SHRUNK
+    /// (strictly after X), NOT the kept target cluster's own tool (whose content
+    /// stays — Rule 2 ADD). A pinned (`completion`) revert onto the FIRST result
+    /// of a parallel cluster (mem_help KEPT, on-trunk) must name only the shrunk
+    /// `skill_help`, never the kept `memory_help` (ADR-0003 §D3.2).
+    #[test]
+    fn pinned_revert_onto_result_breadcrumb_names_only_shrunk_tools() {
+        // n0 user → n1 assistant [mem_call(memory_help), skill_call(skill_help)] →
+        // n2 memory_help RESULT (parent n1) → n3 skill_help RESULT (parent n2).
+        let parallel_call = AgentMessage::Llm(
+            LlmMessage::new(Message::Assistant {
+                content: vec![
+                    Content::ToolCall {
+                        id: "mem_call".into(),
+                        name: "memory_help".into(),
+                        arguments: serde_json::json!({ "q": "recent" }),
+                    },
+                    Content::ToolCall {
+                        id: "skill_call".into(),
+                        name: "skill_help".into(),
+                        arguments: serde_json::json!({ "q": "list" }),
+                    },
+                ],
+                stop_reason: StopReason::ToolUse,
+                model: "test".into(),
+                provider: "test".into(),
+                usage: Usage::default(),
+                timestamp: 2,
+                error_message: None,
+            })
+            .with_node_identity(NodeId(1), Some(NodeId(0))),
+        );
+        let mem_result = AgentMessage::Llm(
+            LlmMessage::new(Message::ToolResult {
+                tool_call_id: "mem_call".into(),
+                tool_name: "memory_help".into(),
+                content: vec![Content::Text {
+                    text: "memory: ShortTerm…".into(),
+                }],
+                is_error: false,
+                timestamp: 3,
+            })
+            .with_node_identity(NodeId(2), Some(NodeId(1))),
+        );
+        let skill_result = AgentMessage::Llm(
+            LlmMessage::new(Message::ToolResult {
+                tool_call_id: "skill_call".into(),
+                tool_name: "skill_help".into(),
+                content: vec![Content::Text {
+                    text: "skills: …".into(),
+                }],
+                is_error: false,
+                timestamp: 4,
+            })
+            .with_node_identity(NodeId(3), Some(NodeId(2))),
+        );
+        let mut ctx = AgentContext {
+            messages: vec![
+                user_msg_node("do parallel work", 1, NodeId(0), None),
+                parallel_call,
+                mem_result,
+                skill_result,
+            ],
+            next_node_id: 4,
+            ..Default::default()
+        };
+        let (tx, _rx) = mpsc::unbounded_channel::<AgentEvent>();
+        // PINNED (completion → Outcome) revert ONTO the first result n2 (mem_help
+        // KEPT on-trunk); skill_help (n3) is strictly-after → shrunk.
+        let req = RevertRequest {
+            category: RevertCategory::Completion,
+            target: NodeId(2),
+            summary: Some("sealed the lookup".into()),
+        };
+
+        apply_revert(&mut ctx, &req, 5, &tx, "loop-1");
+
+        // The breadcrumb is attached to the kept target node (n2).
+        let tag_text = match &ctx.messages[2] {
+            AgentMessage::Llm(lm) => lm.tags[0].text.clone(),
+            _ => unreachable!(),
+        };
+        assert!(
+            tag_text.contains("skill_help"),
+            "breadcrumb must name the SHRUNK skill_help: {tag_text}"
+        );
+        assert!(
+            !tag_text.contains("memory_help"),
+            "breadcrumb must NOT name the KEPT memory_help (Rule 2 ADD, not abandoned): {tag_text}"
         );
     }
 

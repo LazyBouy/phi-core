@@ -18,4 +18,4 @@ Historical/audit ledger for **phi-core kernel chunks** (the `KC-NN` namespace) r
 |---|---|---|---|---|---|---|
 | `a79c7669` | [kc-01-parallel-revert-call-atomicity](kc-01-parallel-revert-call-atomicity-a79c7669/plan.md) | 5 | 2 (A+B) | A1·B1 (both PASS) | audited-pending-retro (close-gate PASS; #77 closed) | pending |
 | `d835a363` | [kc-02-parallel-cluster-revert-matrix](kc-02-parallel-cluster-revert-matrix-d835a363/plan.md) | 4 | 3 (A+B+C) | A1·B1·C1 (all PASS) | ⚠️ SUPERSEDED — (B) semantics were a misread of the revert contract; close-gate validated the wrong invariant (no-400, not disposition). Re-opened as D-TEST-0076/#81 (simple shrink-tail+surgical-atomicity contract). #80 closed but subsumed; corrected by KC-03. | pending |
-| `24de5309` | [kc-03-revert-tail-shrink-contract](kc-03-revert-tail-shrink-contract-24de5309/plan.md) | 4 | 3 (A+B+C) | pending | in-flight | TBD |
+| `24de5309` | [kc-03-revert-tail-shrink-contract](kc-03-revert-tail-shrink-contract-24de5309/plan.md) | 4 | 3 (A+B+C) | A1·B1·C1 (all PASS) | audited-pending-retro (live close-gate pending) | pending |

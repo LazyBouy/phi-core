@@ -135,10 +135,19 @@ MENTAL MODEL
   tags ARE the nodes — the `step` argument names one of them.
 
 WHAT IT DOES
-  Naming a node in `step` makes it the new tip: every node AFTER it is dropped
-  from your active context. The dropped messages stay in the forensic session
-  log; only your working context changes. The `summary` you supply is pinned to
-  the target node as a lesson so the next turn remembers what was tried.
+  Naming a node X in `step` makes it the new tip. The simple contract:
+    - SHRINK: every node strictly after X is dropped from your active context
+      (its body — even a heavy parallel tool exchange — leaves your context, so
+      your budget gets smaller). The dropped messages stay in the forensic
+      session log; only your working context changes.
+    - SUMMARY at X: for `completion`/`step-summary` the `summary` is ADDED to X
+      AFTER X's original content (X is KEPT); for `failure`/`tangent` the summary
+      REPLACES X's content (the abandoned body is gone, the lesson takes its
+      place).
+    - CLEAN: if a dropped node leaves an orphaned tool-call behind on a kept
+      node, that call is removed too, so the rebuilt context never dangles.
+  If nothing comes after X (you're sealing the step you just finished), nothing
+  shrinks — just continue.
 
 HOW TO CHOOSE THE NODE
   Read the [nN] tags and pick the node JUST BEFORE the branch you want to
@@ -146,14 +155,16 @@ HOW TO CHOOSE THE NODE
   node — only do that to restart from scratch.
 
 AFTER REVERTING
-  CONTINUE FORWARD with your new approach from that node. Do NOT repeat the
-  steps you just abandoned — that is the loop trap. The rebuilt context shows
-  your pinned lesson so you know what not to retry.
+  CONTINUE FORWARD with your new approach from X. Do NOT repeat the steps you
+  just abandoned — that is the loop trap. The rebuilt context shows your pinned
+  summary so you know what not to retry.
 
 CATEGORIES
-  failure = a dead-end branch to learn from; tangent = a finished exploration to
-  fold back; completion = a sealed sub-task; step-summary = a checkpoint on a
-  long ongoing trunk.";
+  failure = a dead-end branch to learn from (summary REPLACES X's content);
+  tangent = a finished exploration to fold back (summary REPLACES X's content);
+  completion = a sealed sub-task (summary ADDED after X's kept content);
+  step-summary = a checkpoint on a long ongoing trunk (summary ADDED after X's
+  kept content).";
 
 /// Short canonical manual for the `prun` / `prun_with_memo` variants.
 const PRUN_HELP: &str = "\

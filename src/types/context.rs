@@ -27,6 +27,32 @@ fn prepend_marker_to_message(message: &mut super::content::Message, marker: &str
     }
 }
 
+/// Composition I (KC-03 Rule 2a) — append a braking annotation (`[<kind>:
+/// <summary>] …`) AFTER a message's original content so the kept node renders as
+/// `[n<id>] <original body> [<kind>: …]` (original FIRST). Suffixes the leading
+/// text block when one exists (so the annotation joins the rendered body on the
+/// same text run); otherwise inserts a fresh leading text block. The `[n<id>]`
+/// node marker is still PREPENDED separately by [`prepend_marker_to_message`] —
+/// it is a node label, not the revert summary. Used only by
+/// [`AgentContext::weave_braking_annotations`].
+fn append_annotation_to_message(message: &mut super::content::Message, annotation: &str) {
+    use super::content::{Content, Message};
+    let content = match message {
+        Message::User { content, .. }
+        | Message::Assistant { content, .. }
+        | Message::ToolResult { content, .. } => content,
+    };
+    match content.first_mut() {
+        Some(Content::Text { text }) => *text = format!("{text} {annotation}"),
+        _ => content.insert(
+            0,
+            Content::Text {
+                text: annotation.to_string(),
+            },
+        ),
+    }
+}
+
 /// Char-cap for [`elide_breadcrumb_tail`] — a breadcrumb at or under this length
 /// is glossed verbatim; a longer one is head-elided to its tail.
 const BREADCRUMB_GLOSS_CAP: usize = 40;
@@ -689,30 +715,28 @@ impl AgentContext {
                 // is correct only when the surviving node is at/after idx).
                 cursor = idx; // re-scan from idx; `processed` prevents re-work
             } else {
-                // Pinned cluster (Outcome/Checkpoint): TARGET-AWARE per-call
-                // disposition (KC-02 F1(B), ADR-0002 §D2.1 — SUPERSEDES the KC-01
-                // §D1.2 direct-child re-append + M=1 keep-whole). The pinned node
-                // may carry N parallel tool-calls (#77/#80). For EACH call:
-                //   - its result is already on the trunk → KEEP the call always
-                //     (the model continued PAST this cluster; the load-bearing
-                //     on-trunk gate that keeps a mid-trunk pinned cluster verbatim);
-                //   - its result is off-trunk AND the revert landed onto the CALL
-                //     node (`tag_on_call_node`) → DROP the call, never re-append →
-                //     reclaim the whole sealed-past cluster into the durable
-                //     breadcrumb (symmetric with abandon-class);
-                //   - its result is off-trunk AND the revert landed INTO the cluster
-                //     (onto a RESULT node) → RE-APPEND the result by CALL-NODE
-                //     MEMBERSHIP (`tool_call_id == call_id` against the forensic log,
-                //     reaching the off-trunk parallel GRANDCHILDREN the direct-child
-                //     `parent_id` gate could not) → keep the WHOLE gathered cluster.
-                //     A genuine post-cluster follow-on whose `tool_call_id ∉ this
-                //     node's calls` never matches → stays dropped/sealed-past.
-                // The node-scoped `call_ids` set (the call node's own tool-call ids)
-                // is what makes the membership re-append collision-proof: a provider
-                // that reuses an id across turns (MockProvider `mock-tool-{i}`, #77
-                // F-8) cannot cross-join a stale prior-turn result, because only
-                // THIS node's calls are resolved.
-                // Resolve the cluster's CALL node to apply per-call retain to:
+                // Pinned cluster (Outcome/Checkpoint): the simple tail-shrink
+                // contract (KC-03, ADR-0003 §D3.1 — SUPERSEDES ADR-0002 §D2.1's
+                // keep-whole-cluster-on-result re-append). The pinned arm CONVERGES
+                // to the abandon-class arm's shrink, differing only by Rule 2
+                // (pinned ADDS the summary to X; abandon REPLACES X's content). The
+                // pinned node may carry N parallel tool-calls (#77/#80). For EACH
+                // call:
+                //   - its result is already on the trunk → KEEP the call (Rule 1's
+                //     don't-over-shrink guard: the model continued PAST this
+                //     cluster, so the result is not strictly after the revert
+                //     target — the load-bearing on-trunk gate that keeps a
+                //     mid-trunk pinned cluster verbatim);
+                //   - its result is off-trunk (strictly after X — the trunk walk
+                //     already dropped it) → DROP the orphan paired call by id
+                //     (Rule 3), uniformly, NEVER re-appended → the tail is SHRUNK
+                //     (symmetric with abandon-class).
+                // The node-scoped `call_ids` set (the call node's own tool-call
+                // ids) makes the on-trunk membership test collision-proof: a
+                // provider that reuses an id across turns (MockProvider
+                // `mock-tool-{i}`, #77 F-8) cannot cross-join a stale prior-turn
+                // result, because only THIS node's calls are resolved.
+                // Resolve the cluster's CALL node to apply the per-call shrink to:
                 //   - tagged a call node → that node;
                 //   - tagged a result node → its parent call node on the trunk
                 //     (whose siblings may still dangle — the #77 parallel case).
@@ -730,7 +754,7 @@ impl AgentContext {
                     })
                 };
                 if let Some(cn_idx) = call_node_idx {
-                    self.retain_pinned_calls_on_node(&mut trunk, cn_idx, node_is_call);
+                    Self::retain_pinned_calls_on_node(&mut trunk, cn_idx);
                 }
                 processed.insert(node_id);
                 cursor = idx + 1;
@@ -740,38 +764,29 @@ impl AgentContext {
         trunk
     }
 
-    /// KC-02 F1(B) helper — TARGET-AWARE per-call retain on a PINNED call node at
-    /// `idx`. `tag_on_call_node` is the caller's `node_is_call`: `true` when the
-    /// revert landed onto the call node (seal-past the whole sub-task), `false`
-    /// when it landed INTO the cluster (onto a result node).
+    /// KC-03 helper — the simple tail-shrink contract (Rule 1 + Rule 3) on a
+    /// PINNED call node at `idx`. The pinned arm CONVERGES to the abandon-class
+    /// arm's already-correct shrink (P0 F-8): a revert onto X SHRINKS every node
+    /// strictly after X, uniformly across categories — it differs from the
+    /// abandon arm ONLY by Rule 2 (pinned ADDS the summary to X; abandon REPLACES
+    /// X's content). This SUPERSEDES the KC-02 F1(B) keep-whole-cluster-on-result
+    /// re-append (ADR-0002 §D2.1) — the misread #81 corrects.
     ///
-    /// SUPERSEDES the KC-01 §D1.2 direct-child re-append + M=1 keep-whole
-    /// (ADR-0002 §D2.1). The pinned node may carry N parallel tool-calls
-    /// (#77/#80). For EACH call:
-    ///   - its result is already live on the trunk → KEEP the call always (the
-    ///     model continued PAST this cluster — the load-bearing on-trunk gate);
-    ///   - its result is off-trunk AND `tag_on_call_node` → DROP the call, never
-    ///     re-append → reclaim the whole sealed-past cluster to the durable
-    ///     breadcrumb (the (a) semantic for the call-node case);
-    ///   - its result is off-trunk AND `!tag_on_call_node` (the revert landed onto
-    ///     a result node) → RE-APPEND the result by CALL-NODE MEMBERSHIP
-    ///     (`tool_call_id == call_id` against the forensic log) so the WHOLE
-    ///     gathered cluster survives. This reaches the off-trunk parallel
-    ///     GRANDCHILDREN that the old direct-child `parent_id` gate could not; a
-    ///     genuine post-cluster follow-on whose `tool_call_id ∉ this node's calls`
-    ///     is never matched here → stays dropped/sealed-past.
+    /// The pinned node may carry N parallel tool-calls (#77/#80). For EACH call:
+    ///   - its result is already live on the trunk → KEEP the call (Rule 1's
+    ///     don't-over-shrink guard: the model continued PAST this cluster, so the
+    ///     result is NOT strictly after the revert target X — nothing to shrink);
+    ///   - its result is OFF-trunk (strictly after X, so the trunk walk already
+    ///     dropped it) → DROP the call by id from this kept node so the orphan
+    ///     paired call cannot dangle (Rule 3 — surgical removal by id), exactly as
+    ///     the abandon-class arm does. The off-trunk result is NEVER re-appended.
     ///
-    /// The membership re-append is collision-proof by construction: only THIS
-    /// node's own `call_ids` are resolved, so a provider that reuses an id across
-    /// turns (MockProvider `mock-tool-{i}`, #77 F-8) cannot cross-join a stale
-    /// prior-turn result. KC-02 keeps the fix render-pass-only: the forensic
-    /// `self.messages` is read (`.iter().find()` + `.clone()`) and NEVER mutated.
-    fn retain_pinned_calls_on_node(
-        &self,
-        trunk: &mut Vec<AgentMessage>,
-        idx: usize,
-        tag_on_call_node: bool,
-    ) {
+    /// This is render-pass-only: the forensic `self.messages` is NOT read or
+    /// mutated here (the previous re-append read it; the shrink contract has no
+    /// need to — so this is now an associated fn, not a `&self` method). The
+    /// id-less synthetic fallback (`synth-{node}-{ci}`) is retained so every call
+    /// carries a join key for the on-trunk membership test.
+    fn retain_pinned_calls_on_node(trunk: &mut [AgentMessage], idx: usize) {
         use super::content::{Content, Message};
         let this_node_id = match &trunk[idx] {
             AgentMessage::Llm(lm) => lm.node_id,
@@ -803,23 +818,15 @@ impl AgentContext {
         if call_ids.is_empty() {
             return;
         }
-        // Decide per-call, target-aware (KC-02 F1(B)):
-        //   (i)  result already live ON-trunk → KEEP always (the model continued
-        //        PAST this cluster — mid-trunk pinned cluster; dropping it would
-        //        collapse a legitimately-kept span). Load-bearing on-trunk gate.
-        //   (ii) result OFF-trunk + the revert landed onto the CALL node
-        //        (`tag_on_call_node`) → DROP the call, never re-append → reclaim
-        //        the whole abandoned cluster to the durable breadcrumb.
-        //   (iii) result OFF-trunk + the revert landed onto a RESULT node
-        //        (`!tag_on_call_node`) → RE-APPEND the result by CALL-NODE
-        //        MEMBERSHIP (`tool_call_id == call_id` against the forensic log),
-        //        NOT the direct-child `parent_id == this_node_id` gate — the
-        //        linear-stamped siblings are GRANDCHILDREN. A genuine post-cluster
-        //        follow-on whose `tool_call_id ∉ this node's calls` never matches
-        //        `call_ids` here → stays dropped/sealed-past.
-        let _ = this_node_id; // node-scoped synthetic-id fallback uses it above
+        // Decide per-call (the simple tail-shrink contract, uniform across
+        // categories — converges to the abandon arm):
+        //   (i)  result already live ON-trunk → KEEP (Rule 1 don't-over-shrink:
+        //        the model continued PAST this cluster; the result is not strictly
+        //        after X).
+        //   (ii) result OFF-trunk (strictly after X) → DROP the call by id so the
+        //        orphan paired call cannot dangle (Rule 3). Never re-appended —
+        //        the tail is SHRUNK, exactly as the abandon arm does.
         let mut ids_to_drop: Vec<String> = Vec::new();
-        let mut results_to_append: Vec<AgentMessage> = Vec::new();
         for call_id in &call_ids {
             let on_trunk = trunk.iter().any(|m| match m {
                 AgentMessage::Llm(lm) => matches!(
@@ -831,27 +838,10 @@ impl AgentContext {
             if on_trunk {
                 continue; // (i) call already atomic — keep
             }
-            if tag_on_call_node {
-                // (ii) reclaim: the whole cluster is sealed-past — drop the call.
-                ids_to_drop.push(call_id.clone());
-                continue;
-            }
-            // (iii) keep-whole: re-append the off-trunk cluster sibling by
-            // call-node membership (reaches grandchildren the direct-child gate
-            // could not).
-            let cluster_result = self.messages.iter().find(|m| match m {
-                AgentMessage::Llm(lm) => matches!(
-                    &lm.message,
-                    Message::ToolResult { tool_call_id, .. } if tool_call_id == call_id
-                ),
-                _ => false,
-            });
-            match cluster_result {
-                Some(result) => results_to_append.push(result.clone()),
-                None => ids_to_drop.push(call_id.clone()),
-            }
+            // (ii) off-trunk → shrink: drop the orphan call by id (Rule 3).
+            ids_to_drop.push(call_id.clone());
         }
-        // Apply per-call drops (R1) on the kept node's content.
+        // Apply per-call drops (Rule 3) on the kept node's content.
         if !ids_to_drop.is_empty() {
             if let AgentMessage::Llm(lm) = &mut trunk[idx] {
                 if let Message::Assistant { content, .. } = &mut lm.message {
@@ -860,11 +850,6 @@ impl AgentContext {
                     );
                 }
             }
-        }
-        // Re-append recoverable direct-child results right after the call node
-        // (preserve content order).
-        for (offset, result) in results_to_append.into_iter().enumerate() {
-            trunk.insert(idx + 1 + offset, result);
         }
     }
 
@@ -943,7 +928,13 @@ impl AgentContext {
                     let Some(node_id) = lm.node_id else {
                         return AgentMessage::Llm(lm);
                     };
-                    let mut marker = format!("[{}]", node_id.render());
+                    // The `[n<id>]` node marker is a LABEL the model echoes into
+                    // `revert_to_state(step=…)`; it stays LEADING (the
+                    // `[n<id>]`-echo contract). The `[<kind>: <summary>]`
+                    // annotation is the revert breadcrumb; per Rule 2a it is
+                    // APPENDED after the node's original content, so a kept pinned
+                    // node renders `[n<id>] <original body> [<kind>: …]`.
+                    let marker = format!("[{}]", node_id.render());
                     // Dedup ALL identical lesson/finding tags (same kind + same
                     // text) on the same node — not just consecutive runs.
                     // Repeated reverts to the same node stack duplicate tags,
@@ -951,15 +942,31 @@ impl AgentContext {
                     // seen-set renders each `(kind, text)` once regardless of
                     // ordering, removing the wall of noise that can confuse
                     // weaker models into looping.
+                    let mut annotation = String::new();
                     let mut seen: HashSet<(TagKind, &str)> = HashSet::new();
                     for tag in &lm.tags {
                         if !seen.insert((tag.kind, tag.text.as_str())) {
                             continue; // identical tag already rendered on this node
                         }
                         let kind = tag.kind.rendered_label();
-                        marker.push_str(&format!(" [{}: {}]", kind, tag.text));
+                        // SINGLE label (KC-03): the `[<kind>: …]` label already
+                        // names the revert kind, so strip the breadcrumb's own
+                        // `reverted past: ` prefix to avoid the
+                        // `[outcome: reverted past: …]` double-label.
+                        let text = tag
+                            .text
+                            .strip_prefix("reverted past: ")
+                            .unwrap_or(&tag.text);
+                        if !annotation.is_empty() {
+                            annotation.push(' ');
+                        }
+                        annotation.push_str(&format!("[{}: {}]", kind, text));
                     }
+                    // Marker leading; annotation (if any) appended after content.
                     prepend_marker_to_message(&mut lm.message, &marker);
+                    if !annotation.is_empty() {
+                        append_annotation_to_message(&mut lm.message, &annotation);
+                    }
                     AgentMessage::Llm(lm)
                 }
                 other => other,
@@ -3275,18 +3282,18 @@ mod collapse_abandon_class_cluster_tests {
         ctx
     }
 
-    /// KC-02 F1(B) flip — a PINNED (Outcome) revert onto the FIRST result of a
-    /// parallel cluster now KEEPS the WHOLE gathered cluster (was `[PAIR,DROP]`
-    /// dropping call_b; now `[PAIR,PAIR]` re-appending call_b by call-node
-    /// membership). The revert landed INTO the cluster (a RESULT node), so the
-    /// off-trunk grandchild sibling is re-materialised — exactly the
-    /// "row_pinned_revert_to_first_result → now [PAIR,PAIR]" prediction
-    /// (ADR-0002 §D2.1, P0 §10.7 row 3).
+    /// KC-03 inversion (SUPERSEDES the KC-02 F1(B) keep-whole) — a PINNED
+    /// (Outcome) revert onto the FIRST result of a parallel cluster now SHRINKS
+    /// the post-target tail (Rule 1): the off-trunk sibling `pcall_b` is dropped
+    /// and its orphan paired call is surgically removed by id (Rule 3). The pinned
+    /// arm CONVERGES to the abandon arm — only Rule 2 (ADD vs REPLACE) differs.
+    /// `pcall_a` (on-trunk) is kept by the don't-over-shrink guard (ADR-0003
+    /// §D3.1; SUPERSEDES ADR-0002 §D2.1).
     #[test]
     fn row_pinned_revert_to_first_result_now_call_atomic() {
         // Revert target = result_a (n2). Trunk = [n0, n1, n2]; result_b (n3) is
-        // off-trunk (a grandchild: parent n2, not n1). Under (B) tag-on-result-node
-        // re-appends call_b by call-node membership → the whole cluster survives.
+        // off-trunk (a grandchild: parent n2, not n1). Under the simple contract
+        // the off-trunk tail is shrunk and the orphan pcall_b call removed by id.
         let ctx = parallel_fixture(NodeId(2), 2, TagKind::Outcome);
         let trunk = ctx.build_trunk_context();
         let collapsed =
@@ -3295,15 +3302,15 @@ mod collapse_abandon_class_cluster_tests {
             !trunk_has_dangling_call(&collapsed),
             "pinned revert into a parallel cluster must leave no dangling tool-call"
         );
-        // call_a is kept (its result is live on-trunk)...
+        // call_a is kept (its result is live on-trunk — Rule 1 don't-over-shrink)...
         assert!(
             trunk_has_tool_result(&collapsed, "pcall_a"),
             "the live call_a result stays on-trunk (on-trunk-keep gate)"
         );
-        // ...AND call_b's off-trunk sibling is re-appended by call-node membership.
+        // ...AND call_b's off-trunk sibling is SHRUNK (Rule 1, not re-appended).
         assert!(
-            trunk_has_tool_result(&collapsed, "pcall_b"),
-            "(B) the off-trunk call_b sibling is re-appended (whole cluster kept)"
+            !trunk_has_tool_result(&collapsed, "pcall_b"),
+            "the off-trunk call_b sibling is shrunk (tail-shrink contract, Rule 1)"
         );
     }
 
@@ -3545,16 +3552,19 @@ mod collapse_abandon_class_cluster_tests {
     }
 
     // ───────────────────────────────────────────────────────────────────────
-    // KC-02 (#80 / D-TEST-0075) — parallel-cluster pinned-revert keep/drop matrix.
+    // Parallel-cluster pinned-revert matrix (KC-02 #80, CORRECTED at KC-03 #81).
     //
-    // Promoted from the P0 §10 throwaway 32-cell matrix + 5 edge fixtures. F1(B):
-    // pinned-revert disposition is TARGET-AWARE — a revert onto the CALL node
-    // (sealed-past) RECLAIMS the whole abandoned cluster to the breadcrumb
-    // (`[DROP,…]`); a revert INTO the cluster (onto a RESULT node) KEEPS the WHOLE
-    // gathered cluster verbatim (every off-trunk sibling re-appended by call-node
-    // membership, `[PAIR,…]`); on-trunk results are ALWAYS kept (the load-bearing
-    // mid-trunk gate). Abandon-class is unchanged. No 400 in any cell. Cite
-    // ADR-0002 §D2.1–§D2.4 + P0 §10.2/§10.5.
+    // KC-03 (D-TEST-0076 / ADR-0003 §D3.1) SUPERSEDES the KC-02 (B) keep-whole
+    // disposition this module originally encoded. The simple tail-shrink contract:
+    // a revert onto X SHRINKS every node strictly after X (Rule 1, uniform across
+    // categories) — the pinned arm CONVERGES to the abandon arm, differing only by
+    // Rule 2 (pinned ADDS the summary to X after its content / abandon REPLACES X's
+    // content); the orphaned paired call is surgically removed by id (Rule 3); the
+    // summary is APPENDED after X's content (Rule 2a, single label). on-trunk
+    // results are ALWAYS kept (Rule 1's don't-over-shrink guard — nothing after X).
+    // No 400 in any cell. The KC-02 (B) "result-node keeps the whole cluster"
+    // re-append is REMOVED; the keep-whole cells below are inverted to shrink.
+    // Cite ADR-0003 §D3.1–§D3.4 (SUPERSEDES ADR-0002 §D2.1).
     // ───────────────────────────────────────────────────────────────────────
 
     /// A PARALLEL assistant node carrying THREE heavy tool-calls (`a`,`b`,`c`) in
@@ -3729,42 +3739,46 @@ mod collapse_abandon_class_cluster_tests {
         }
     }
 
-    /// Tier A — the 6 onto-RESULT-node LOSS cells (completion + step-summary;
-    /// first-result a2+a3, mid-result a3). Each KEEPS the WHOLE cluster: every
-    /// off-trunk sibling re-appended by call-node membership → `[PAIR,…]`, no
-    /// dangling/orphan. P0 §10.2 Δ-fix rows + §10.3.
+    /// KC-03 inversion (SUPERSEDES the KC-02 F1(B) keep-whole) — the onto-RESULT
+    /// cells (completion + step-summary; first-result a2+a3, mid-result a3) now
+    /// SHRINK the post-target tail (Rule 1): every off-trunk sibling strictly
+    /// after X is dropped and its orphan paired call removed by id (Rule 3). The
+    /// on-trunk siblings (not after X) are kept by the don't-over-shrink guard.
+    /// No dangling/orphan (ADR-0003 §D3.1; SUPERSEDES ADR-0002 §D2.1).
     #[test]
-    fn matrix_pinned_into_cluster_keeps_whole_cluster() {
+    fn matrix_pinned_into_cluster_shrinks_tail() {
         for kind in [TagKind::Outcome, TagKind::Checkpoint] {
-            // a2 first-result: revert onto result_a (n2); result_b (n3) off-trunk.
+            // a2 first-result: revert onto result_a (n2); result_b (n3) off-trunk
+            // → shrunk; pcall_a kept (on-trunk).
             let ctx2 = parallel_fixture(NodeId(2), 2, kind);
             let r2 = render_with_backstop(&ctx2, &in_window_policy(), IN_WINDOW_TURN);
             assert!(
-                trunk_has_tool_result(&r2, "pcall_a") && trunk_has_tool_result(&r2, "pcall_b"),
-                "{kind:?} first-result a2: whole cluster kept ([PAIR,PAIR])"
+                trunk_has_tool_result(&r2, "pcall_a") && !trunk_has_tool_result(&r2, "pcall_b"),
+                "{kind:?} first-result a2: tail shrunk ([PAIR,DROP]); pcall_a kept, pcall_b gone"
             );
             assert_no_400(&r2, "pinned first-result a2");
 
-            // a3 first-result: revert onto result_a (n2); b,c off-trunk grandchildren.
+            // a3 first-result: revert onto result_a (n2); b,c off-trunk
+            // grandchildren → both shrunk; pcall_a kept.
             let ctx3f = parallel_fixture_3(NodeId(2), 2, kind);
             let r3f = render_with_backstop(&ctx3f, &in_window_policy(), IN_WINDOW_TURN);
             assert!(
                 trunk_has_tool_result(&r3f, "pcall_a")
-                    && trunk_has_tool_result(&r3f, "pcall_b")
-                    && trunk_has_tool_result(&r3f, "pcall_c"),
-                "{kind:?} first-result a3: whole cluster kept ([PAIR,PAIR,PAIR])"
+                    && !trunk_has_tool_result(&r3f, "pcall_b")
+                    && !trunk_has_tool_result(&r3f, "pcall_c"),
+                "{kind:?} first-result a3: tail shrunk ([PAIR,DROP,DROP]); only pcall_a kept"
             );
             assert_no_400(&r3f, "pinned first-result a3");
 
-            // a3 mid-result: revert onto result_b (n3); a,b on-trunk, c off-trunk
-            // past the tip → re-appended by membership → whole cluster kept.
+            // a3 mid-result: revert onto result_b (n3); a,b on-trunk (kept), c
+            // off-trunk past the tip → SHRUNK (Rule 1, not re-appended).
             let ctx3m = parallel_fixture_3(NodeId(3), 3, kind);
             let r3m = render_with_backstop(&ctx3m, &in_window_policy(), IN_WINDOW_TURN);
             assert!(
                 trunk_has_tool_result(&r3m, "pcall_a")
                     && trunk_has_tool_result(&r3m, "pcall_b")
-                    && trunk_has_tool_result(&r3m, "pcall_c"),
-                "{kind:?} mid-result a3: the off-trunk sibling past the tip is re-appended"
+                    && !trunk_has_tool_result(&r3m, "pcall_c"),
+                "{kind:?} mid-result a3: the off-trunk sibling past the tip is shrunk (Rule 1)"
             );
             assert_no_400(&r3m, "pinned mid-result a3");
         }
@@ -3901,12 +3915,14 @@ mod collapse_abandon_class_cluster_tests {
         }
     }
 
-    /// Tier C — EDGE-4 genuine post-cluster follow-on (P0 §10.5). A SEQUENTIAL
-    /// follow-on after a parallel cluster; a pinned revert onto the cluster's
-    /// FIRST result re-appends the cluster siblings (by membership) but DROPS the
-    /// sealed-past sequential follow-on (its `tool_call_id ∉ the cluster's calls`).
+    /// KC-03 inversion (Tier C — EDGE-4, was post-cluster-followon-dropped). Under
+    /// the simple contract EVERYTHING strictly after X is dropped — the cluster
+    /// sibling `pc_1` (off-trunk past X) AND the sealed-past sequential follow-on
+    /// `seq_c` alike. A pinned revert onto the cluster's FIRST result n2 keeps only
+    /// the on-trunk `pc_0`; `pc_1` is shrunk + its orphan call removed by id
+    /// (Rule 1 + Rule 3; ADR-0003 §D3.1).
     #[test]
-    fn edge_post_cluster_followon_dropped() {
+    fn edge_post_cluster_everything_after_x_dropped() {
         // user(n0) → [pc_0,pc_1](n1) → r0(n2) → r1(n3) → seq CALL(n4) → seq r(n5).
         // Pinned revert onto r0 (n2): trunk = [n0,n1,n2]; r1,seq off-trunk.
         let mut ctx = AgentContext {
@@ -3929,39 +3945,43 @@ mod collapse_abandon_class_cluster_tests {
             "reverted past: parallel cluster",
         );
         let r = render_with_backstop(&ctx, &in_window_policy(), IN_WINDOW_TURN);
-        // pc_0 on-trunk (kept); pc_1 re-appended by membership (whole cluster).
+        // pc_0 on-trunk (kept); pc_1 SHRUNK (off-trunk, strictly after X).
         assert!(
-            trunk_has_tool_result(&r, "pc_0") && trunk_has_tool_result(&r, "pc_1"),
-            "the cluster siblings are kept whole (membership re-append)"
+            trunk_has_tool_result(&r, "pc_0") && !trunk_has_tool_result(&r, "pc_1"),
+            "everything after X dropped: pc_0 kept (on-trunk), pc_1 shrunk (cluster sibling)"
         );
-        // The sealed-past sequential follow-on is DROPPED (not a cluster member).
+        // The sealed-past sequential follow-on is DROPPED too (after X).
         assert!(
             !trunk_has_tool_result(&r, "seq_c"),
-            "the sealed-past sequential follow-on is dropped (membership distinguishes it)"
+            "the sealed-past sequential follow-on is dropped (strictly after X)"
         );
-        assert_no_400(&r, "edge post-cluster follow-on");
+        assert_no_400(&r, "edge everything-after-X dropped");
     }
 
-    /// Tier C — EDGE-5 mixed on/off-trunk (P0 §10.5). An arity-3 pinned revert
-    /// onto the MID result re-appends the off-trunk sibling PAST the revert tip
-    /// (not just those before it) → whole cluster survives.
+    /// KC-03 inversion (Tier C — EDGE-5 mixed on/off-trunk). An arity-3 pinned
+    /// revert onto the MID result SHRINKS the off-trunk sibling PAST the revert tip
+    /// (Rule 1): `pcall_c` (n4, strictly after X) is dropped + its orphan call
+    /// removed by id; the on-trunk a,b are kept (ADR-0003 §D3.1).
     #[test]
-    fn edge_mixed_on_off_trunk() {
-        // revert onto result_b (n3): a,b on-trunk, c (n4) off-trunk past the tip.
+    fn edge_mixed_on_off_trunk_shrinks_tail() {
+        // revert onto result_b (n3): a,b on-trunk (kept), c (n4) off-trunk past the
+        // tip → shrunk.
         let ctx = parallel_fixture_3(NodeId(3), 3, TagKind::Outcome);
         let r = render_with_backstop(&ctx, &in_window_policy(), IN_WINDOW_TURN);
         assert!(
             trunk_has_tool_result(&r, "pcall_a")
                 && trunk_has_tool_result(&r, "pcall_b")
-                && trunk_has_tool_result(&r, "pcall_c"),
-            "the off-trunk sibling past the revert tip is re-appended (whole cluster)"
+                && !trunk_has_tool_result(&r, "pcall_c"),
+            "the off-trunk sibling past the revert tip is shrunk (Rule 1); a,b kept"
         );
-        assert_no_400(&r, "edge mixed on/off-trunk");
+        assert_no_400(&r, "edge mixed on/off-trunk shrink");
     }
 
-    /// Tier C — TWO-CLUSTER isolation (P0 §10.5 / §10.8 surprise #4). An upstream
-    /// continued-past pinned cluster (on-trunk) stays verbatim while the tip
-    /// cluster re-appends its off-trunk sibling — no cross-cluster interaction.
+    /// KC-03 inversion (Tier C — TWO-CLUSTER isolation). An upstream continued-past
+    /// pinned cluster (on-trunk) stays verbatim while the tip cluster SHRINKS its
+    /// off-trunk sibling past X (Rule 1) — no cross-cluster interaction. The
+    /// cross-cluster-isolation point still holds: cluster1 is kept verbatim
+    /// (ADR-0003 §D3.1).
     #[test]
     fn edge_two_cluster_isolation() {
         // user(n0) → cluster1 [c1a,c1b](n1) → r1a(n2) → r1b(n3) [on-trunk] →
@@ -3989,15 +4009,15 @@ mod collapse_abandon_class_cluster_tests {
             "reverted past: parallel cluster",
         );
         let r = render_with_backstop(&ctx, &in_window_policy(), IN_WINDOW_TURN);
-        // cluster1 kept verbatim (both results on-trunk).
+        // cluster1 kept verbatim (both results on-trunk — cross-cluster isolation).
         assert!(
             trunk_has_tool_result(&r, "c1a") && trunk_has_tool_result(&r, "c1b"),
             "upstream continued-past cluster1 is kept verbatim"
         );
-        // cluster2 whole: c2a on-trunk + c2b re-appended by membership.
+        // cluster2: c2a on-trunk (kept) + c2b shrunk (off-trunk, strictly after X).
         assert!(
-            trunk_has_tool_result(&r, "c2a") && trunk_has_tool_result(&r, "c2b"),
-            "tip cluster2 survives whole (c2b re-appended), no cross-cluster bleed"
+            trunk_has_tool_result(&r, "c2a") && !trunk_has_tool_result(&r, "c2b"),
+            "tip cluster2 tail shrunk (c2b dropped, orphan call removed), no cross-cluster bleed"
         );
         assert_no_400(&r, "edge two-cluster isolation");
     }
@@ -4031,6 +4051,237 @@ mod collapse_abandon_class_cluster_tests {
                 let ctx = parallel_fixture_3(active, target, kind);
                 let r = render_with_backstop(&ctx, &in_window_policy(), IN_WINDOW_TURN);
                 assert_no_400(&r, "no-400 a3 sweep");
+            }
+        }
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // KC-03 contract cells (#81 / D-TEST-0076): the simple tail-shrink contract
+    // R1/R2/R2a/R3 + the 2 render nits. The pinned arm converges to the abandon
+    // arm; only Rule 2 (ADD vs REPLACE) differs (ADR-0003 §D3.1/§D3.2).
+    // ───────────────────────────────────────────────────────────────────────
+
+    /// Render the trunk through the VERBATIM production order INCLUDING the weave
+    /// (collapse → decay → weave → backstop) and return the FIRST text block of
+    /// the node carrying `node_id` — the render-string the model actually reads.
+    fn rendered_node_text(
+        ctx: &AgentContext,
+        policy: &super::super::node_tag::RevertRenderPolicy,
+        current_turn: u32,
+        node_id: NodeId,
+    ) -> String {
+        use crate::agent_loop::enforce_call_atomic_backstop;
+        let collapsed = render_pipeline(ctx, policy, current_turn);
+        let woven = AgentContext::weave_braking_annotations(collapsed);
+        let backstopped = enforce_call_atomic_backstop(woven);
+        backstopped
+            .iter()
+            .find(|m| matches!(m, AgentMessage::Llm(lm) if lm.node_id == Some(node_id)))
+            .map(first_text)
+            .unwrap_or_default()
+    }
+
+    /// Tier A (Rule 1 — tail shrunk after X) — a dedicated grouped probe that a
+    /// pinned revert onto X shrinks EVERY node strictly after X across category ×
+    /// arity, leaving only the on-trunk span. Complements the inverted matrix
+    /// cells with an explicit "tail gone" assertion.
+    #[test]
+    fn matrix_pinned_revert_shrinks_tail_after_target() {
+        for kind in [TagKind::Outcome, TagKind::Checkpoint] {
+            // a2 first-result X=n2: pcall_b (after X) gone; pcall_a kept.
+            let r2 = render_with_backstop(
+                &parallel_fixture(NodeId(2), 2, kind),
+                &in_window_policy(),
+                IN_WINDOW_TURN,
+            );
+            assert!(
+                trunk_has_tool_result(&r2, "pcall_a") && !trunk_has_tool_result(&r2, "pcall_b"),
+                "{kind:?} a2: everything strictly after X=n2 is shrunk"
+            );
+
+            // a3 mid-result X=n3: pcall_c (after X) gone; a,b kept.
+            let r3 = render_with_backstop(
+                &parallel_fixture_3(NodeId(3), 3, kind),
+                &in_window_policy(),
+                IN_WINDOW_TURN,
+            );
+            assert!(
+                trunk_has_tool_result(&r3, "pcall_a")
+                    && trunk_has_tool_result(&r3, "pcall_b")
+                    && !trunk_has_tool_result(&r3, "pcall_c"),
+                "{kind:?} a3 mid: only the post-X tail (pcall_c) is shrunk"
+            );
+            assert_no_400(&r3, "shrink-tail a3 mid");
+        }
+    }
+
+    /// Tier A (Rule 3 — orphan call removed by id) — when a pinned revert shrinks
+    /// an off-trunk result, the paired call is surgically removed BY ID from its
+    /// kept call node, so no dangling tool-call survives. The kept node no longer
+    /// carries the shrunk call's id.
+    #[test]
+    fn matrix_pinned_revert_removes_orphan_call_by_id() {
+        // a2 first-result X=n2: pcall_b's result shrunk → its call removed from n1.
+        let r = render_with_backstop(
+            &parallel_fixture(NodeId(2), 2, TagKind::Outcome),
+            &in_window_policy(),
+            IN_WINDOW_TURN,
+        );
+        assert!(
+            !trunk_has_dangling_call(&r),
+            "the orphan pcall_b call must be removed by id (no dangle)"
+        );
+        // n1 still carries pcall_a (its result is on-trunk) but NOT pcall_b.
+        let n1_call_ids: Vec<String> = r
+            .iter()
+            .find_map(|m| match m {
+                AgentMessage::Llm(lm) if lm.node_id == Some(NodeId(1)) => match &lm.message {
+                    Message::Assistant { content, .. } => Some(
+                        content
+                            .iter()
+                            .filter_map(|b| match b {
+                                Content::ToolCall { id, .. } => Some(id.clone()),
+                                _ => None,
+                            })
+                            .collect(),
+                    ),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .unwrap_or_default();
+        assert!(
+            n1_call_ids.contains(&"pcall_a".to_string())
+                && !n1_call_ids.contains(&"pcall_b".to_string()),
+            "the kept call node keeps pcall_a, drops the shrunk pcall_b by id: {n1_call_ids:?}"
+        );
+    }
+
+    /// Tier A (Rule 2a — pinned append order) — a kept pinned node renders as
+    /// `[n<id>] <original body> [<kind>: <summary>]`: the `[n<id>]` marker LEADS,
+    /// the original content comes NEXT, the revert summary annotation comes LAST
+    /// (original FIRST). This is the explicit append-after-original assertion.
+    #[test]
+    fn pinned_revert_summary_appended_after_original_content() {
+        // A pinned revert onto the LAST result (all on-trunk → kept verbatim); the
+        // breadcrumb tag lands on the kept node n3, which still carries its
+        // original "Wrote 356 bytes" body.
+        for kind in [TagKind::Outcome, TagKind::Checkpoint] {
+            let ctx = parallel_fixture(NodeId(3), 3, kind);
+            let text = rendered_node_text(&ctx, &in_window_policy(), IN_WINDOW_TURN, NodeId(3));
+            let label = kind.rendered_label();
+            // Marker leads.
+            assert!(
+                text.starts_with("[n3]"),
+                "{kind:?}: marker must lead: {text}"
+            );
+            // Original body comes before the annotation (append-after-original).
+            let body_at = text.find("Wrote 356 bytes").expect("original body present");
+            let annot_at = text
+                .find(&format!("[{label}:"))
+                .expect("annotation present");
+            assert!(
+                body_at < annot_at,
+                "{kind:?}: original body must precede the [{label}: …] annotation: {text}"
+            );
+            // SINGLE label — no `reverted past:` double-label inside the annotation.
+            assert!(
+                text.contains(&format!("[{label}: parallel cluster]")),
+                "{kind:?}: single-label annotation `[{label}: parallel cluster]`: {text}"
+            );
+            assert!(
+                !text.contains(&format!("[{label}: reverted past:")),
+                "{kind:?}: must NOT carry the double-label `[{label}: reverted past: …]`: {text}"
+            );
+        }
+    }
+
+    /// Tier A (Rule 2 — abandon replaces at X) — an abandon-class revert REPLACES
+    /// X's content with the breadcrumb (the heavy body is gone), whereas the
+    /// pinned arm ADDS the summary while KEEPING X's content. Explicit assertion
+    /// of the one axis the converged arms differ on.
+    #[test]
+    fn abandon_revert_summary_replaces_target_content() {
+        // Abandon (Lesson) revert onto the call node (M=1 #59 shape): the heavy
+        // body is REPLACED (gone), only the breadcrumb survives.
+        let mut ctx = fixture_59_shape();
+        tag_message(
+            &mut ctx.messages,
+            1,
+            TagKind::Lesson,
+            "reverted past: plan-v1 abandoned (write_file abandoned)",
+        );
+        let collapsed = ctx.collapse_abandon_class_cluster(
+            ctx.build_trunk_context(),
+            &in_window_policy(),
+            IN_WINDOW_TURN,
+        );
+        assert!(
+            !trunk_has_heavy_args(&collapsed, "PLAN-V1-HEAVY-BODY"),
+            "abandon REPLACES X's content: the heavy body is gone"
+        );
+        assert!(
+            trunk_has_breadcrumb(&collapsed, "write_file abandoned"),
+            "the replacement breadcrumb survives"
+        );
+        // Contrast: a PINNED revert onto a kept node ADDS the summary, body stays.
+        let pinned_text = rendered_node_text(
+            &parallel_fixture(NodeId(3), 3, TagKind::Outcome),
+            &in_window_policy(),
+            IN_WINDOW_TURN,
+            NodeId(3),
+        );
+        assert!(
+            pinned_text.contains("Wrote 356 bytes") && pinned_text.contains("[outcome:"),
+            "pinned ADDS the summary while keeping X's content: {pinned_text}"
+        );
+    }
+
+    /// Tier A (render nit — single label) — the breadcrumb carries ONE label, not
+    /// the `[outcome: reverted past: …]` double-label, on the rendered node. The
+    /// `reverted past: ` prefix on the tag text is stripped at weave time.
+    #[test]
+    fn revert_breadcrumb_single_label_not_double() {
+        let text = rendered_node_text(
+            &parallel_fixture(NodeId(3), 3, TagKind::Outcome),
+            &in_window_policy(),
+            IN_WINDOW_TURN,
+            NodeId(3),
+        );
+        assert!(
+            text.contains("[outcome: parallel cluster]"),
+            "single label `[outcome: parallel cluster]`: {text}"
+        );
+        assert!(
+            !text.contains("reverted past:"),
+            "the rendered annotation must NOT carry the `reverted past:` double-label: {text}"
+        );
+    }
+
+    /// Tier C (no-400 after shrink) — across the pinned shrink cells (category ×
+    /// arity × first/mid result), the shrunk trunk carries NEITHER a dangling call
+    /// NOR an orphan result. The shrink (drop the off-trunk result + remove its
+    /// orphan call by id) keeps the no-400 invariant the backstop guarantees
+    /// (ADR-0003 §D3.4; P0 F-8/F-9).
+    #[test]
+    fn matrix_no_dangling_or_orphan_after_pinned_shrink() {
+        for kind in [TagKind::Outcome, TagKind::Checkpoint] {
+            // arity-2 first-result shrink.
+            let r2 = render_with_backstop(
+                &parallel_fixture(NodeId(2), 2, kind),
+                &in_window_policy(),
+                IN_WINDOW_TURN,
+            );
+            assert_no_400(&r2, "pinned shrink a2 first-result");
+            // arity-3 first-result + mid-result shrink.
+            for active in [NodeId(2), NodeId(3)] {
+                let target = active.0 as usize;
+                let r3 = render_with_backstop(
+                    &parallel_fixture_3(active, target, kind),
+                    &in_window_policy(),
+                    IN_WINDOW_TURN,
+                );
+                assert_no_400(&r3, "pinned shrink a3");
             }
         }
     }

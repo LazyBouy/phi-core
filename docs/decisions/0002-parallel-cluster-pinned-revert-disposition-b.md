@@ -1,3 +1,4 @@
+<!-- Last verified: 2026-06-09 by Claude Code (KC-03 #81/D-TEST-0076 — §D2.1 Superseded-in-part by ADR-0003 §D3.1: the result-node keep-whole re-append is replaced by the simple tail-shrink contract) -->
 <!-- Last verified: 2026-06-09 by Claude Code (KC-02 #80/D-TEST-0075 — phi-core ADR-0002; target-aware pinned-revert disposition (B); SUPERSEDES-in-part ADR-0001 §D1.2) -->
 
 # phi-core ADR-0002 — Parallel-cluster pinned-revert disposition (B): reclaim-on-call-node + keep-cluster-on-result-node
@@ -26,6 +27,8 @@ The defect is **silent loss, not provider rejection.** The single-call-per-node 
 ## Sub-decisions
 
 ### §D2.1 — F1(B) reclaim-on-call-node + keep-whole-cluster-on-result-node (resolves F1; SUPERSEDES ADR-0001 §D1.2 M=1 re-append + M=1 keep-whole)
+
+> **Superseded-in-part by ADR-0003 §D3.1 (2026-06-09, KC-03 / #81 / D-TEST-0076):** clause (iii) — the result-node keep-whole re-append (the off-trunk parallel sibling re-materialised by call-node membership) — is REPLACED by the simple tail-shrink contract: a pinned revert onto X SHRINKS every node strictly after X uniformly across categories (Rule 1), so the pinned arm converges to the abandon arm; the gathered tail is NOT re-appended. The on-trunk-keep gate (clause i) is PRESERVED as Rule 1's don't-over-shrink guard. KC-02's (B) keep-whole was the misread #81 corrects. §D2.2 / §D2.3 / §D2.4 carry forward unchanged.
 
 **Pre-existing-behaviour:** ADR-0001 §D1.2 (KC-01) re-appended the off-trunk-direct-child result and kept the M=1 cluster whole (former `retain_pinned_calls_on_node` direct-child gate `lm.parent_id == Some(this_node_id) && tool_call_id == call_id`). KC-02 threads the caller's already-computed `node_is_call` as a new `tag_on_call_node: bool` parameter and makes the per-call disposition TARGET-AWARE:
 
