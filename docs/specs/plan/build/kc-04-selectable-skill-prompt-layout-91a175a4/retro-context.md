@@ -2,6 +2,7 @@
 
 **Cycle**: `91a175a4` · phi-core kernel lane · closes #78 / D-TEST-0073 (S3) · 2026-06-12
 **Status**: audited-pending-retro · joint-retro pending (first KC cycle since the KC-01..03 joint-retro)
+**#78 disposition**: **HELD OPEN** — primitive landed + unit-validated; NOT live-validated. Live close-gate deferred (user-directed 2026-06-12). **Validation vehicle (user-directed)**: run the live test through the i-phi YAML config path (#79: `[skills] prompt_format = "yaml"`) so the model genuinely sees YAML instead of XML; one transcript read confirms both #78 (primitive) and #79 (consumer knob). Do NOT close #78 until that passes.
 
 ## Cycle context
 
@@ -20,7 +21,7 @@
 ## Standards-update candidates drafted (NOT applied; joint-retro decides)
 
 1. **(LOW) Codify the "TECHNICAL-fork USER-DIVERGENT → harden the traded-away-safety test at iter-2" pattern.** When a USER-DIVERGENT lock on a TECHNICAL fork trades a safety margin for economy (here: always-quote → conditional-quote, trading invalid-YAML-immunity for fewer bytes), the iter-2 narrow re-author should explicitly promote the guarding test to MUST-SHIP. Candidate home: chunk-planner iter-2-reauthor guidance OR a one-line note in the fork-divergence observation. Single data point so far — watch for a 2nd before codifying.
-2. **(LOW) "Render-string-IS-the-wire" close-gate exemption.** Document that a model-facing render change whose output reaches the provider as plain system-prompt text (no provider re-encode / no tool interaction) discharges Rule 4 at the unit level (golden + parser round-trip + wiring), no live-transcript needed — distinct from disposition-mediated fixes (KC-02/03). Candidate home: `[[feedback_render_transcript_close_gate]]` clarifying note OR the phi-core-close-gate skill. Defer — may be obvious enough to not need codifying.
+2. **(MEDIUM — CORRECTED BY USER) The "render-string-IS-the-wire" exemption was the WRONG call.** The plan §6 used "the rendered string is the wire (YAML reaches the provider identically to XML)" to skip the live close-gate — i.e. golden + parser-round-trip + wiring test deemed to discharge Rule 4. **User overruled (2026-06-12)**: a model-facing change still warrants a live transcript read; "valid YAML produced + reaches system_prompt" is necessary but does NOT confirm the model *understands + acts on* the new layout (the entire value prop of the YAML option). Lesson: do NOT let a "syntactically-the-wire" argument substitute for the behavioral live read on a model-facing change. The right move was to HOLD the issue open until live-validated — which is now the disposition. Candidate home: a sharpening note on `[[feedback_render_transcript_close_gate]]` that "the rendered output IS the wire" is NOT a valid live-gate exemption for a model-facing format change. **Validation-vehicle insight (user-directed)**: when a kernel primitive's value is only realized through a consumer, run the live close-gate through the *real consumer config path* (here: i-phi `[skills] prompt_format="yaml"` via #79), not a synthetic kernel harness — one live run validates both tiers.
 
 ## Cycle-folder artifacts
 

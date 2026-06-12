@@ -13,7 +13,8 @@
 | Kernel-minimality | ✅ PASS (additive-only; zero consumer leakage; helpers private) |
 | Audit A (code+tests) | ✅ PASS 8/8 |
 | Audit B (docs+ADR) | ✅ PASS 8/8 |
-| **Overall** | ✅ **PASS — ready to close** |
+| Live close-gate (model sees YAML) | 🟡 **DEFERRED** (user-directed 2026-06-12) — run via i-phi `[skills] prompt_format="yaml"` (#79) + transcript read |
+| **Overall** | ✅ **Code PASS / unit-validated** — #78 **HELD OPEN** pending live YAML-config validation |
 
 ## §1 — Audit-pipeline summary
 
@@ -61,7 +62,7 @@ Kernel-minimality greps: single `available_skills:` emitter (skills.rs:300); `pr
 | Plan archive (`plan.md`) | ✅ `91a175a4/plan.md` |
 | Cycle-index row | ✅ appended (Status `in-flight` → flips at Phase 7) |
 | ADR-0004 | ✅ Accepted, 7 sections, §D4.1–§D4.5 |
-| Drift #78 / D-TEST-0073 | ⏳ closed by orchestrator at gate-4 close (this step) |
+| Drift #78 / D-TEST-0073 | 🟡 **HELD OPEN** — primitive landed + unit-validated, but NOT live-validated. Live close-gate deferred (user-directed 2026-06-12); to be run via the i-phi YAML config path (#79: set `[skills] prompt_format = "yaml"` so the model sees YAML) + transcript read. Do NOT close until that passes. |
 | Verified-headers (skills.md, architecture.md) | ✅ bumped 2026-06-12 |
 | rustdoc (3 new public items) | ✅ present |
 | audit-a/b-iter1.md | ✅ written |
