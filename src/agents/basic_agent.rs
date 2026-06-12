@@ -500,11 +500,27 @@ impl BasicAgent {
 
     /// Load skills and append their index to the system prompt.
     ///
-    /// The skills index is appended as XML per the [AgentSkills standard](https://agentskills.io).
-    /// The agent can then read individual SKILL.md files using the `read_file` tool
-    /// when it decides a skill is relevant.
-    pub fn with_skills(mut self, skills: crate::context::skills::SkillSet) -> Self {
-        let prompt_fragment = skills.format_for_prompt();
+    /// The skills index is appended as XML per the [AgentSkills standard](https://agentskills.io) —
+    /// XML is the default layout. The agent can then read individual SKILL.md files using the
+    /// `read_file` tool when it decides a skill is relevant. To opt into the lighter YAML
+    /// layout instead, use [`with_skills_format`](Self::with_skills_format).
+    pub fn with_skills(self, skills: crate::context::skills::SkillSet) -> Self {
+        self.with_skills_format(skills, crate::context::skills::SkillPromptFormat::Xml)
+    }
+
+    /// Load skills and append their index to the system prompt using the given layout.
+    ///
+    /// `SkillPromptFormat::Xml` (the default, used by [`with_skills`](Self::with_skills))
+    /// appends the byte-for-byte AgentSkills `<available_skills>` block; `SkillPromptFormat::Yaml`
+    /// appends a lighter YAML mapping + sequence carrying the same metadata. The skill index is
+    /// appended to the existing system prompt with a blank-line separator, exactly as
+    /// `with_skills` has always done.
+    pub fn with_skills_format(
+        mut self,
+        skills: crate::context::skills::SkillSet,
+        format: crate::context::skills::SkillPromptFormat,
+    ) -> Self {
+        let prompt_fragment = skills.format_for_prompt_as(format);
         if !prompt_fragment.is_empty() {
             if self.system_prompt.is_empty() {
                 self.system_prompt = prompt_fragment;
@@ -1925,5 +1941,37 @@ mod tests {
             agent.current_tool_timeout(),
             Some(std::time::Duration::from_millis(250))
         );
+    }
+
+    /// Tier E (KC-04) — `with_skills_format(set, Yaml)` reaches `system_prompt` with the YAML
+    /// block, while the default `with_skills(set)` still emits the XML block (default unchanged).
+    #[test]
+    fn kc04_with_skills_format_reaches_system_prompt() {
+        use crate::context::skills::{SkillPromptFormat, SkillSet};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let skill_dir = tmp.path().join("weather");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: weather\ndescription: Get current weather and forecasts.\n---\n\n# weather\n",
+        )
+        .unwrap();
+        let skills = SkillSet::load(&[tmp.path()]).unwrap();
+        assert_eq!(skills.len(), 1);
+
+        // YAML path: the YAML block reaches the system prompt.
+        let yaml_agent = BasicAgent::new(ModelConfig::anthropic("mock", "mock-model", "test-key"))
+            .with_skills_format(skills.clone(), SkillPromptFormat::Yaml);
+        assert!(yaml_agent.system_prompt.contains("available_skills:"));
+        assert!(yaml_agent.system_prompt.contains("- name: weather"));
+        assert!(!yaml_agent.system_prompt.contains("<available_skills>"));
+
+        // Default path (paired assert): `with_skills` still emits the XML block.
+        let xml_agent = BasicAgent::new(ModelConfig::anthropic("mock", "mock-model", "test-key"))
+            .with_skills(skills);
+        assert!(xml_agent.system_prompt.contains("<available_skills>"));
+        assert!(xml_agent.system_prompt.contains("<name>weather</name>"));
+        assert!(!xml_agent.system_prompt.contains("available_skills:"));
     }
 }

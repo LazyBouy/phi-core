@@ -1,4 +1,4 @@
-<!-- Last verified: 2026-04-05 by Claude Code -->
+<!-- Last verified: 2026-06-12 by Claude Code (KC-04 #78/D-TEST-0073 — selectable skill-prompt layout: XML stays the byte-for-byte default, opt-in YAML via with_skills_format / format_for_prompt_as; see ADR-0004) -->
 # Skills
 
 Skills extend an agent with domain expertise using the [AgentSkills](https://agentskills.io) open standard. A skill is a directory containing a `SKILL.md` file with instructions the agent can load on demand.
@@ -88,6 +88,33 @@ The agent's system prompt will include:
 ```
 
 When the agent encounters a task matching a skill, it reads the SKILL.md using the `read_file` tool and follows the instructions. No special infrastructure needed.
+
+## Prompt layout (XML default + opt-in YAML)
+
+XML is the **default** skill-index layout, per the [AgentSkills standard](https://agentskills.io/integrate-skills) — `with_skills(set)` and `SkillSet::format_for_prompt()` render the byte-for-byte `<available_skills>` block shown above, and existing consumers are unchanged.
+
+For token-budget-sensitive callers, a lighter **YAML** layout is opt-in. It carries the same `name`/`description`/`location` metadata triple but drops the XML tag overhead:
+
+```rust
+use phi_core::{BasicAgent, SkillSet, SkillPromptFormat};
+
+let agent = BasicAgent::new(model)
+    .with_skills_format(skills, SkillPromptFormat::Yaml);  // opt into YAML
+// .with_skills(skills) is unchanged — it is the XML default
+```
+
+The YAML index renders as:
+
+```yaml
+available_skills:
+  - name: git
+    description: "Git operations: commit, branch, merge, rebase."
+    location: "/path/to/skills/git/SKILL.md"
+```
+
+Scalar values are quoted only where YAML plain-scalar rules require it — a value containing a `:` (like the description above), a reserved word (`null`/`true`/`yes`), or a numeric/date-looking value is quoted so it round-trips back as a string; a plain safe value (e.g. a bare `git` name) stays unquoted. To render directly without an agent, use `SkillSet::format_for_prompt_as(SkillPromptFormat::Yaml)`.
+
+> **Why XML is the default:** the AgentSkills open standard specifies the `<available_skills>` XML block, so keeping it as the default preserves the standard's expectations and every consumer's behaviour byte-for-byte. YAML is purely an opt-in lighter alternative. See `docs/decisions/0004-selectable-skill-prompt-layout.md`.
 
 ## Precedence
 

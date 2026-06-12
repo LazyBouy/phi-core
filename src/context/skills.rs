@@ -47,6 +47,26 @@ pub struct SkillSet {
     skills: Vec<Skill>,
 }
 
+/// Layout for rendering the skill index into a system prompt.
+///
+/// `Xml` is the **default** — the byte-for-byte [AgentSkills standard](https://agentskills.io/integrate-skills)
+/// `<available_skills>` block that has always shipped. `Yaml` is an opt-in, lighter
+/// layout (a YAML mapping + sequence) that drops the XML tag overhead for token-budget
+/// sensitive callers. Both render the same `name`/`description`/`location` triple from the
+/// same `Skill` fields; only the surrounding syntax differs.
+///
+/// Selected per render via [`SkillSet::format_for_prompt_as`] or per agent via
+/// `BasicAgent::with_skills_format`. The default `SkillSet::format_for_prompt` and
+/// `BasicAgent::with_skills` route through the `Xml` branch unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SkillPromptFormat {
+    /// AgentSkills `<available_skills>` XML block — the default.
+    #[default]
+    Xml,
+    /// Lighter YAML mapping + sequence (`available_skills:` → `- name:/description:/location:`).
+    Yaml,
+}
+
 /*
 RUST QUIRK: `Path` vs `PathBuf`
 
@@ -232,27 +252,70 @@ impl SkillSet {
     /// ```
     ///
     /// Returns an empty string if no skills are loaded.
+    ///
+    /// This is the **XML default** — it delegates to
+    /// [`format_for_prompt_as`](Self::format_for_prompt_as)`(SkillPromptFormat::Xml)`, so its
+    /// output is byte-for-byte identical to the historical AgentSkills render. Use
+    /// `format_for_prompt_as` to opt into the lighter YAML layout.
     pub fn format_for_prompt(&self) -> String {
+        self.format_for_prompt_as(SkillPromptFormat::Xml)
+    }
+
+    /// Format skills for inclusion in a system prompt using the given layout.
+    ///
+    /// `SkillPromptFormat::Xml` (the default, also used by [`format_for_prompt`](Self::format_for_prompt))
+    /// renders the byte-for-byte [AgentSkills standard](https://agentskills.io/integrate-skills)
+    /// `<available_skills>` block. `SkillPromptFormat::Yaml` renders a lighter YAML mapping +
+    /// sequence carrying the same `name`/`description`/`location` triple. Returns an empty
+    /// string if no skills are loaded, for either format.
+    ///
+    /// The YAML branch quotes scalar values only where YAML plain-scalar rules require it
+    /// (so reserved words like `null`/`true` and numeric/date-looking values round-trip back
+    /// as strings); see [`SkillPromptFormat`].
+    pub fn format_for_prompt_as(&self, format: SkillPromptFormat) -> String {
         if self.skills.is_empty() {
             return String::new();
         }
 
-        let mut out = String::from("<available_skills>\n");
-        for skill in &self.skills {
-            out.push_str("  <skill>\n");
-            out.push_str(&format!("    <name>{}</name>\n", xml_escape(&skill.name)));
-            out.push_str(&format!(
-                "    <description>{}</description>\n",
-                xml_escape(&skill.description)
-            ));
-            out.push_str(&format!(
-                "    <location>{}</location>\n",
-                xml_escape(&skill.file_path.to_string_lossy())
-            ));
-            out.push_str("  </skill>\n");
+        match format {
+            SkillPromptFormat::Xml => {
+                let mut out = String::from("<available_skills>\n");
+                for skill in &self.skills {
+                    out.push_str("  <skill>\n");
+                    out.push_str(&format!("    <name>{}</name>\n", xml_escape(&skill.name)));
+                    out.push_str(&format!(
+                        "    <description>{}</description>\n",
+                        xml_escape(&skill.description)
+                    ));
+                    out.push_str(&format!(
+                        "    <location>{}</location>\n",
+                        xml_escape(&skill.file_path.to_string_lossy())
+                    ));
+                    out.push_str("  </skill>\n");
+                }
+                out.push_str("</available_skills>");
+                out
+            }
+            SkillPromptFormat::Yaml => {
+                let mut out = String::from("available_skills:\n");
+                for skill in &self.skills {
+                    out.push_str(&format!("  - name: {}\n", yaml_escape_scalar(&skill.name)));
+                    out.push_str(&format!(
+                        "    description: {}\n",
+                        yaml_escape_scalar(&skill.description)
+                    ));
+                    out.push_str(&format!(
+                        "    location: {}\n",
+                        yaml_escape_scalar(&skill.file_path.to_string_lossy())
+                    ));
+                }
+                // Match the XML branch's no-trailing-newline contract.
+                if out.ends_with('\n') {
+                    out.pop();
+                }
+                out
+            }
         }
-        out.push_str("</available_skills>");
-        out
     }
 }
 
@@ -426,6 +489,142 @@ fn xml_escape(s: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+/// Render a YAML scalar value, choosing **bare** (unquoted) when YAML plain-scalar rules
+/// permit it and a **double-quoted + escaped** form otherwise (F2.b conditional escaping).
+///
+/// The double-quoted form is emitted when ANY quote-trigger fires, so the value always
+/// round-trips back as the original STRING (never as a YAML bool/null/number/date):
+/// - the string is empty;
+/// - it has leading or trailing whitespace;
+/// - it contains a `:`, `#`, newline, tab, carriage-return, `"`, `'`, or `\`;
+/// - it begins with a YAML indicator char (`- ? : , [ ] { } & * ! | > % @ \``, or `~`);
+/// - it is a reserved/ambiguous plain scalar — `true`/`false`/`null`/`yes`/`no`/`on`/`off`/`~`
+///   (any case) — or it looks numeric / float / hex / octal / date-like (`42`, `3.14`,
+///   `0x1F`, `2026-06-12`).
+///
+/// When quoting, it escapes (backslash first) `\`→`\\`, `"`→`\"`, newline→`\n`, tab→`\t`,
+/// cr→`\r`. Private + single-file, mirroring `xml_escape`.
+fn yaml_escape_scalar(s: &str) -> String {
+    if yaml_scalar_needs_quoting(s) {
+        let escaped = s
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\t', "\\t")
+            .replace('\r', "\\r");
+        format!("\"{}\"", escaped)
+    } else {
+        s.to_string()
+    }
+}
+
+/// Decide whether a YAML scalar must be double-quoted to round-trip as a string.
+fn yaml_scalar_needs_quoting(s: &str) -> bool {
+    // Empty → must quote (bare empty scalar parses as null).
+    if s.is_empty() {
+        return true;
+    }
+
+    // Leading / trailing whitespace → must quote (otherwise stripped or ambiguous).
+    if s.starts_with(char::is_whitespace) || s.ends_with(char::is_whitespace) {
+        return true;
+    }
+
+    // Any structural / special char anywhere → must quote.
+    if s.chars()
+        .any(|c| matches!(c, ':' | '#' | '\n' | '\t' | '\r' | '"' | '\'' | '\\'))
+    {
+        return true;
+    }
+
+    // Leading YAML indicator char → must quote.
+    if let Some(first) = s.chars().next() {
+        if matches!(
+            first,
+            '-' | '?'
+                | ','
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '&'
+                | '*'
+                | '!'
+                | '|'
+                | '>'
+                | '%'
+                | '@'
+                | '`'
+                | '~'
+        ) {
+            return true;
+        }
+    }
+
+    // Reserved / ambiguous plain scalars (bool / null spellings, any case) → must quote.
+    let lower = s.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "true" | "false" | "null" | "yes" | "no" | "on" | "off" | "~"
+    ) {
+        return true;
+    }
+
+    // Numeric / float / hex / octal / date-looking → must quote so it stays a string.
+    if looks_numeric_or_date(s) {
+        return true;
+    }
+
+    false
+}
+
+/// Heuristic: does the scalar look like a number, float, hex, octal, or date so a YAML
+/// parser would type-coerce it away from a string?
+fn looks_numeric_or_date(s: &str) -> bool {
+    // Integer / float (with optional leading sign): all chars are digits / one dot / sign.
+    let body = s.strip_prefix(['+', '-']).unwrap_or(s);
+    if !body.is_empty() {
+        // Plain integer.
+        if body.bytes().all(|b| b.is_ascii_digit()) {
+            return true;
+        }
+        // Float: digits with exactly one dot, at least one digit present.
+        if body.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+            && body.bytes().filter(|b| *b == b'.').count() == 1
+            && body.bytes().any(|b| b.is_ascii_digit())
+        {
+            return true;
+        }
+    }
+
+    // Hex (0x…) / octal (0o…).
+    if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        if !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return true;
+        }
+    }
+    if let Some(rest) = s.strip_prefix("0o").or_else(|| s.strip_prefix("0O")) {
+        if !rest.is_empty() && rest.bytes().all(|b| (b'0'..=b'7').contains(&b)) {
+            return true;
+        }
+    }
+
+    // ISO-8601-ish date (YYYY-MM-DD).
+    let date_parts: Vec<&str> = s.split('-').collect();
+    if date_parts.len() == 3
+        && date_parts[0].len() == 4
+        && date_parts[1].len() == 2
+        && date_parts[2].len() == 2
+        && date_parts
+            .iter()
+            .all(|p| p.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return true;
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -577,6 +776,164 @@ mod tests {
         assert!(prompt.contains("&lt;tags&gt;"));
         assert!(prompt.contains("&amp;"));
         assert!(prompt.contains("&quot;quotes&quot;"));
+    }
+
+    // ---- KC-04: selectable skill-prompt layout (XML default + opt-in YAML) ----
+
+    /// Tier A — golden XML byte-for-byte pin. `format_for_prompt()` (the default) must equal
+    /// the exact AgentSkills `<available_skills>` block, with no trailing newline, escaping
+    /// name/description/location via `xml_escape`. Pinning the exact bytes guards the
+    /// byte-for-byte back-compat contract under the new selectable-layout API.
+    #[test]
+    fn kc04_golden_xml_byte_for_byte() {
+        let tmp = TempDir::new().unwrap();
+        create_skill(tmp.path(), "weather", "Get weather.");
+        let skills = SkillSet::load(&[tmp.path()]).unwrap();
+
+        // Build the exact expected bytes from the loaded skill's own (canonicalized) path,
+        // so the golden pins the layout (tags / indent / escaping / no trailing newline)
+        // independent of the tmp path.
+        let s = &skills.skills()[0];
+        let expected = format!(
+            "<available_skills>\n  <skill>\n    <name>{}</name>\n    <description>{}</description>\n    <location>{}</location>\n  </skill>\n</available_skills>",
+            xml_escape(&s.name),
+            xml_escape(&s.description),
+            xml_escape(&s.file_path.to_string_lossy()),
+        );
+
+        // The default path and the explicit Xml path are byte-identical.
+        assert_eq!(skills.format_for_prompt(), expected);
+        assert_eq!(
+            skills.format_for_prompt_as(SkillPromptFormat::Xml),
+            expected
+        );
+        // No trailing newline (matches the historical contract).
+        assert!(!expected.ends_with('\n'));
+    }
+
+    /// Tier B — YAML round-trip through `serde_yaml`. A multi-skill sequence renders as valid
+    /// YAML; parsing it back recovers every `name`/`description`/`location` field unchanged.
+    #[test]
+    fn kc04_yaml_round_trips_through_serde_yaml() {
+        let tmp = TempDir::new().unwrap();
+        create_skill(tmp.path(), "weather", "Get current weather and forecasts.");
+        create_skill(tmp.path(), "git", "Git operations: commit, branch, merge.");
+        let skills = SkillSet::load(&[tmp.path()]).unwrap();
+
+        let yaml = skills.format_for_prompt_as(SkillPromptFormat::Yaml);
+        let value: serde_yaml::Value = serde_yaml::from_str(&yaml).expect("renders valid YAML");
+
+        let seq = value
+            .get("available_skills")
+            .and_then(|v| v.as_sequence())
+            .expect("available_skills sequence present");
+        assert_eq!(seq.len(), 2);
+
+        // Skills sorted by name: git then weather. Each field recovers as the original string.
+        for (item, skill) in seq.iter().zip(skills.skills().iter()) {
+            assert_eq!(item.get("name").unwrap().as_str().unwrap(), skill.name);
+            assert_eq!(
+                item.get("description").unwrap().as_str().unwrap(),
+                skill.description
+            );
+            assert_eq!(
+                item.get("location").unwrap().as_str().unwrap(),
+                skill.file_path.to_string_lossy()
+            );
+        }
+        // `git`'s `:`-containing description proves the quote-trigger fired (else invalid YAML).
+        assert!(yaml.contains("Git operations: commit, branch, merge."));
+    }
+
+    /// Tier C-1 — escaping decision boundary: a `:`-containing description QUOTES and recovers
+    /// as a STRING, while a plain safe value (`weather`) stays BARE in the rendered bytes and
+    /// still recovers.
+    #[test]
+    fn kc04_yaml_decision_boundary_colon_quotes_plain_stays_bare() {
+        let tmp = TempDir::new().unwrap();
+        create_skill(tmp.path(), "weather", "Weather: now with colons.");
+        let skills = SkillSet::load(&[tmp.path()]).unwrap();
+
+        let yaml = skills.format_for_prompt_as(SkillPromptFormat::Yaml);
+        // The plain `weather` name renders BARE (no surrounding quotes).
+        assert!(yaml.contains("- name: weather\n"));
+        assert!(!yaml.contains("- name: \"weather\""));
+        // The `:`-containing description renders QUOTED.
+        assert!(yaml.contains("description: \"Weather: now with colons.\""));
+
+        // Round-trip: both recover as the original strings.
+        let value: serde_yaml::Value = serde_yaml::from_str(&yaml).expect("valid YAML");
+        let item = &value["available_skills"][0];
+        assert_eq!(item["name"].as_str().unwrap(), "weather");
+        assert_eq!(
+            item["description"].as_str().unwrap(),
+            "Weather: now with colons."
+        );
+
+        // Helper-level decision boundary.
+        assert_eq!(yaml_escape_scalar("weather"), "weather");
+        assert_eq!(
+            yaml_escape_scalar("Weather: now with colons."),
+            "\"Weather: now with colons.\""
+        );
+    }
+
+    /// Tier C-2 (MUST-SHIP) — reserved-word / numeric type-preservation. Values like `null`,
+    /// `true`, and `42` MUST quote so they round-trip back as STRINGS, not as YAML null / bool
+    /// / integer. A missed trigger here is a silent type-change defect — the highest-value
+    /// F2.b regression.
+    #[test]
+    fn kc04_yaml_reserved_words_and_numbers_preserve_string_type() {
+        for raw in [
+            "null",
+            "Null",
+            "NULL",
+            "true",
+            "True",
+            "false",
+            "yes",
+            "no",
+            "on",
+            "off",
+            "~",
+            "42",
+            "-7",
+            "3.14",
+            "0x1F",
+            "0o17",
+            "2026-06-12",
+        ] {
+            let escaped = yaml_escape_scalar(raw);
+            assert!(
+                escaped.starts_with('"') && escaped.ends_with('"'),
+                "{raw} must be quoted but was rendered bare as {escaped}"
+            );
+
+            // Round-trip through serde_yaml as a mapping value: must recover as a STRING.
+            let doc = format!("v: {escaped}");
+            let value: serde_yaml::Value = serde_yaml::from_str(&doc).expect("valid YAML");
+            assert_eq!(
+                value["v"].as_str(),
+                Some(raw),
+                "{raw} did not round-trip as a string"
+            );
+        }
+
+        // A genuinely-safe word stays bare and still recovers.
+        assert_eq!(yaml_escape_scalar("weather"), "weather");
+        let value: serde_yaml::Value = serde_yaml::from_str("v: weather").unwrap();
+        assert_eq!(value["v"].as_str(), Some("weather"));
+    }
+
+    /// Tier D — empty-set renders `""` for BOTH formats (same early-return as the XML branch).
+    #[test]
+    fn kc04_empty_set_returns_empty_for_both_formats() {
+        let tmp = TempDir::new().unwrap();
+        let skills = SkillSet::load(&[tmp.path()]).unwrap();
+        assert!(skills.is_empty());
+        assert_eq!(skills.format_for_prompt_as(SkillPromptFormat::Xml), "");
+        assert_eq!(skills.format_for_prompt_as(SkillPromptFormat::Yaml), "");
+        assert_eq!(skills.format_for_prompt(), "");
     }
 
     #[test]

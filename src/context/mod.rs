@@ -34,7 +34,7 @@ pub use compaction::{CompactedSection, CompactionBlock, TurnMap, TurnRange};
 pub use config::{CompactionConfig, CompactionScope, ContextConfig};
 pub use execution::{CurrentToolExecution, ExecutionLimits, ExecutionTracker};
 pub use orchestration::{build_context_from_session, compact_session_loops};
-pub use skills::SkillSet;
+pub use skills::{SkillPromptFormat, SkillSet};
 pub use strategy::{
     BlockCompactionStrategy, CompactionStrategy, DefaultBlockCompaction, DefaultCompaction,
 };

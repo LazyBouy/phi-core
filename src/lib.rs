@@ -68,7 +68,7 @@ pub use config::{
     agent_from_config, agent_from_config_with_registry, agents_from_config, parse_config,
     parse_config_file, AgentConfig, ConfigError, ConfigFormat,
 };
-pub use context::skills::SkillSet;
+pub use context::skills::{SkillPromptFormat, SkillSet};
 pub use context::{
     build_context_from_session, compact_session_loops, BlockCompactionStrategy, CompactedSection,
     CompactionBlock, CompactionConfig, CompactionScope, CompactionStrategy, ContextConfig,

@@ -1,4 +1,4 @@
-<!-- Last verified: 2026-06-03 by Claude Code (CC-10a: before_tool_execution signature bool → ToolGate) -->
+<!-- Last verified: 2026-06-12 by Claude Code (KC-04 #78/D-TEST-0073 — selectable skill-prompt layout: format_for_prompt_as(format) selector, XML default; see ADR-0004) -->
 # phi-core — System Architecture
 
 ## 1. Component Map
@@ -105,7 +105,8 @@
 - `SkillSet::load(dirs)` — Load skills from multiple directories; later entries override earlier ones on name conflict.
 - `SkillSet::load_dir(dir, source)` — Load skills from a single directory, tagging each with a source label.
 - `SkillSet::merge(other)` — Merge another `SkillSet` in; the other's skills override on name conflict.
-- `SkillSet::format_for_prompt()` — Render the skill list as an `<available_skills>` XML block ready for system-prompt injection.
+- `SkillSet::format_for_prompt()` — Render the skill list as an `<available_skills>` XML block ready for system-prompt injection (the XML default; delegates to `format_for_prompt_as(SkillPromptFormat::Xml)`).
+- `SkillSet::format_for_prompt_as(format)` — Render the skill list in the selected layout: `SkillPromptFormat::Xml` (default, byte-for-byte AgentSkills) or `SkillPromptFormat::Yaml` (opt-in lighter YAML mapping + sequence). See ADR-0004.
 
 ### McpClient (`src/mcp/`)
 **Responsibility:** MCP client that connects to external tool servers over stdio or HTTP. Adapts discovered tools into `AgentTool` instances.
@@ -590,7 +591,8 @@ Entity: SkillSet
   skills: Vec<Skill>
 
 Lifecycle: Loaded from disk at startup via SkillSet::load(dirs).
-           Formatted as XML via format_for_prompt() and appended to system prompt.
+           Formatted via format_for_prompt() [XML default] or format_for_prompt_as(format)
+           [selectable XML / opt-in YAML, see ADR-0004] and appended to system prompt.
            Agent reads full SKILL.md on-demand when activating a skill via read_file tool.
 ```
 
