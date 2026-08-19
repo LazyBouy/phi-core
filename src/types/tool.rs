@@ -285,4 +285,335 @@ pub trait AgentTool: Send + Sync {
     fn timeout(&self) -> Option<std::time::Duration> {
         None
     }
+
+    /// Short, model-facing one-liner for the turn-1 tool catalog (KC-05, #110).
+    ///
+    /// This is the description a progressive-catalog agent sends on the wire — it
+    /// must be lean enough to pay on every turn (see
+    /// [`SHORT_DESCRIPTION_MAX_CHARS`]). Defaults to [`description`](Self::description)
+    /// so every existing tool renders identically until it opts into a real split.
+    /// Tools with a large mental model (e.g. `revert_to_state`) override this with a
+    /// one-liner and move the full manual to [`detailed_description`](Self::detailed_description)
+    /// / `tool_help`.
+    fn short_description(&self) -> &str {
+        self.description()
+    }
+
+    /// Full extended manual, served on demand via `tool_help` (KC-05, #110).
+    ///
+    /// `None` (the default) means the tool has no separate detailed body — its
+    /// [`description`](Self::description) is already complete. A tool that splits its
+    /// documentation returns the full manual here (the same body a `tool_help(<name>)`
+    /// call surfaces) while keeping [`short_description`](Self::short_description) lean.
+    fn detailed_description(&self) -> Option<&str> {
+        None
+    }
+
+    /// Whether this tool carries a large parameter schema worth deferring — the
+    /// token-magnification case the progressive tool-catalog keys on.
+    ///
+    /// Consumed by the progressive-catalog `engage_on_large_schema` trigger
+    /// ([`ProgressiveToolCatalog`](crate::agent_loop::ProgressiveToolCatalog)): an
+    /// agent that attaches such tools benefits most from a reduced catalog because
+    /// their schemas are the P0 magnification case — MCP `inputSchema`s and
+    /// OpenAPI-generated parameter schemas. Defaults to `false`; `McpToolAdapter`
+    /// and `OpenApiToolAdapter` override to `true`. This is a general
+    /// schema-magnitude signal, not consumer policy.
+    fn has_large_schema(&self) -> bool {
+        false
+    }
+}
+
+/// Maximum length (in `char`s) of a tool's [`short_description`](AgentTool::short_description)
+/// — the model-facing one-liner in the turn-1 catalog (KC-05, #110).
+///
+/// A description the model reads is load-bearing, so an over-long short description
+/// fails [`validate_tool_registration`] by default (the F1.a hard-error stance) rather
+/// than being silently truncated on the wire. Kernel built-ins are 122–196 chars;
+/// 256 leaves comfortable headroom above the longest (`edit_file`, 196) and forces
+/// only the intended `revert_to_state` split.
+pub const SHORT_DESCRIPTION_MAX_CHARS: usize = 256;
+
+/// Error returned by [`validate_tool_registration`] when a tool violates the
+/// kernel tool-registration contract (KC-05, #110).
+///
+/// Hard-error is the kernel DEFAULT stance (F1.a). The STANCE is a
+/// consumer-overridable default (F2.b): a consumer that prefers truncate-with-warn
+/// may ignore the `Err` and truncate itself — phi-core bakes in no policy beyond
+/// exposing this primitive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolRegistrationError {
+    /// The tool's [`name`](AgentTool::name) is empty.
+    MissingName,
+    /// The tool's [`short_description`](AgentTool::short_description) is empty.
+    MissingShortDescription {
+        /// The offending tool's name.
+        tool: String,
+    },
+    /// The tool's [`short_description`](AgentTool::short_description) exceeds
+    /// [`SHORT_DESCRIPTION_MAX_CHARS`].
+    ShortDescriptionTooLong {
+        /// The offending tool's name.
+        tool: String,
+        /// Actual `short_description` length in `char`s.
+        len: usize,
+        /// The configured maximum ([`SHORT_DESCRIPTION_MAX_CHARS`]).
+        max: usize,
+    },
+}
+
+impl std::fmt::Display for ToolRegistrationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ToolRegistrationError::MissingName => {
+                write!(f, "tool registration invalid: name() is empty")
+            }
+            ToolRegistrationError::MissingShortDescription { tool } => {
+                write!(
+                    f,
+                    "tool {tool:?} registration invalid: short_description() is empty"
+                )
+            }
+            ToolRegistrationError::ShortDescriptionTooLong { tool, len, max } => {
+                write!(
+                    f,
+                    "tool {tool:?} registration invalid: short_description() is {len} chars, exceeds the {max}-char limit"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ToolRegistrationError {}
+
+/// Validate a tool against the kernel tool-registration contract (KC-05, #110).
+///
+/// The kernel DEFAULT stance is hard-error (F1.a): an empty [`name`](AgentTool::name),
+/// an empty [`short_description`](AgentTool::short_description), or a short description
+/// exceeding [`SHORT_DESCRIPTION_MAX_CHARS`] returns `Err`. A missing
+/// [`detailed_description`](AgentTool::detailed_description) is NOT an error — it is a
+/// non-fatal advisory surfaced by [`tool_registration_warning`].
+///
+/// phi-core exposes this primitive but does not force-invoke it on the hot path, so
+/// no policy is baked into the kernel (F2.b): a consumer calls this to opt into the
+/// hard-error stance, or ignores it and truncates/warns per its own policy.
+pub fn validate_tool_registration(tool: &dyn AgentTool) -> Result<(), ToolRegistrationError> {
+    if tool.name().is_empty() {
+        return Err(ToolRegistrationError::MissingName);
+    }
+    let short = tool.short_description();
+    if short.is_empty() {
+        return Err(ToolRegistrationError::MissingShortDescription {
+            tool: tool.name().to_string(),
+        });
+    }
+    let len = short.chars().count();
+    if len > SHORT_DESCRIPTION_MAX_CHARS {
+        return Err(ToolRegistrationError::ShortDescriptionTooLong {
+            tool: tool.name().to_string(),
+            len,
+            max: SHORT_DESCRIPTION_MAX_CHARS,
+        });
+    }
+    Ok(())
+}
+
+/// Non-fatal registration advisory for a tool (KC-05, #110).
+///
+/// Returns `Some(message)` when the tool has no
+/// [`detailed_description`](AgentTool::detailed_description) — `tool_help(<name>)`
+/// will fall back to its short description for that tool. This is advisory only
+/// (never fails a build); the F1.a hard-error cases are surfaced by
+/// [`validate_tool_registration`] instead.
+pub fn tool_registration_warning(tool: &dyn AgentTool) -> Option<String> {
+    if tool.detailed_description().is_none() {
+        Some(format!(
+            "tool {:?} has no detailed_description(); tool_help falls back to its short description",
+            tool.name()
+        ))
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod kc05_registration_tests {
+    use super::*;
+
+    /// A tool that overrides ONLY the pre-KC-05 surface (name/label/description/
+    /// schema/execute) and inherits all three new default methods — the backcompat
+    /// shape every one of the 15 existing impls has.
+    struct PlainTool {
+        name: String,
+        desc: String,
+    }
+
+    #[async_trait::async_trait]
+    impl AgentTool for PlainTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn label(&self) -> &str {
+            "Plain"
+        }
+        fn description(&self) -> &str {
+            &self.desc
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: ToolContext,
+        ) -> Result<ToolResult, ToolError> {
+            Ok(ToolResult {
+                content: vec![],
+                details: serde_json::Value::Null,
+                child_loop_id: None,
+            })
+        }
+    }
+
+    /// A tool that supplies a real short/detailed split.
+    struct SplitTool {
+        short: String,
+        detailed: String,
+    }
+
+    #[async_trait::async_trait]
+    impl AgentTool for SplitTool {
+        fn name(&self) -> &str {
+            "split"
+        }
+        fn label(&self) -> &str {
+            "Split"
+        }
+        fn description(&self) -> &str {
+            &self.detailed
+        }
+        fn short_description(&self) -> &str {
+            &self.short
+        }
+        fn detailed_description(&self) -> Option<&str> {
+            Some(&self.detailed)
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: ToolContext,
+        ) -> Result<ToolResult, ToolError> {
+            Ok(ToolResult {
+                content: vec![],
+                details: serde_json::Value::Null,
+                child_loop_id: None,
+            })
+        }
+    }
+
+    // ── Tier A — trait split defaults + backcompat ──────────────────────────
+
+    #[test]
+    fn short_description_defaults_to_description() {
+        let t = PlainTool {
+            name: "plain".into(),
+            desc: "does a plain thing".into(),
+        };
+        // A tool overriding neither renders `short_description()` == `description()`.
+        assert_eq!(t.short_description(), t.description());
+        assert_eq!(t.short_description(), "does a plain thing");
+    }
+
+    #[test]
+    fn detailed_description_defaults_to_none() {
+        let t = PlainTool {
+            name: "plain".into(),
+            desc: "does a plain thing".into(),
+        };
+        assert!(t.detailed_description().is_none());
+        // has_large_schema also defaults false (backcompat schema-magnitude signal).
+        assert!(!t.has_large_schema());
+    }
+
+    #[test]
+    fn split_override_supplies_short_and_detailed() {
+        let t = SplitTool {
+            short: "one-liner".into(),
+            detailed: "the full manual with all the depth".into(),
+        };
+        assert_eq!(t.short_description(), "one-liner");
+        assert_eq!(
+            t.detailed_description(),
+            Some("the full manual with all the depth")
+        );
+        // description() is the full body; short is the lean wire form.
+        assert_ne!(t.short_description(), t.description());
+    }
+
+    // ── Tier E — registration validation (F1.a hard-error / F2.b overridable) ─
+
+    #[test]
+    fn validation_passes_for_valid_tool() {
+        let t = SplitTool {
+            short: "a compliant short description".into(),
+            detailed: "the full manual".into(),
+        };
+        assert!(validate_tool_registration(&t).is_ok());
+        // Valid + has a detailed body ⇒ no advisory warning.
+        assert!(tool_registration_warning(&t).is_none());
+    }
+
+    #[test]
+    fn validation_errors_on_over_limit_short() {
+        let t = SplitTool {
+            short: "x".repeat(SHORT_DESCRIPTION_MAX_CHARS + 1),
+            detailed: "body".into(),
+        };
+        match validate_tool_registration(&t) {
+            Err(ToolRegistrationError::ShortDescriptionTooLong { len, max, .. }) => {
+                assert_eq!(len, SHORT_DESCRIPTION_MAX_CHARS + 1);
+                assert_eq!(max, SHORT_DESCRIPTION_MAX_CHARS);
+            }
+            other => panic!("expected ShortDescriptionTooLong, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validation_errors_on_missing_short_or_name() {
+        // Empty short_description ⇒ MissingShortDescription.
+        let empty_short = SplitTool {
+            short: String::new(),
+            detailed: "body".into(),
+        };
+        assert!(matches!(
+            validate_tool_registration(&empty_short),
+            Err(ToolRegistrationError::MissingShortDescription { .. })
+        ));
+        // Empty name ⇒ MissingName (short inherits description here).
+        let empty_name = PlainTool {
+            name: String::new(),
+            desc: "non-empty".into(),
+        };
+        assert!(matches!(
+            validate_tool_registration(&empty_name),
+            Err(ToolRegistrationError::MissingName)
+        ));
+    }
+
+    #[test]
+    fn validation_warns_on_missing_detailed() {
+        // A tool with no detailed_description() passes hard validation but yields
+        // an advisory warning (never an error).
+        let t = PlainTool {
+            name: "plain".into(),
+            desc: "does a plain thing".into(),
+        };
+        assert!(validate_tool_registration(&t).is_ok());
+        let warn = tool_registration_warning(&t);
+        assert!(warn.is_some(), "expected a missing-detailed advisory");
+        assert!(warn.unwrap().contains("detailed_description"));
+    }
 }

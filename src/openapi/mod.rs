@@ -6,9 +6,9 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use phi-core::openapi::{OpenApiToolAdapter, OpenApiConfig, OperationFilter};
+//! use phi_core::openapi::{OpenApiToolAdapter, OpenApiConfig, OperationFilter};
 //!
-//! # fn example() -> Result<(), phi-core::openapi::OpenApiError> {
+//! # fn example() -> Result<(), phi_core::openapi::OpenApiError> {
 //! let spec = std::fs::read_to_string("openapi.yaml")?;
 //! let config = OpenApiConfig::new()
 //!     .with_bearer_token("sk-...");

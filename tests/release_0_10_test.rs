@@ -211,6 +211,7 @@ async fn revert_render_policy_strips_old_lesson_tags_from_llm_prompt() {
         tool_timeout: None,
         response_format: phi_core::provider::ResponseFormat::Text,
         provider_wire_sink: None,
+        progressive_tool_catalog: Default::default(),
         retry_config: phi_core::RetryConfig::default(),
         before_turn: None,
         after_turn: None,

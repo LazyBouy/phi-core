@@ -10,7 +10,7 @@ use crate::agent_loop::{
     agent_loop, agent_loop_continue, AfterCompactionEndFn, AfterLoopFn, AfterToolExecutionFn,
     AfterToolExecutionUpdateFn, AfterTurnFn, AgentLoopConfig, BeforeCompactionStartFn,
     BeforeLoopFn, BeforeToolExecutionFn, BeforeToolExecutionUpdateFn, BeforeTurnFn, ConvertToLlmFn,
-    OnErrorFn, ToolGate, TransformContextFn,
+    OnErrorFn, ProgressiveToolCatalog, ToolGate, TransformContextFn,
 };
 use crate::context::{CompactionStrategy, ContextConfig, ExecutionLimits};
 use crate::mcp::{McpClient, McpError, McpToolAdapter};
@@ -200,6 +200,10 @@ pub struct BasicAgent {
     /// this sink for every provider call. Default `None` (zero overhead). Set via
     /// [`with_provider_wire_sink`](BasicAgent::with_provider_wire_sink).
     pub provider_wire_sink: Option<Arc<dyn crate::provider::ProviderWireSink>>,
+    /// KC-05 (#109) — progressive tool-catalog disclosure knob, threaded into
+    /// `AgentLoopConfig` at `build_config`. Default OFF (zero wire change). Set via
+    /// [`with_progressive_tool_catalog`](BasicAgent::with_progressive_tool_catalog).
+    pub progressive_tool_catalog: ProgressiveToolCatalog,
     pub retry_config: crate::provider::retry::RetryConfig,
 
     // Lifecycle callbacks
@@ -224,6 +228,13 @@ pub struct BasicAgent {
     context_translation: Option<Arc<dyn ContextTranslationStrategy>>,
     prun_pending: Option<Arc<Mutex<Vec<crate::tools::prun::PrunRequest>>>>,
     revert_pending: Option<Arc<Mutex<Vec<crate::tools::revert::RevertRequest>>>>,
+
+    /// KC-05 (#109) — shared slot for the `tool_help` build-time catalog snapshot.
+    /// `Some` iff [`with_tool_help`](Self::with_tool_help) opted in (it grabs the
+    /// installed `ToolHelpTool`'s slot handle). `build_config` fills it from the
+    /// folded tool set so `tool_help` serves full schemas on demand; `None` means
+    /// the static-map path (back-compat).
+    tool_help_catalog: Option<Arc<Mutex<Option<crate::tools::ToolCatalogSnapshot>>>>,
 
     /// Render policy for Composition I trunk-context assembly. Inert unless
     /// `with_revert_tool()` opted into revert mode AND a revert has set the
@@ -302,6 +313,7 @@ impl BasicAgent {
             tool_timeout: None,
             response_format: crate::provider::ResponseFormat::Text,
             provider_wire_sink: None,
+            progressive_tool_catalog: ProgressiveToolCatalog::default(), // OFF
             retry_config: crate::provider::retry::RetryConfig::default(), // 3 retries
             before_turn: None,
             after_turn: None,
@@ -320,6 +332,7 @@ impl BasicAgent {
             context_translation: None,
             prun_pending: None,
             revert_pending: None,
+            tool_help_catalog: None,
             revert_render_policy: RevertRenderPolicy::default(),
             current_tool: Arc::new(Mutex::new(None)),
             config_id: None,
@@ -490,6 +503,19 @@ impl BasicAgent {
         sink: Arc<dyn crate::provider::ProviderWireSink>,
     ) -> Self {
         self.provider_wire_sink = Some(sink);
+        self
+    }
+
+    /// Configure progressive tool-catalog disclosure (KC-05, #109).
+    ///
+    /// Default is OFF ([`ProgressiveToolCatalog::default`]) — the turn-1 `tools[]`
+    /// is byte-identical to historical behaviour. Enable it (with a count/MCP
+    /// threshold) to send a lean turn-1 catalog (name + `short_description()` +
+    /// a `{"type":"object"}` `parameters` stub) and let the model fetch each
+    /// tool's full schema + detailed manual on demand via `tool_help`. See
+    /// [`AgentLoopConfig::progressive_tool_catalog`](crate::agent_loop::AgentLoopConfig::progressive_tool_catalog).
+    pub fn with_progressive_tool_catalog(mut self, catalog: ProgressiveToolCatalog) -> Self {
+        self.progressive_tool_catalog = catalog;
         self
     }
 
@@ -792,8 +818,13 @@ impl BasicAgent {
     /// per-tool bodies can register its own [`ToolHelpTool`] via
     /// [`with_tools`](Self::with_tools) instead.
     pub fn with_tool_help(mut self) -> Self {
-        self.tools
-            .push(Arc::new(crate::tools::ToolHelpTool::with_default_help()));
+        // KC-05 (#109): grab the tool's shared catalog slot BEFORE type-erasing it
+        // into `Arc<dyn AgentTool>`, so `build_config` can fill the snapshot later
+        // (no downcast needed). Default path is unchanged when this opt-in is not
+        // used — the slot stays empty and `tool_help` serves the static map.
+        let tool_help = crate::tools::ToolHelpTool::with_default_help();
+        self.tool_help_catalog = Some(tool_help.catalog_slot());
+        self.tools.push(Arc::new(tool_help));
         self
     }
 
@@ -1263,6 +1294,15 @@ impl BasicAgent {
         let follow_up_queue = self.follow_up_queue.clone();
         let follow_up_mode = self.follow_up_mode;
 
+        // KC-05 (#109): fill the tool_help catalog snapshot from the now-complete
+        // tool set (interior mutability on the shared slot, so `&self` suffices).
+        // The `ToolHelpTool` installed by `with_tool_help` shares this slot, so it
+        // will serve full schemas + detailed bodies on demand. Cycle-free: the
+        // snapshot owns its data and holds no reference back to the tools.
+        if let Some(slot) = &self.tool_help_catalog {
+            *slot.lock().unwrap() = Some(crate::tools::build_tool_catalog_snapshot(&self.tools));
+        }
+
         // BasicAgent's constructor requires a `ModelConfig`, so this branch is
         // unreachable — wrap in Ok unconditionally. The Result is in the trait
         // signature for the benefit of custom Agent implementors that may not
@@ -1297,6 +1337,7 @@ impl BasicAgent {
             tool_timeout: self.tool_timeout,
             response_format: self.response_format.clone(),
             provider_wire_sink: self.provider_wire_sink.clone(),
+            progressive_tool_catalog: self.progressive_tool_catalog.clone(),
             retry_config: self.retry_config.clone(),
             get_follow_up_messages: Some(Box::new(move || {
                 let mut queue = lock_queue(&follow_up_queue);

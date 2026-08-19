@@ -1,4 +1,4 @@
-<!-- Last verified: 2026-04-05 by Claude Code -->
+<!-- Last verified: 2026-08-19 by Claude Code (KC-05: config-gated reduced tool-catalog render branch; OFF path byte-identical) -->
 
 > For pseudocode conventions, see the [README](../README.md#pseudocode-conventions).
 ### `stream_assistant_response` *(src/agent_loop/)*
@@ -29,9 +29,17 @@ FUNCTION stream_assistant_response(
                  THEN config.convert_to_llm(messages)
                  ELSE [m FOR m IN messages IF m is Llm variant]
 
-  // Build tool schema list (schema only, no execute functions)
+  // Build tool schema list (schema only, no execute functions).
+  // KC-05 [EXISTS] — progressive tool-catalog disclosure. When the config knob
+  // engages (enabled AND tools.len() > min_tools OR an MCP tool attached), each
+  // entry carries short_description() + a {"type":"object"} stub; the model
+  // fetches the full schema on demand via tool_help. Default OFF ⇒ `progressive`
+  // is false and this render is BYTE-IDENTICAL to the historical full form.
+  progressive ← config.progressive_tool_catalog.engages(context.tools)
   tool_defs ← [
-    ToolDefinition(name, description, parameters_schema)
+    IF progressive
+    THEN ToolDefinition(name, short_description, {"type":"object"})
+    ELSE ToolDefinition(name, description, parameters_schema)
     FOR EACH tool IN context.tools
   ]
 

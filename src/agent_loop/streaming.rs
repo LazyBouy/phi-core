@@ -279,13 +279,33 @@ pub(super) async fn stream_assistant_response(
     // Build tool definitions — the JSON Schema descriptions the LLM uses to decide which tool to call.
     // `.iter().map(...).collect()` is the idiomatic Rust "transform a collection" pattern.
     // Python analogy: [ToolDefinition(name=t.name(), ...) for t in context.tools]
+    //
+    // KC-05 (#109) — progressive tool-catalog disclosure. When the config knob is
+    // engaged (`enabled` + count/MCP threshold met, see
+    // `ProgressiveToolCatalog::engages`), each catalog entry carries the tool's
+    // `short_description()` + a minimal-valid `{"type":"object"}` `parameters`
+    // stub instead of the full schema; the model fetches the full schema +
+    // detailed manual on demand via `tool_help`. Default OFF ⇒ `progressive` is
+    // `false`, this branch is unreachable, and the wire is byte-identical to the
+    // historical full render (the golden-OFF test pins that).
+    let progressive = config.progressive_tool_catalog.engages(&context.tools);
     let tool_defs: Vec<crate::provider::ToolDefinition> = context
         .tools
         .iter()
-        .map(|t| crate::provider::ToolDefinition {
-            name: t.name().to_string(),
-            description: t.description().to_string(),
-            parameters: t.parameters_schema(),
+        .map(|t| {
+            if progressive {
+                crate::provider::ToolDefinition {
+                    name: t.name().to_string(),
+                    description: t.short_description().to_string(),
+                    parameters: serde_json::json!({ "type": "object" }),
+                }
+            } else {
+                crate::provider::ToolDefinition {
+                    name: t.name().to_string(),
+                    description: t.description().to_string(),
+                    parameters: t.parameters_schema(),
+                }
+            }
         })
         .collect();
 

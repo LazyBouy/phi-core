@@ -154,6 +154,15 @@ impl AgentTool for OpenApiToolAdapter {
         self.info.parameters_schema.clone()
     }
 
+    /// KC-05 (#109): OpenAPI-generated tools carry large parameter schemas (one
+    /// operation's full request shape) — the progressive-catalog
+    /// `engage_on_large_schema` magnification case, alongside MCP adapters.
+    /// Overrides the trait default so an agent with OpenAPI tools attached can
+    /// engage the reduced catalog even below the tool-count threshold.
+    fn has_large_schema(&self) -> bool {
+        true
+    }
+
     async fn execute(
         &self,
         params: serde_json::Value, // LLM INPUT — JSON object with path/query/header/body params as top-level keys

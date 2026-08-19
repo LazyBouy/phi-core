@@ -31,6 +31,7 @@ fn make_config(provider: Arc<dyn phi_core::provider::StreamProvider>) -> AgentLo
         tool_timeout: None,
         response_format: phi_core::provider::ResponseFormat::Text,
         provider_wire_sink: None,
+        progressive_tool_catalog: Default::default(),
         retry_config: phi_core::RetryConfig::default(),
         before_turn: None,
         after_turn: None,
@@ -882,6 +883,7 @@ async fn test_retry_on_rate_limit_succeeds() {
         tool_timeout: None,
         response_format: phi_core::provider::ResponseFormat::Text,
         provider_wire_sink: None,
+        progressive_tool_catalog: Default::default(),
         retry_config: phi_core::RetryConfig {
             max_retries: 3,
             initial_delay_ms: 10,
@@ -975,6 +977,7 @@ async fn test_retry_exhausted_returns_error() {
         tool_timeout: None,
         response_format: phi_core::provider::ResponseFormat::Text,
         provider_wire_sink: None,
+        progressive_tool_catalog: Default::default(),
         retry_config: phi_core::RetryConfig {
             max_retries: 2,
             initial_delay_ms: 10,
@@ -1079,6 +1082,7 @@ async fn test_no_retry_on_auth_error() {
         tool_timeout: None,
         response_format: phi_core::provider::ResponseFormat::Text,
         provider_wire_sink: None,
+        progressive_tool_catalog: Default::default(),
         retry_config: phi_core::RetryConfig::default(), // 3 retries, but auth is not retryable
         before_turn: None,
         after_turn: None,
@@ -1162,6 +1166,7 @@ async fn test_retry_none_disables_retries() {
         tool_timeout: None,
         response_format: phi_core::provider::ResponseFormat::Text,
         provider_wire_sink: None,
+        progressive_tool_catalog: Default::default(),
         retry_config: phi_core::RetryConfig::none(), // disabled
         before_turn: None,
         after_turn: None,
@@ -1450,6 +1455,7 @@ async fn test_on_error_fires_on_provider_error() {
         tool_timeout: None,
         response_format: phi_core::provider::ResponseFormat::Text,
         provider_wire_sink: None,
+        progressive_tool_catalog: Default::default(),
         retry_config: phi_core::RetryConfig::none(),
         before_turn: None,
         after_turn: None,
@@ -2926,6 +2932,7 @@ async fn test_custom_compaction_strategy_is_called() {
         tool_timeout: None,
         response_format: phi_core::provider::ResponseFormat::Text,
         provider_wire_sink: None,
+        progressive_tool_catalog: Default::default(),
         retry_config: phi_core::RetryConfig::none(),
         before_turn: None,
         after_turn: None,
@@ -3040,6 +3047,7 @@ async fn test_none_compaction_strategy_uses_default() {
         tool_timeout: None,
         response_format: phi_core::provider::ResponseFormat::Text,
         provider_wire_sink: None,
+        progressive_tool_catalog: Default::default(),
         retry_config: phi_core::RetryConfig::none(),
         before_turn: None,
         after_turn: None,

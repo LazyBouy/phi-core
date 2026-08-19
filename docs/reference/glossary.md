@@ -1,4 +1,4 @@
-<!-- Last verified: 2026-04-05 by Claude Code -->
+<!-- Last verified: 2026-08-19 by Claude Code (KC-05: progressive tool-catalog disclosure capability) -->
 # phi-core — Project Overview
 
 ## 1. Purpose Statement
@@ -15,6 +15,7 @@
 | Parallel, sequential, or batched tool execution | `src/agent_loop/:execute_tool_calls()` |
 | Context compaction via CompactionBlock overlays (legacy: tiered compact_messages()) | `src/context/` — compaction is now modeled via `CompactionBlock` |
 | Built-in coding tools: bash execution, file read/write/edit, directory listing, grep search | `src/tools/` |
+| **Progressive tool-catalog disclosure**: a config-gated (default OFF) primitive that sends a lean turn-1 `tools[]` (short description + `{"type":"object"}` stub) and serves each tool's full schema + detailed manual on demand via `tool_help`; the `AgentTool` trait's `short_description()` / `detailed_description()` split + a registration-validation primitive (KC-05, #109/#110) | `src/agent_loop/config.rs` (`ProgressiveToolCatalog`), `src/agent_loop/streaming.rs`, `src/types/tool.rs`, `src/tools/tool_help.rs` |
 | Sub-agent delegation: run an isolated child agent as a tool | `src/agents/sub_agent.rs` |
 | Model Context Protocol (MCP) client for stdio and HTTP tool servers | `src/mcp/` |
 | AgentSkills system: load instruction sets from directory-based skill files | `src/context/skills.rs` |

@@ -129,6 +129,14 @@ impl AgentTool for McpToolAdapter {
         }
     }
 
+    /// KC-05 (#109): MCP tools carry large remote `inputSchema`s — the
+    /// progressive-catalog `engage_on_large_schema` magnification case. Overrides
+    /// the trait default so an agent with MCP tools attached can engage the reduced
+    /// catalog even below the tool-count threshold.
+    fn has_large_schema(&self) -> bool {
+        true
+    }
+
     async fn execute(
         &self,
         params: serde_json::Value, // LLM INPUT — forwarded directly to McpClient::call_tool as arguments

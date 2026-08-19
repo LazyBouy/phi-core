@@ -896,6 +896,28 @@ mod tests {
     }
 
     #[test]
+    fn kc05_reduced_stub_parameters_serialize_to_input_schema() {
+        // KC-05 (#109) F4.b: a reduced-catalog tool ships a minimal-valid
+        // `{"type":"object"}` `parameters` stub. Anthropic REQUIRES `input_schema`
+        // to be an object (null/absent is rejected), so assert the stub
+        // round-trips cleanly to `input_schema` with zero wire-type change.
+        let mut config = make_config(CacheConfig::default());
+        config.tools = vec![ToolDefinition {
+            name: "revert_to_state".into(),
+            description: "Rewind the conversation to an earlier point (short).".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+        let body = build_request_body(&config, false);
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools[0]["name"], "revert_to_state");
+        assert_eq!(
+            tools[0]["input_schema"],
+            serde_json::json!({"type": "object"}),
+            "reduced stub parameters must serialize to an object input_schema"
+        );
+    }
+
+    #[test]
     fn test_cache_auto_places_all_breakpoints() {
         let body = build_request_body(&make_config(CacheConfig::default()), false);
 

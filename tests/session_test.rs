@@ -32,6 +32,7 @@ fn make_config(provider: Arc<dyn phi_core::provider::StreamProvider>) -> AgentLo
         tool_timeout: None,
         response_format: phi_core::provider::ResponseFormat::Text,
         provider_wire_sink: None,
+        progressive_tool_catalog: Default::default(),
         retry_config: phi_core::RetryConfig::default(),
         before_turn: None,
         after_turn: None,

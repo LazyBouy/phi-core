@@ -1,4 +1,4 @@
-<!-- Last verified: 2026-06-04 by Claude Code (CC-15: add tool_help on-demand doc channel; default_tools() now 7) -->
+<!-- Last verified: 2026-08-19 by Claude Code (KC-05: progressive tool-catalog disclosure — short/detailed trait split + catalog-backed tool_help + registration validation) -->
 
 # Tools
 
@@ -28,6 +28,45 @@ pub trait AgentTool: Send + Sync {
 | `description()` | Tells the LLM what the tool does |
 | `parameters_schema()` | JSON Schema for the tool's parameters |
 | `execute()` | Runs the tool, returns `ToolResult` or `ToolError`. Receives a `ToolContext` with cancellation, update, and progress callbacks. |
+
+### Default methods (backward-compatible) [EXISTS]
+
+The trait also ships several **default methods** so existing impls compile
+unchanged (the `timeout()` precedent). KC-05 adds the short/detailed description
+split used by progressive tool-catalog disclosure:
+
+```rust
+// Optional overrides — all have defaults, so existing tools need no changes.
+fn timeout(&self) -> Option<std::time::Duration> { None }
+
+// KC-05 — short/detailed description split (#110):
+fn short_description(&self) -> &str { self.description() }   // model-facing wire one-liner
+fn detailed_description(&self) -> Option<&str> { None }      // full manual, served via tool_help
+fn has_large_schema(&self) -> bool { false }                 // large-schema magnification trigger
+```
+
+| Default method | Purpose |
+|--------|---------|
+| `short_description()` | The lean one-liner sent in the turn-1 catalog when [progressive disclosure](#progressive-tool-catalog-disclosure) is engaged. Defaults to `description()`. |
+| `detailed_description()` | The full extended manual, served on demand via `tool_help`. `None` (default) means the tool has no separate detailed body. |
+| `has_large_schema()` | `true` for tools carrying a large parameter schema (MCP `inputSchema`s, OpenAPI-generated schemas) — the progressive `engage_on_large_schema` trigger. `McpToolAdapter` + `OpenApiToolAdapter` override this. |
+
+### Registration validation [EXISTS]
+
+A kernel primitive validates a tool against the registration contract (#110):
+
+```rust
+pub const SHORT_DESCRIPTION_MAX_CHARS: usize = 256;
+pub fn validate_tool_registration(tool: &dyn AgentTool) -> Result<(), ToolRegistrationError>;
+pub fn tool_registration_warning(tool: &dyn AgentTool) -> Option<String>;
+```
+
+The kernel DEFAULT stance is **hard-error**: an empty `name()`/`short_description()`
+or a short description exceeding `SHORT_DESCRIPTION_MAX_CHARS` returns `Err`. A
+missing `detailed_description()` is a non-fatal advisory (`tool_registration_warning`).
+phi-core exposes the primitive but does not force-invoke it on the hot path — the
+enforcement *stance* is a consumer-overridable default, so no policy is baked into
+the kernel.
 
 ## ToolContext
 
@@ -162,6 +201,51 @@ exposes no filesystem and works even when the agent is sandboxed/locked down.
 for the braking trio consumer-agnostically; a consumer that wants richer
 per-tool bodies supplies its own `tool_name → help_text` map via
 `ToolHelpTool::new(map)`.
+
+### Catalog-backed schema source (progressive mode) [EXISTS]
+
+KC-05 gives `tool_help` a second source: a build-time **catalog snapshot** of
+`tool_name → (detailed_description, full parameters_schema)`, assembled from the
+folded tool set at `build_config` time (installed automatically by
+`with_tool_help()`). When a tool is present in the snapshot, `tool_help(<name>)`
+returns its `detailed_description()` **plus its full JSON-Schema** — including an
+MCP tool's complete `inputSchema`. This is what makes [progressive
+disclosure](#progressive-tool-catalog-disclosure) safe: the reduced turn-1 catalog
+carries only a `{"type":"object"}` stub, and the model fetches the real schema on
+demand here. The static hand-written map path is retained as a fallback; the
+snapshot is cycle-free (it holds owned data, never a reference back to the tools).
+
+## Progressive tool-catalog disclosure
+
+**Status: [EXISTS]** (KC-05).
+
+By default phi-core serializes every tool's **full** `description()` +
+`parameters_schema()` into the turn-1 `tools[]` array on every turn. For an agent
+with many/large tools (e.g. MCP servers with big `inputSchema`s) this is a large
+per-turn token cost. Progressive disclosure lets a config-enabled agent send a
+**lean** turn-1 catalog — each entry carries the tool's `short_description()` + a
+minimal-valid `{"type":"object"}` `parameters` stub — and lets the model fetch a
+tool's full schema + detailed manual on demand via `tool_help`.
+
+It is controlled by one additive `AgentLoopConfig` field, **default OFF** so every
+existing agent's wire is byte-identical:
+
+```rust
+pub struct ProgressiveToolCatalog {
+    pub enabled: bool,        // default false — reduced branch is unreachable
+    pub min_tools: usize,     // default 8 — engage above this tool count
+    pub engage_on_large_schema: bool,  // default true — also engage when a large-schema tool is attached
+}
+```
+
+When `enabled`, the reduced branch engages iff `tools.len() > min_tools` **or**
+(`engage_on_large_schema` and any tool `has_large_schema()`), so small agents stay
+byte-unchanged even with progressive mode on. Set it via
+`BasicAgent::with_progressive_tool_catalog(...)`. The reduction happens at the
+kernel serializer bridge (`stream_assistant_response`), so `sub_agent` /
+`parallel` / `evaluation` inherit it automatically. The kernel ships the
+mechanism + conservative defaults; the per-agent policy that flips it is the
+consumer's.
 
 ## Error Handling
 

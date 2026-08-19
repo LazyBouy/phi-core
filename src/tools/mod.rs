@@ -57,7 +57,9 @@ pub use prun::{PrunRecord, PrunRequest, PrunTool, PrunVariant};
 pub use registry::ToolRegistry;
 pub use revert::{RevertRecord, RevertRequest, RevertTool};
 pub use search::SearchTool;
-pub use tool_help::ToolHelpTool;
+pub use tool_help::{
+    build_tool_catalog_snapshot, ToolCatalogEntry, ToolCatalogSnapshot, ToolHelpTool,
+};
 
 use crate::types::AgentTool;
 use std::sync::Arc;

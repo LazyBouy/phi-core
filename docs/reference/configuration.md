@@ -1,4 +1,4 @@
-<!-- Last verified: 2026-04-05 by Claude Code -->
+<!-- Last verified: 2026-08-19 by Claude Code (KC-05: add progressive_tool_catalog field) -->
 # Configuration
 
 ## AgentLoopConfig
@@ -45,10 +45,33 @@ pub struct AgentLoopConfig {
     pub context_translation: Option<Arc<dyn ContextTranslationStrategy>>,
     /// Shared state for PrunTool to communicate pruning requests to the loop.
     pub prun_pending: Option<Arc<Mutex<Vec<PrunRequest>>>>,
+    /// KC-05 (#109) — progressive tool-catalog disclosure. Default OFF (below).
+    pub progressive_tool_catalog: ProgressiveToolCatalog,
 }
 ```
 
 > **Note:** Compaction strategies (`in_memory_strategy`, `block_strategy`) are fields on `CompactionConfig` (inside `ContextConfig`), not on `AgentLoopConfig`. The `token_counter` for pluggable token counting is also on `ContextConfig`.
+
+### ProgressiveToolCatalog (KC-05) [EXISTS]
+
+Progressive tool-catalog disclosure — send a lean turn-1 `tools[]` (name +
+`short_description()` + a `{"type":"object"}` stub) and let the model fetch each
+tool's full schema + detailed manual on demand via `tool_help`. **Default OFF**
+so every existing agent's wire is byte-identical.
+
+```rust
+pub struct ProgressiveToolCatalog {
+    pub enabled: bool,        // default false — reduced branch unreachable
+    pub min_tools: usize,     // default 8 — engage above this tool count
+    pub engage_on_large_schema: bool,  // default true — engage when a large-schema tool is attached
+}
+// Default: { enabled: false, min_tools: 8, engage_on_large_schema: true }
+```
+
+When `enabled`, the reduced branch engages iff `tools.len() > min_tools` **or**
+(`engage_on_large_schema` and any tool `has_large_schema()`, e.g. MCP/OpenAPI adapters). Set via
+`BasicAgent::with_progressive_tool_catalog(...)`. Inherited automatically by
+`sub_agent` / `parallel` / `evaluation` (they reuse the same serializer bridge).
 
 ## StreamConfig
 

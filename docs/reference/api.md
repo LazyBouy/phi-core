@@ -1,4 +1,4 @@
-<!-- Last verified: 2026-06-03 by Claude Code (CC-10a: on_before_tool_execution return bool → ToolGate) -->
+<!-- Last verified: 2026-08-19 by Claude Code (KC-05: with_progressive_tool_catalog builder) -->
 # API Reference
 
 ## Top-Level Functions
@@ -120,6 +120,7 @@ All return `Self` for chaining (unless noted as `Result`).
 | `with_messages(msgs: Vec<AgentMessage>) -> Self` | Pre-load message history |
 | `with_cache_config(config: CacheConfig) -> Self` | Set prompt caching configuration |
 | `with_tool_execution(strategy: ToolExecutionStrategy) -> Self` | Set tool execution strategy (`Parallel`, `Sequential`, `Batched`) |
+| `with_progressive_tool_catalog(catalog: ProgressiveToolCatalog) -> Self` | KC-05 (#109) — configure progressive tool-catalog disclosure (default OFF; lean turn-1 catalog + on-demand schema via `tool_help`) |
 | `with_retry_config(config: RetryConfig) -> Self` | Set retry configuration |
 | `with_input_filter(filter: impl InputFilter) -> Self` | Add an input filter (runs on user messages before LLM call) |
 

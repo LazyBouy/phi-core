@@ -897,6 +897,38 @@ mod tests {
     }
 
     #[test]
+    fn kc05_reduced_stub_parameters_serialize_to_parameters() {
+        // KC-05 (#109) F4.b: a reduced-catalog tool ships a minimal-valid
+        // `{"type":"object"}` `parameters` stub; assert it round-trips cleanly to
+        // the OpenAI-compat `function.parameters` field (zero wire-type change).
+        let model_config = ModelConfig::openai("gpt-4o", "GPT-4o", "test");
+        let compat = OpenAiCompat::openai();
+        let config = StreamConfig {
+            model_config: model_config.clone(),
+            system_prompt: String::new(),
+            messages: vec![Message::user("go")],
+            tools: vec![ToolDefinition {
+                name: "revert_to_state".into(),
+                description: "Rewind the conversation to an earlier point (short).".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            }],
+            thinking_level: ThinkingLevel::Off,
+            max_tokens: Some(1024),
+            temperature: None,
+            cache_config: CacheConfig::default(),
+            response_format: ResponseFormat::Text,
+            provider_wire_sink: None,
+        };
+        let body = build_request_body(&config, &model_config, &compat);
+        assert_eq!(body["tools"][0]["function"]["name"], "revert_to_state");
+        assert_eq!(
+            body["tools"][0]["function"]["parameters"],
+            serde_json::json!({"type": "object"}),
+            "reduced stub parameters must serialize to function.parameters"
+        );
+    }
+
+    #[test]
     fn test_content_to_openai_simple_text() {
         let content = vec![Content::Text {
             text: "hello".into(),

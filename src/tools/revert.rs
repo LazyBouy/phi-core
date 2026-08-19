@@ -105,7 +105,19 @@ impl AgentTool for RevertTool {
     }
 
     fn description(&self) -> &str {
-        "Rewind the conversation to an earlier point and resume from there. The conversation is a TREE of nodes: each assistant/tool step is a node, tagged inline in the messages as [n0], [n1], [n2], … in order — those tags ARE the nodes, and the `step` arg names one of them. These `[nN]` tags are assigned by the system as it records each step; you only READ them to choose a `step` — do NOT write `[nN]` tags yourself in your replies (the system adds the next one for you). Naming a node X in `step` makes it the new tip: EVERY node strictly after X is dropped from your active context (the dropped messages stay in the forensic session log; only your working context changes). After reverting, CONTINUE FORWARD with your new approach from X — do NOT repeat the steps you just abandoned (the `summary` you supply is recorded on X to remind you what was tried). This is your CONTEXT-BUDGET tool: every revert SHRINKS the tail after X (reclaiming that context), so when you revert past a heavy tool exchange you abandoned (e.g. a big write_file you got wrong), its body leaves your context and your budget gets SMALLER. The four categories differ in how X itself is treated and how the summary persists: `failure` — a branch failed (the summary REPLACES X's content as a lesson; fades after a few turns); `tangent` — an exploration is finished (the summary REPLACES X's content as a finding; fades after a few turns); `completion` — a sub-task is sealed (the summary is ADDED to X after its original content, which is KEPT; stays pinned); `step-summary` — a long trunk needs a checkpoint (the summary is ADDED to X after its original content, which is KEPT; stays pinned). If you revert onto X and nothing comes after it (you're sealing the step you just finished), nothing shrinks — just continue. For the full tree model and worked examples, call tool_help(\"revert_to_state\")."
+        // KC-05 (#110): the lean wire one-liner (≤ SHORT_DESCRIPTION_MAX_CHARS).
+        // The full tree/node manual moved to `detailed_description()` /
+        // `tool_help` so a progressive turn-1 catalog no longer pays the ~1870
+        // eager chars every turn.
+        "Rewind the conversation to an earlier node and continue forward from there; everything after the chosen node leaves your active context (your context-budget tool). Call tool_help(\"revert_to_state\") for the full tree model and worked examples."
+    }
+
+    fn detailed_description(&self) -> Option<&str> {
+        // KC-05 (#110): the full tree/node model + four-category budget-lever
+        // manual, served on demand via `tool_help("revert_to_state")` and by the
+        // catalog-backed schema source. Kept identical to the historical eager
+        // `description()` body so no model-facing guidance is lost.
+        Some(REVERT_DETAILED)
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -206,6 +218,13 @@ impl AgentTool for RevertTool {
     }
 }
 
+/// KC-05 (#110): the full `revert_to_state` tree/node manual, moved off the eager
+/// `description()` wire one-liner. Served on demand via
+/// [`RevertTool::detailed_description`] + `tool_help("revert_to_state")`. Kept
+/// byte-identical to the historical `description()` body so no model-facing
+/// guidance is lost by the split.
+const REVERT_DETAILED: &str = "Rewind the conversation to an earlier point and resume from there. The conversation is a TREE of nodes: each assistant/tool step is a node, tagged inline in the messages as [n0], [n1], [n2], … in order — those tags ARE the nodes, and the `step` arg names one of them. These `[nN]` tags are assigned by the system as it records each step; you only READ them to choose a `step` — do NOT write `[nN]` tags yourself in your replies (the system adds the next one for you). Naming a node X in `step` makes it the new tip: EVERY node strictly after X is dropped from your active context (the dropped messages stay in the forensic session log; only your working context changes). After reverting, CONTINUE FORWARD with your new approach from X — do NOT repeat the steps you just abandoned (the `summary` you supply is recorded on X to remind you what was tried). This is your CONTEXT-BUDGET tool: every revert SHRINKS the tail after X (reclaiming that context), so when you revert past a heavy tool exchange you abandoned (e.g. a big write_file you got wrong), its body leaves your context and your budget gets SMALLER. The four categories differ in how X itself is treated and how the summary persists: `failure` — a branch failed (the summary REPLACES X's content as a lesson; fades after a few turns); `tangent` — an exploration is finished (the summary REPLACES X's content as a finding; fades after a few turns); `completion` — a sub-task is sealed (the summary is ADDED to X after its original content, which is KEPT; stays pinned); `step-summary` — a long trunk needs a checkpoint (the summary is ADDED to X after its original content, which is KEPT; stays pinned). If you revert onto X and nothing comes after it (you're sealing the step you just finished), nothing shrinks — just continue. For the full tree model and worked examples, call tool_help(\"revert_to_state\").";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,12 +235,16 @@ mod tests {
 
     #[test]
     fn description_teaches_tree_node_model_and_forward_continuation() {
-        // The self-description must teach the model the
-        // mental model it needs — (a) the conversation is a tree of nodes,
-        // (b) the [nN] markers ARE those nodes, (c) naming a node makes it the
-        // new tip dropping everything after, (d) continue FORWARD after revert.
+        // KC-05 (#110): the full mental model moved off the eager `description()`
+        // wire one-liner into `detailed_description()` (served on demand via
+        // `tool_help`); this carry-forward assertion is re-targeted there. It must
+        // still teach — (a) the conversation is a tree of nodes, (b) the [nN]
+        // markers ARE those nodes, (c) naming a node makes it the new tip dropping
+        // everything after, (d) continue FORWARD after revert.
         let t = tool();
-        let desc = t.description();
+        let desc = t
+            .detailed_description()
+            .expect("revert must expose a detailed manual");
         assert!(
             desc.contains("TREE of nodes"),
             "description must teach the tree model: {desc}"
@@ -242,14 +265,18 @@ mod tests {
 
     #[test]
     fn description_teaches_four_categories_as_budget_levers() {
-        // KC-03 (#81) — the description frames revert as the context-budget tool
+        // KC-03 (#81) — the manual frames revert as the context-budget tool
         // and states the simple tail-shrink contract: every revert SHRINKS the
         // tail after X (Rule 1); `failure`/`tangent` REPLACE X's content (Rule 2);
         // `completion`/`step-summary` ADD the summary after X's KEPT content
         // (Rule 2/2a). It must claim ONLY behavior the code now has — no "do NOT
         // shrink the tail" overstatement, no double-talk about reclamation.
+        // KC-05 (#110): re-targeted from `description()` to `detailed_description()`
+        // (the full body moved off the eager wire one-liner).
         let t = tool();
-        let desc = t.description();
+        let desc = t
+            .detailed_description()
+            .expect("revert must expose a detailed manual");
         assert!(
             desc.contains("CONTEXT-BUDGET tool") && desc.contains("SMALLER"),
             "description must frame revert as the context-budget tool: {desc}"
@@ -285,13 +312,54 @@ mod tests {
     #[test]
     fn description_names_the_tool_help_doc_reference() {
         // The locked read-channel (F-tooldoc-read-channel.a): the description
-        // points the model at the extended manual via tool_help(...).
+        // points the model at the extended manual via tool_help(...). KC-05 (#110):
+        // this stays on the SHORT `description()` — the lean wire one-liner must
+        // still direct the model to the full manual on demand.
         let t = tool();
         let desc = t.description();
         assert!(
             desc.contains("tool_help(\"revert_to_state\")"),
             "description must name the tool_help doc-reference: {desc}"
         );
+    }
+
+    #[test]
+    fn kc05_short_description_within_limit_and_detailed_present() {
+        // KC-05 (#110): the split makes `revert_to_state` pass registration
+        // validation — its short `description()` is now ≤ the char limit (was
+        // ~1870), and the full manual is available via `detailed_description()`.
+        let t = tool();
+        assert!(
+            t.description().chars().count() <= crate::types::SHORT_DESCRIPTION_MAX_CHARS,
+            "short description must be within the {}-char limit; got {}",
+            crate::types::SHORT_DESCRIPTION_MAX_CHARS,
+            t.description().chars().count()
+        );
+        assert!(
+            crate::types::validate_tool_registration(&t).is_ok(),
+            "revert_to_state must pass registration validation after the split"
+        );
+        let detailed = t
+            .detailed_description()
+            .expect("revert must expose a detailed manual");
+        assert!(
+            detailed.contains("TREE of nodes"),
+            "detailed body must carry the full tree model: {detailed}"
+        );
+    }
+
+    #[test]
+    fn kc05_default_tools_pass_registration_validation() {
+        // KC-05 (#110) enforcement: every kernel built-in in `default_tools()`
+        // satisfies the registration contract (name + short_description within the
+        // char limit). This is the CI guard that keeps catalogs lean-by-contract.
+        for t in crate::tools::default_tools() {
+            assert!(
+                crate::types::validate_tool_registration(t.as_ref()).is_ok(),
+                "built-in tool {:?} failed registration validation",
+                t.name()
+            );
+        }
     }
 
     #[test]

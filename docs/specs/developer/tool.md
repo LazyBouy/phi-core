@@ -1,4 +1,4 @@
-<!-- Last verified: 2026-06-03 by Claude Code (CC-10a: before_tool_execution returns ToolGate { Allow, Deny { reason } }; denied tool_result carries the reason) -->
+<!-- Last verified: 2026-08-19 by Claude Code (KC-05: short/detailed description split default methods + registration validation primitive + progressive tool-catalog config) -->
 # Tool System
 
 The tool system defines how agents interact with the external world. Every capability an agent has -- running shell commands, reading files, calling APIs, delegating to sub-agents -- is expressed as a tool implementing the `AgentTool` trait. The agent loop discovers tools by name from a registry, executes them with lifecycle events, and feeds results back to the LLM.
@@ -8,6 +8,8 @@ The tool system defines how agents interact with the external world. Every capab
 ```
 Tool [EXISTS]
 ├── AgentTool trait [EXISTS] — name, label, description, parameters_schema, execute
+│   └── default methods [EXISTS] — timeout, short_description, detailed_description, has_large_schema (KC-05)
+├── Registration validation [EXISTS] — SHORT_DESCRIPTION_MAX_CHARS + validate_tool_registration (KC-05, #110)
 ├── ToolContext [EXISTS] — tool_call_id, tool_name, cancel, on_update, on_progress
 ├── ToolResult [EXISTS] — content, details, child_loop_id
 ├── ToolError [EXISTS] — Failed/NotFound/InvalidArgs/Cancelled
@@ -32,6 +34,30 @@ The core extension point. Implement this trait to create custom tools.
 | `execute()` | `(params, ctx) -> Result<ToolResult, ToolError>` | [EXISTS] | Execute the tool with LLM-chosen arguments and system-injected context |
 
 **Design**: `params` (LLM input) and `ctx` (system environment) are deliberately separate parameters. `params` varies per call; `ctx` provides cancellation, streaming callbacks, and correlation IDs that are the same shape for every tool.
+
+### Default methods [EXISTS]
+
+All optional; existing impls compile unchanged (the `timeout()` precedent).
+
+| Method | Signature | Status | Description |
+|--------|-----------|--------|-------------|
+| `timeout()` | `-> Option<Duration>` | [EXISTS] | Per-tool execution timeout override |
+| `short_description()` | `-> &str` | [EXISTS] | KC-05 (#110) — lean model-facing one-liner for the progressive turn-1 catalog. Defaults to `description()` |
+| `detailed_description()` | `-> Option<&str>` | [EXISTS] | KC-05 (#110) — full extended manual served on demand via `tool_help`. Defaults to `None` |
+| `has_large_schema()` | `-> bool` | [EXISTS] | KC-05 (#109) — `true` for tools with large parameter schemas (MCP + OpenAPI adapters); drives the progressive `engage_on_large_schema` trigger. Defaults to `false` |
+
+### Registration validation [EXISTS]
+
+KC-05 (#110) adds a kernel primitive for the tool-registration contract:
+
+| Item | Signature | Status | Description |
+|------|-----------|--------|-------------|
+| `SHORT_DESCRIPTION_MAX_CHARS` | `const usize = 256` | [EXISTS] | Max `char`s for a `short_description()` |
+| `validate_tool_registration()` | `(&dyn AgentTool) -> Result<(), ToolRegistrationError>` | [EXISTS] | Hard-error (default stance) on empty name/short or over-limit short |
+| `tool_registration_warning()` | `(&dyn AgentTool) -> Option<String>` | [EXISTS] | Non-fatal advisory when `detailed_description()` is absent |
+| `ToolRegistrationError` | `enum { MissingName, MissingShortDescription, ShortDescriptionTooLong }` | [EXISTS] | Registration failure taxonomy |
+
+The kernel exposes the primitive but does not force-invoke it on the hot path — the enforcement **stance** (hard-error vs truncate-warn) is a consumer-overridable default, so phi-core bakes in no policy (kernel-minimality).
 
 ---
 

@@ -22,6 +22,51 @@
 
 use crate::types::{AgentTool, Content, ToolContext, ToolError, ToolResult};
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+
+/// One entry in a [`ToolCatalogSnapshot`]: a tool's detailed manual (if any) plus
+/// its full parameters JSON-Schema, captured at agent-build time (KC-05, #109).
+#[derive(Debug, Clone)]
+pub struct ToolCatalogEntry {
+    /// The tool's [`detailed_description`](AgentTool::detailed_description) at
+    /// snapshot time (`None` if the tool has no separate detailed body).
+    pub detailed: Option<String>,
+    /// The tool's full [`parameters_schema`](AgentTool::parameters_schema) at
+    /// snapshot time — including an MCP tool's complete `inputSchema`.
+    pub schema: serde_json::Value,
+}
+
+/// A build-time snapshot of `tool_name → (detailed manual, full schema)` for the
+/// tools an agent has installed (KC-05, #109).
+///
+/// Sourced from the folded tool Vec at `build_config` time via
+/// [`build_tool_catalog_snapshot`] — cycle-free, since it holds owned data rather
+/// than tool `Arc`s. It is what lets `tool_help(<name>)` serve a tool's full
+/// schema + detailed body on demand even when the reduced turn-1 catalog carried
+/// only a `{"type":"object"}` stub.
+pub type ToolCatalogSnapshot = BTreeMap<String, ToolCatalogEntry>;
+
+/// Build a [`ToolCatalogSnapshot`] from a folded tool set (KC-05, #109).
+///
+/// Captures each tool's [`detailed_description`](AgentTool::detailed_description)
+/// together with its full [`parameters_schema`](AgentTool::parameters_schema)
+/// (incl. MCP `inputSchema`). Called once the full tool Vec is known
+/// (`BasicAgent::build_config`). Cycle-free: the returned snapshot owns its data
+/// and holds no reference back to the tools.
+pub fn build_tool_catalog_snapshot(tools: &[Arc<dyn AgentTool>]) -> ToolCatalogSnapshot {
+    tools
+        .iter()
+        .map(|t| {
+            (
+                t.name().to_string(),
+                ToolCatalogEntry {
+                    detailed: t.detailed_description().map(|s| s.to_string()),
+                    schema: t.parameters_schema(),
+                },
+            )
+        })
+        .collect()
+}
 
 /// Built-in tool that returns a named tool's extended manual text.
 ///
@@ -30,6 +75,9 @@ use std::collections::BTreeMap;
 ///   for its own built-in tools (consumer-agnostic).
 /// - [`ToolHelpTool::new`] — a consumer-supplied `tool_name → help_text` map
 ///   (e.g. a downstream that wants richer worked-examples bodies).
+/// - [`ToolHelpTool::with_catalog`] — attach a build-time
+///   [`ToolCatalogSnapshot`] (KC-05) so `tool_help` serves each tool's full
+///   schema + detailed body on demand (the progressive-catalog path).
 ///
 /// Register on a `BasicAgent` via
 /// [`with_tool_help`](crate::agents::BasicAgent::with_tool_help).
@@ -37,12 +85,22 @@ pub struct ToolHelpTool {
     /// `tool_name → help_text`. A `BTreeMap` keeps the available-tools list in
     /// stable sorted order for the unknown-tool fallback message.
     help: BTreeMap<String, String>,
+    /// KC-05 (#109): shared slot for the build-time catalog snapshot. Empty until
+    /// installed. `BasicAgent::build_config` fills this (via interior mutability)
+    /// once the full tool set is folded; `execute()` prefers a catalog entry over
+    /// the static `help` map. A shared `Arc<Mutex<…>>` avoids downcasting the
+    /// type-erased tool back out of the agent's `Vec<Arc<dyn AgentTool>>`; it is
+    /// cycle-free because it carries snapshot DATA, not tool `Arc`s.
+    catalog: Arc<Mutex<Option<ToolCatalogSnapshot>>>,
 }
 
 impl ToolHelpTool {
     /// Construct with an explicit `tool_name → help_text` map.
     pub fn new(help: BTreeMap<String, String>) -> Self {
-        Self { help }
+        Self {
+            help,
+            catalog: Arc::new(Mutex::new(None)),
+        }
     }
 
     /// Construct with the kernel's short canonical manuals for its built-in
@@ -52,7 +110,10 @@ impl ToolHelpTool {
         help.insert("revert_to_state".to_string(), REVERT_HELP.to_string());
         help.insert("prun".to_string(), PRUN_HELP.to_string());
         help.insert("prun_with_memo".to_string(), PRUN_HELP.to_string());
-        Self { help }
+        Self {
+            help,
+            catalog: Arc::new(Mutex::new(None)),
+        }
     }
 
     /// Add or override a single tool's help text (builder-style). Lets a
@@ -60,6 +121,29 @@ impl ToolHelpTool {
     pub fn with_help(mut self, tool_name: impl Into<String>, text: impl Into<String>) -> Self {
         self.help.insert(tool_name.into(), text.into());
         self
+    }
+
+    /// Pre-fill the build-time catalog snapshot (builder-style; KC-05, #109).
+    ///
+    /// After this, `tool_help(<name>)` serves the named tool's full
+    /// `parameters_schema()` + detailed body from the snapshot, falling back to
+    /// the static help map for the manual body when a tool has no
+    /// `detailed_description()`. Primarily for direct construction + tests; the
+    /// `BasicAgent` path fills the same slot at `build_config` time via
+    /// [`catalog_slot`](Self::catalog_slot).
+    pub fn with_catalog(self, snapshot: ToolCatalogSnapshot) -> Self {
+        *self.catalog.lock().unwrap() = Some(snapshot);
+        self
+    }
+
+    /// Return a clone of the shared catalog slot handle (KC-05, #109).
+    ///
+    /// `BasicAgent::with_tool_help` grabs this before type-erasing the tool into
+    /// its `Vec<Arc<dyn AgentTool>>`, then `build_config` writes the freshly-built
+    /// [`ToolCatalogSnapshot`] into it once the full tool set is folded — so the
+    /// tool serves catalog-backed help without ever being downcast back out.
+    pub fn catalog_slot(&self) -> Arc<Mutex<Option<ToolCatalogSnapshot>>> {
+        self.catalog.clone()
     }
 }
 
@@ -100,19 +184,51 @@ impl AgentTool for ToolHelpTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidArgs("tool_name is required".to_string()))?;
 
-        let text = match self.help.get(tool_name) {
-            Some(manual) => manual.clone(),
-            None => {
-                let available: Vec<&str> = self.help.keys().map(|s| s.as_str()).collect();
-                format!(
-                    "No extended manual is registered for {:?}. Tools with a manual: {}.",
-                    tool_name,
-                    if available.is_empty() {
-                        "(none)".to_string()
-                    } else {
-                        available.join(", ")
+        // KC-05 (#109): prefer the build-time catalog snapshot when installed —
+        // serve the tool's full parameters schema + its detailed body (falling
+        // back to the static manual for the body when the tool has no
+        // detailed_description). This is what makes a reduced turn-1 catalog safe:
+        // the model fetches the real schema on demand here.
+        let catalog_entry = self
+            .catalog
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|snapshot| snapshot.get(tool_name).cloned());
+
+        let text = if let Some(entry) = catalog_entry {
+            let body = entry.detailed.or_else(|| self.help.get(tool_name).cloned());
+            let mut out = String::new();
+            if let Some(b) = body {
+                out.push_str(&b);
+                out.push_str("\n\n");
+            }
+            out.push_str("PARAMETERS (JSON Schema):\n");
+            out.push_str(
+                &serde_json::to_string_pretty(&entry.schema)
+                    .unwrap_or_else(|_| entry.schema.to_string()),
+            );
+            out
+        } else {
+            match self.help.get(tool_name) {
+                Some(manual) => manual.clone(),
+                None => {
+                    // Available list = static-map keys ∪ catalog keys (sorted).
+                    let mut available: std::collections::BTreeSet<String> =
+                        self.help.keys().cloned().collect();
+                    if let Some(snapshot) = self.catalog.lock().unwrap().as_ref() {
+                        available.extend(snapshot.keys().cloned());
                     }
-                )
+                    format!(
+                        "No extended manual is registered for {:?}. Tools with a manual: {}.",
+                        tool_name,
+                        if available.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            available.into_iter().collect::<Vec<_>>().join(", ")
+                        }
+                    )
+                }
             }
         };
 
@@ -264,5 +380,154 @@ mod tests {
             _ => panic!("expected text content"),
         };
         assert_eq!(text, "my custom manual");
+    }
+
+    // ── Tier D — catalog-backed schema source (KC-05, #109) ─────────────────
+
+    fn text_of(result: &ToolResult) -> String {
+        match &result.content[0] {
+            Content::Text { text } => text.clone(),
+            _ => panic!("expected text content"),
+        }
+    }
+
+    struct SchemaTool {
+        name: String,
+        detailed: Option<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl AgentTool for SchemaTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn label(&self) -> &str {
+            "Schema"
+        }
+        fn description(&self) -> &str {
+            "a short one-liner"
+        }
+        fn detailed_description(&self) -> Option<&str> {
+            self.detailed.as_deref()
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"]
+            })
+        }
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: ToolContext,
+        ) -> Result<ToolResult, ToolError> {
+            Ok(ToolResult {
+                content: vec![],
+                details: serde_json::Value::Null,
+                child_loop_id: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn catalog_serves_detailed_and_full_schema() {
+        let tool = SchemaTool {
+            name: "my_tool".into(),
+            detailed: Some("MY DETAILED MANUAL BODY".into()),
+        };
+        let snapshot = build_tool_catalog_snapshot(&[Arc::new(tool) as Arc<dyn AgentTool>]);
+        let help = ToolHelpTool::with_default_help().with_catalog(snapshot);
+        let result = help
+            .execute(serde_json::json!({ "tool_name": "my_tool" }), ctx())
+            .await
+            .unwrap();
+        let text = text_of(&result);
+        assert!(text.contains("MY DETAILED MANUAL BODY"), "{text}");
+        assert!(text.contains("PARAMETERS (JSON Schema)"), "{text}");
+        // The FULL schema is served on demand (the reduced wire only had a stub).
+        assert!(
+            text.contains("\"path\""),
+            "must include the full schema: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn catalog_serves_mcp_full_input_schema() {
+        // An MCP-shaped adapter: has_large_schema() = true + a full inputSchema.
+        struct McpShaped;
+        #[async_trait::async_trait]
+        impl AgentTool for McpShaped {
+            fn name(&self) -> &str {
+                "mcp_search"
+            }
+            fn label(&self) -> &str {
+                "MCP Search"
+            }
+            fn description(&self) -> &str {
+                "remote search"
+            }
+            fn has_large_schema(&self) -> bool {
+                true
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "limit": {"type": "integer"}
+                    },
+                    "required": ["query"]
+                })
+            }
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: ToolContext,
+            ) -> Result<ToolResult, ToolError> {
+                Ok(ToolResult {
+                    content: vec![],
+                    details: serde_json::Value::Null,
+                    child_loop_id: None,
+                })
+            }
+        }
+
+        let snapshot = build_tool_catalog_snapshot(&[Arc::new(McpShaped) as Arc<dyn AgentTool>]);
+        let help = ToolHelpTool::new(BTreeMap::new()).with_catalog(snapshot);
+        let result = help
+            .execute(serde_json::json!({ "tool_name": "mcp_search" }), ctx())
+            .await
+            .unwrap();
+        let text = text_of(&result);
+        // The MCP tool's full inputSchema is served (both properties present).
+        assert!(
+            text.contains("\"query\"") && text.contains("\"limit\""),
+            "MCP full inputSchema must be served: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn catalog_miss_falls_back_to_static_map() {
+        // A catalog is installed but does NOT contain revert_to_state; the static
+        // hand-written REVERT_HELP manual is still served (fallback preserved).
+        let mut snapshot = ToolCatalogSnapshot::new();
+        snapshot.insert(
+            "foo".to_string(),
+            ToolCatalogEntry {
+                detailed: Some("foo body".into()),
+                schema: serde_json::json!({"type": "object"}),
+            },
+        );
+        let help = ToolHelpTool::with_default_help().with_catalog(snapshot);
+        let result = help
+            .execute(serde_json::json!({ "tool_name": "revert_to_state" }), ctx())
+            .await
+            .unwrap();
+        let text = text_of(&result);
+        assert!(
+            text.contains("TREE of nodes"),
+            "static-map fallback must still serve REVERT_HELP: {text}"
+        );
     }
 }

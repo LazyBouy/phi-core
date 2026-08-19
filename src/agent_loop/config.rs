@@ -380,4 +380,67 @@ pub struct AgentLoopConfig {
     /// cost-analysis, debug-tee). The sink is wired to `StreamConfig` at
     /// `streaming.rs`'s per-attempt config build.
     pub provider_wire_sink: Option<Arc<dyn ProviderWireSink>>,
+
+    /// KC-05 (#109) — progressive tool-catalog disclosure knob. Default OFF
+    /// ([`ProgressiveToolCatalog::default`]), so the turn-1 `tools[]` is
+    /// byte-identical to historical behaviour until a consumer flips `enabled`.
+    /// Consumed at the tool serializer bridge (`stream_assistant_response`): when
+    /// engaged, each catalog entry carries the tool's `short_description()` + a
+    /// minimal-valid `{"type":"object"}` `parameters` stub, and the model fetches
+    /// the full schema + detailed manual on demand via `tool_help`. Inherited by
+    /// `sub_agent`/`parallel`/`evaluation` (they reuse the same bridge). The
+    /// per-consumer policy that flips this lives downstream — the kernel bakes in
+    /// no policy.
+    pub progressive_tool_catalog: ProgressiveToolCatalog,
+}
+
+/// Progressive tool-catalog disclosure configuration (KC-05, #109).
+///
+/// Bundles the F5 knobs into one struct so the [`AgentLoopConfig`] construction
+/// cascade stays a single field. Default is fully OFF — the reduced serializer
+/// branch is unreachable until [`enabled`](Self::enabled) is flipped, which is the
+/// load-bearing back-compat guard (the golden-OFF byte-for-byte test pins it).
+///
+/// When enabled, the reduced catalog engages iff the tool count strictly exceeds
+/// [`min_tools`](Self::min_tools) **or** ([`engage_on_large_schema`](Self::engage_on_large_schema)
+/// and any attached tool carries a large parameter schema) — so small agents stay
+/// byte-unchanged even when a consumer turns progressive mode on. The kernel ships
+/// conservative defaults; per-agent tuning is the consumer's policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgressiveToolCatalog {
+    /// Master switch. `false` (the default) ⇒ the reduced branch is unreachable
+    /// and the turn-1 `tools[]` is byte-identical to the full-render path.
+    pub enabled: bool,
+    /// Engage the reduced catalog when the tool count strictly exceeds this.
+    /// Default `8` — keeps small agents full even when `enabled`.
+    pub min_tools: usize,
+    /// Also engage (regardless of count) when any attached tool carries a large
+    /// parameter schema ([`AgentTool::has_large_schema`](crate::types::AgentTool::has_large_schema))
+    /// — the P0 magnification case (MCP `inputSchema`s, OpenAPI-generated schemas).
+    /// Default `true`.
+    pub engage_on_large_schema: bool,
+}
+
+impl Default for ProgressiveToolCatalog {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_tools: 8,
+            engage_on_large_schema: true,
+        }
+    }
+}
+
+impl ProgressiveToolCatalog {
+    /// Whether the reduced catalog engages for a given tool set. This is the
+    /// single engage predicate consumed by the serializer bridge — keeping the
+    /// count/large-schema logic in one place makes it unit-testable and keeps
+    /// `streaming.rs` lean.
+    pub fn engages(&self, tools: &[Arc<dyn crate::types::AgentTool>]) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        tools.len() > self.min_tools
+            || (self.engage_on_large_schema && tools.iter().any(|t| t.has_large_schema()))
+    }
 }
