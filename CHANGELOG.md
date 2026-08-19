@@ -8,6 +8,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-08-19
+
+**Progressive tool-catalog disclosure + selectable skill-prompt layout, plus braking UX & on-demand tool documentation (general-merit; surfaced by i-phi e2e testing).**
+
+- **Progressive tool-catalog disclosure + tool-registration contract** (#110 + #109;
+  `types/tool.rs` + `agent_loop/{config,streaming}.rs` + `tools/tool_help.rs` +
+  `tools/revert.rs`). The `AgentTool` trait gains `short_description()` +
+  `detailed_description()` + a `has_large_schema()` default method (all
+  backward-compatible — the `timeout()` default-method precedent; existing impls
+  unchanged). A new `AgentLoopConfig.progressive_tool_catalog` knob
+  (`ProgressiveToolCatalog { enabled, min_tools, engage_on_large_schema }`,
+  **default OFF**) gates a reduced turn-1 `tools[]` render: when engaged (tool count
+  above `min_tools`, or a large-schema tool such as an MCP/OpenAPI adapter is
+  attached), each catalog entry carries the tool's `short_description()` + a
+  minimal-valid `{"type":"object"}` `parameters` stub instead of the full schema, and
+  the model fetches the full `parameters_schema()` + detailed manual on demand via
+  `tool_help` (served from a cycle-free build-time catalog snapshot). `revert_to_state`'s
+  long manual is split out of `description()` into `detailed_description()`. A
+  `SHORT_DESCRIPTION_MAX_CHARS` const + `validate_tool_registration()` primitive let a
+  consumer keep catalogs lean-by-contract (hard-error default; consumer-overridable
+  stance). **Default OFF ⇒ every existing turn-1 `tools[]` wire is byte-identical.**
+  Also fixes 2 latent `openapi`-feature bugs surfaced under `--all-features` (a
+  never-compiling doctest; `derivable_impls`). See ADR-0005.
+
+- **Selectable skill-prompt layout — XML default + opt-in YAML** (#78;
+  `context/skills.rs`). A new `SkillPromptFormat { Xml, Yaml }` (default `Xml`) +
+  `format_for_prompt_as(format)` let a caller opt into a lighter YAML
+  `<available_skills>` block for token-tight deployments; `format_for_prompt()` stays
+  byte-for-byte XML so existing callers are untouched. Wired via
+  `BasicAgent::with_skills_format(set, format)`. See ADR-0004.
+
 **Braking UX + on-demand tool documentation (general-merit; surfaced by i-phi e2e testing).**
 
 - **Revert steering dedup — the `[continue_after_revert]` message references the
