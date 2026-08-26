@@ -6,11 +6,31 @@ In tests, we don't want to make real HTTP calls to Anthropic or OpenAI.
 `MockProvider` is a "test double" (specifically a "stub"): it has the same
 interface as a real provider but returns pre-scripted responses.
 
-Usage pattern in tests:
+Usage pattern in tests (default one-shot):
   let provider = MockProvider::texts(vec!["Hello", "World"]);
   // first agent loop call → "Hello"
   // second agent loop call → "World"
   // third call → "(no more mock responses)" fallback
+
+OPT-IN REPEAT/CYCLE MODE (`with_repeat` / `repeating`):
+  let provider = MockProvider::repeating(vec![tool_call, terminal_text]);
+  // the queue cycles VERBATIM instead of exhausting: each consumed response is
+  // re-queued to the back, so a single scripted session re-emits across turns.
+  // `new`/`text`/`texts` keep `repeat` OFF → byte-behaviour-identical one-shot.
+
+CONSUMER CADENCE CONTRACT (read before enabling repeat):
+  The kernel cycles the supplied `Vec<MockResponse>` VERBATIM — it never reorders
+  the queue and never synthesizes a terminal response. So a one-tool-call-per-turn
+  cadence is the CONSUMER's responsibility: the repeating unit must be exactly
+  `[ToolCalls, Text]` (tool call FIRST, terminal non-tool `Text` SECOND), because
+  one interactive turn consumes exactly two queue items (the tool round + a
+  terminal round that returns a non-tool text to end the turn).
+    - `[ToolCalls, Text]` → one tool call re-emitted every turn (the target cadence).
+    - A LEADING text (`[Text, ToolCalls]`) makes the first turn a dud, then self-corrects.
+    - A `[ToolCalls]`-ONLY repeating queue is an UNBOUNDED tool loop: under repeat the
+      empty→`"(no more mock responses)"` safety-net is bypassed, so no terminal round
+      ever ends the turn — the loop is halted only by `max_turns`. Always include a
+      terminal `Text` in the repeating unit.
 
 RUST QUIRK: `std::sync::Mutex<Vec<MockResponse>>` — interior mutability for shared state
 
@@ -68,14 +88,50 @@ pub struct MockToolCall {
 pub struct MockProvider {
     /// Queue of responses to return, in order. Protected by a Mutex for interior mutability.
     responses: std::sync::Mutex<Vec<MockResponse>>,
+    /// Opt-in repeat/cycle mode. When `false` (the default via `new`/`text`/`texts`) the
+    /// queue is consumed destructively and exhausts to the `"(no more mock responses)"`
+    /// fallback. When `true` (via `with_repeat`/`repeating`) each consumed response is
+    /// re-queued to the back, so the flat `Vec<MockResponse>` cycles verbatim and never
+    /// exhausts while non-empty. See the module docs for the CONSUMER cadence contract.
+    repeat: bool,
 }
 
 impl MockProvider {
-    /// Create a provider from a sequence of responses.
+    /// Create a provider from a sequence of responses (one-shot; exhausts to the fallback).
     pub fn new(responses: Vec<MockResponse>) -> Self {
         Self {
             responses: std::sync::Mutex::new(responses),
+            repeat: false,
         }
+    }
+
+    /// Create a provider from a sequence of responses, optionally cycling the queue.
+    ///
+    /// With `repeat == false` this is byte-behaviour-identical to [`MockProvider::new`]
+    /// (one-shot destructive consume → `"(no more mock responses)"` fallback once the
+    /// queue empties). With `repeat == true` the queue cycles verbatim: each consumed
+    /// response is re-queued to the back, so a single scripted session can re-emit its
+    /// responses across many turns without ever hitting the fallback.
+    ///
+    /// The queue is cycled VERBATIM (order-agnostic; the kernel never reorders it), so a
+    /// correct one-tool-call-per-turn cadence is the CONSUMER's responsibility — the
+    /// repeating unit must be exactly `[ToolCalls, Text]` (tool call FIRST, terminal
+    /// non-tool `Text` SECOND). A `[ToolCalls]`-only repeating queue is an UNBOUNDED tool
+    /// loop the kernel will NOT auto-terminate (see the module-level CONSUMER contract).
+    pub fn with_repeat(responses: Vec<MockResponse>, repeat: bool) -> Self {
+        Self {
+            responses: std::sync::Mutex::new(responses),
+            repeat,
+        }
+    }
+
+    /// Convenience: a repeating provider whose queue cycles verbatim (= `with_repeat(responses, true)`).
+    ///
+    /// Mirrors the `text`/`texts` convenience precedent. The CONSUMER cadence contract of
+    /// [`MockProvider::with_repeat`] applies — supply `[ToolCalls, Text]` with a terminal
+    /// text to sustain a one-tool-call-per-turn session.
+    pub fn repeating(responses: Vec<MockResponse>) -> Self {
+        Self::with_repeat(responses, true)
     }
 
     /// Convenience: provider that always returns the same text.
@@ -150,7 +206,14 @@ impl StreamProvider for MockProvider {
                 // Fallback: tests that run more turns than responses get a safe default
                 MockResponse::Text("(no more mock responses)".into())
             } else {
-                responses.remove(0) // pop the front response
+                let front = responses.remove(0); // pop the front response
+                if self.repeat {
+                    // Repeat/cycle mode: re-queue the popped response to the back so the
+                    // flat queue cycles verbatim (never exhausts while non-empty). The
+                    // `repeat == false` path above is byte-identical to `responses.remove(0)`.
+                    responses.push(front.clone());
+                }
+                front
             }
             // MutexGuard dropped here — lock released
         };
@@ -270,5 +333,104 @@ impl StreamProvider for MockProvider {
             message: message.clone(),
         });
         Ok(message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::ModelConfig;
+    use tokio_util::sync::CancellationToken;
+
+    fn cfg() -> StreamConfig {
+        StreamConfig {
+            model_config: ModelConfig::anthropic("mock", "mock", "test"),
+            system_prompt: String::new(),
+            messages: vec![Message::user("hi")],
+            tools: vec![],
+            thinking_level: ThinkingLevel::Off,
+            max_tokens: None,
+            temperature: None,
+            cache_config: CacheConfig::default(),
+            response_format: ResponseFormat::Text,
+            provider_wire_sink: None,
+        }
+    }
+
+    /// Drive `stream()` once and return the leading assistant text.
+    async fn next_text(p: &MockProvider) -> String {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let msg = p
+            .stream(cfg(), tx, CancellationToken::new())
+            .await
+            .expect("mock stream never errors without cancellation");
+        match msg {
+            Message::Assistant { content, .. } => match content.first() {
+                Some(Content::Text { text }) => text.clone(),
+                other => panic!("expected leading text content, got {other:?}"),
+            },
+            other => panic!("expected assistant message, got {other:?}"),
+        }
+    }
+
+    /// Collect the assistant text of `n` successive `stream()` calls.
+    async fn texts_of(p: &MockProvider, n: usize) -> Vec<String> {
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            out.push(next_text(p).await);
+        }
+        out
+    }
+
+    // Tier A — back-compat: `new()` consumes destructively then exhausts to the fallback
+    // (byte-behaviour-identical to the pre-KC-06 provider; repeat defaults OFF).
+    #[tokio::test]
+    async fn mock_new_is_one_shot_and_exhausts() {
+        let p = MockProvider::new(vec![
+            MockResponse::Text("a".into()),
+            MockResponse::Text("b".into()),
+        ]);
+        assert_eq!(
+            texts_of(&p, 3).await,
+            vec!["a", "b", "(no more mock responses)"],
+        );
+    }
+
+    // Tier A — back-compat: `with_repeat(_, false)` is byte-behaviour-identical to `new()`.
+    #[tokio::test]
+    async fn mock_with_repeat_false_matches_new_one_shot() {
+        let p = MockProvider::with_repeat(
+            vec![
+                MockResponse::Text("a".into()),
+                MockResponse::Text("b".into()),
+            ],
+            false,
+        );
+        assert_eq!(
+            texts_of(&p, 3).await,
+            vec!["a", "b", "(no more mock responses)"],
+        );
+    }
+
+    // Tier F — API equivalence: `repeating(r)` ≡ `with_repeat(r, true)` (cycle verbatim);
+    // `with_repeat(r, false)` ≡ `new(r)` (one-shot then exhaust).
+    #[tokio::test]
+    async fn mock_repeat_api_equivalence() {
+        // repeating(r) cycles verbatim, identical to with_repeat(r, true).
+        let repeating = MockProvider::repeating(vec![MockResponse::Text("x".into())]);
+        let with_true = MockProvider::with_repeat(vec![MockResponse::Text("x".into())], true);
+        let rep_seq = texts_of(&repeating, 3).await;
+        assert_eq!(rep_seq, texts_of(&with_true, 3).await);
+        assert_eq!(rep_seq, vec!["x", "x", "x"]);
+
+        // with_repeat(r, false) one-shots then exhausts, identical to new(r).
+        let with_false = MockProvider::with_repeat(vec![MockResponse::Text("x".into())], false);
+        let plain_new = MockProvider::new(vec![MockResponse::Text("x".into())]);
+        let false_seq = texts_of(&with_false, 3).await;
+        assert_eq!(false_seq, texts_of(&plain_new, 3).await);
+        assert_eq!(
+            false_seq,
+            vec!["x", "(no more mock responses)", "(no more mock responses)"],
+        );
     }
 }
